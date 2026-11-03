@@ -12,6 +12,8 @@ from SWE-bench Verified. It measures the next response only: no tools execute,
 no generated history passes to another request, and no SWE-bench score is computed.
 The [fixture manifest and extraction notes](../../../crates/bench/fixtures/coding_agent/README.md)
 record the sources, revisions, turns and hashes.
+The [first RTX 5080 result](../../findings/2026-11-03-coding-agent-5080-baseline.md)
+records the measured configuration, per-request rates and separate capacity pass.
 
 Build the server and bench on the GPU machine, using the
 [remote entry point](remote-dev.md) from the Laptop:
@@ -64,7 +66,9 @@ The clock starts **inside the scheduler at the final prefill chunk**, before
 admission onto the decode lane and the first decode round, and stops on the
 model thread at scheduler completion. It includes all draft/verify rounds,
 sampling, KV updates and intervening scheduling. The numerator counts every
-committed output token, including reasoning, text, tool syntax and EOS. The
+output token, including reasoning, text and tool syntax, matching
+`usage.completion_tokens`. Runtime strips the terminal EOS from that count;
+the complete round that encounters EOS remains in the time window. The
 first anchor is sampled in prefill and committed in the first timed decode
 round; it is included, and there is no `N-1` correction.
 

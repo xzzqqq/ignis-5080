@@ -16,7 +16,9 @@ pub(crate) struct GenerationTiming {
     /// decode round, draft/verify, sampling, KV work and scheduling.
     pub decode_ms: f64,
     pub elapsed_ms: f64,
-    /// Committed scheduler tokens, including reasoning, tool syntax and EOS.
+    /// Scheduler output tokens, including reasoning and tool syntax. Like
+    /// usage.completion_tokens, excludes the terminal EOS stripped by runtime;
+    /// the round that encounters EOS is still inside decode_ms.
     /// The prefill-sampled anchor is committed by the first timed round.
     pub output_tokens: u32,
     pub computed_prefill_tokens: u32,
@@ -94,17 +96,19 @@ mod tests {
         }, done);
         // All events can arrive together AFTER the first speculative round.
         clock.observe(&SchedEvent::PrefillComplete { request: 0, at: prefilled }, done);
-        for token in 0..8 {
+        // The runtime stripped a terminal EOS from the eight-token round:
+        // seven output events, but the WHOLE round remains timed.
+        for token in 0..7 {
             clock.observe(&SchedEvent::Token { request: 0, token }, done);
         }
         clock.observe(&SchedEvent::Done {
-            request: 0, tokens: 8, reason: FinishReason::Stop,
+            request: 0, tokens: 7, reason: FinishReason::Stop,
             spec: Some(SpecCounters { rounds: 1, drafted: 7, accepted: 7, ..Default::default() }),
             readout: None, attention: None, drawn: None, thinking: None, reasoning_redirected_at: None,
         }, done);
         let t = result.get().unwrap();
         assert_eq!((t.prefill_ms, t.decode_ms, t.elapsed_ms), (10.0, 40.0, 50.0));
-        assert_eq!((t.output_tokens, t.computed_prefill_tokens, t.prefill_passes), (8, 128, 1));
+        assert_eq!((t.output_tokens, t.computed_prefill_tokens, t.prefill_passes), (7, 128, 1));
         assert_eq!(t.speculative.as_ref().unwrap().accepted, 7);
     }
 }
