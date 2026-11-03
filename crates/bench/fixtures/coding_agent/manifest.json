@@ -1,0 +1,100 @@
+{
+  "schema": "ignis-coding-agent-fixtures/1",
+  "submission": "20250522_sweagent_claude-4-sonnet-20250514",
+  "experiments_revision": "40f164d5b8f1d249bf95a6df8b74b577fd8e519d",
+  "agent_version": "1.1.0",
+  "reported_agent_revision": "383965cc0e358f8e48b841d9b970ac96fe9cd335",
+  "reconstruction_revision": "0f3acafacabc0def8cc76b4e48acb4b6cf302cb9",
+  "revision_note": "The run-reported agent commit is not publicly resolvable. Message projection and tool schema construction use public v1.1.0; every tool description and argument is checked against the archived replay_config.command_docs. S3 has no VersionId; SHA-256 pins the exact source bytes.",
+  "selection_rule": "Three repositories and bug mechanisms, chosen before running Ignis; a query after reading relevant implementation/tests, before editing the target implementation. No speed, acceptance or resolution-based filtering.",
+  "extraction": "scripts/extract_coding_agent.py: use only trajectory[query_index].query; project via v1.1.0 _history_to_messages; reconstruct schemas via Command.get_function_calling_tool. Cache hints retained as metadata, unused by Ignis. No current response/observation or future history.",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/sweagent/agent/models.py",
+      "local_file": "sweagent_agent_models.py",
+      "sha256": "ffce8e513d2ce9967a95acfb6c67c7654a05bbd0c9942ace8e779b9084d47596"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/sweagent/tools/tools.py",
+      "local_file": "sweagent_tools_tools.py",
+      "sha256": "970b3ca5e01abe2e9cdae42f72465aad81dfbac317b85c233f22c22dfb8ab00b"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/sweagent/tools/commands.py",
+      "local_file": "sweagent_tools_commands.py",
+      "sha256": "c8896228d54eb9d466d3fe5042e557dd93f7d7117419a299c0b406c8bcc60dff"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/tools/edit_anthropic/config.yaml",
+      "local_file": "tools_edit_anthropic_config.yaml",
+      "sha256": "f01b59da4df1c25ab2ee3b1284efe4025c0a999e2f6a3a9ab2930a499e04ea09"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/tools/review_on_submit_m/config.yaml",
+      "local_file": "tools_review_on_submit_m_config.yaml",
+      "sha256": "d2fbb69ebfa3b33bdff43dd6b78df1d29c6a2e562eefe0a32ce35058f2a14031"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/astropy__astropy-12907/astropy__astropy-12907.traj",
+      "local_file": "astropy__astropy-12907.traj",
+      "sha256": "76b128ee2e004d4dffbf80c8450515d67a32c7be8b5d78a1714bfc6a0a49a294"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/astropy__astropy-12907/astropy__astropy-12907.config.yaml",
+      "local_file": "astropy__astropy-12907.config.yaml",
+      "sha256": "e3fca261fa2941798c63ce009ca4daae80ab7709cae8b5c080f653fbfe33efa2"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/django__django-10097/django__django-10097.traj",
+      "local_file": "django__django-10097.traj",
+      "sha256": "4ed2afd6ee2fff3ed7412de39f79061674d8082fb9e918a67f6c7939e5010748"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/django__django-10097/django__django-10097.config.yaml",
+      "local_file": "django__django-10097.config.yaml",
+      "sha256": "663e8d4ede8e2e7c20cf04e74c49f331a943a8870d3d10c3ae913a04b09a914d"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sympy__sympy-11618/sympy__sympy-11618.traj",
+      "local_file": "sympy__sympy-11618.traj",
+      "sha256": "7e3acef0d4ab15e4d5b4d02a67627fb680d871978c832d2a94d9c25f1076c7b0"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sympy__sympy-11618/sympy__sympy-11618.config.yaml",
+      "local_file": "sympy__sympy-11618.config.yaml",
+      "sha256": "1a99924307104af1aeffcdef00a8299660362c270c726feb72e970466e57e861"
+    }
+  ],
+  "fixtures": [
+    {
+      "task_id": "astropy__astropy-12907",
+      "task_revision": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
+      "query_index": 16,
+      "turn_id": "trajectory[16].query",
+      "selection_reason": "Nested CompoundModel separability: source, tests, reproduction and matrix debugging are visible; next round is the target source edit.",
+      "file": "astropy__astropy-12907.json",
+      "sha256": "21a7d230baa23d348a737c71d93662d431d9f08aa52132cc08377427ab5ca7d4",
+      "message_count": 34
+    },
+    {
+      "task_id": "django__django-10097",
+      "task_revision": "b9cf764be62e77b4777b3a75ec256f6209a57671",
+      "query_index": 13,
+      "turn_id": "trajectory[13].query",
+      "selection_reason": "URLValidator credential characters: validator, URL fixtures and reproduction output are visible; next round edits the regex.",
+      "file": "django__django-10097.json",
+      "sha256": "6877d43ca8dd8edb9908be291fa4df8da68453e3a37c799435fcc008777b2ce9",
+      "message_count": 28
+    },
+    {
+      "task_id": "sympy__sympy-11618",
+      "task_revision": "360290c4c401e386db60723ddb0109ed499c9f6e",
+      "query_index": 15,
+      "turn_id": "trajectory[15].query",
+      "selection_reason": "Point distance across dimensions: point implementation, tests and reproduction are visible; next round edits distance.",
+      "file": "sympy__sympy-11618.json",
+      "sha256": "0ac09494a44dac1bb8c50f636a967f245c7f37029f8d73789b300582adaea211",
+      "message_count": 32
+    }
+  ]
+}

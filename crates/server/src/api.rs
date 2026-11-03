@@ -2364,6 +2364,10 @@ struct ChatCompletionsRequest {
     /// measurement window rather than by the model. Requires `max_tokens`.
     #[serde(default)]
     ignore_eos: bool,
+    /// Report model-thread phase timings in `usage.ignis_timing`. Requires
+    /// non-streaming, no stop sequences, and the loop guard off.
+    #[serde(default)]
+    ignis_timing: bool,
     #[serde(flatten)]
     sampling: SamplingRequestFields,
     /// The thinking controls (GitHub #68) — kept as raw JSON so the wire
@@ -2419,7 +2423,9 @@ struct StreamOptions {
     tag = "chat",
     operation_id = "chat_completions",
     summary = "A chat completion, streaming or not",
-    description = "The OpenAI chat-completions contract, plus what ignis adds to it: `top_k`, `ignore_eos`, the thinking controls (`enable_thinking`, `reasoning_effort`, `preserve_thinking`, `chat_template_kwargs`, `thinking_budget`), and the `class` lane tag the scheduler admits under.
+    description = "The OpenAI chat-completions contract, plus what ignis adds to it: `top_k`, `ignore_eos`, `ignis_timing`, the thinking controls (`enable_thinking`, `reasoning_effort`, `preserve_thinking`, `chat_template_kwargs`, `thinking_budget`), and the `class` lane tag the scheduler admits under.
+
+`ignis_timing: true` requires non-streaming, no stop strings, and the loop guard off. A completed response adds `usage.ignis_timing`: model-thread `prefill_ms` (submission through final prefill chunk), `decode_ms` (that boundary through scheduler completion, including the first decode round), `elapsed_ms`, `output_tokens` (all committed tokens including reasoning, tools and EOS), `computed_prefill_tokens`, `prefill_passes`, and available per-request `speculative` counters. The prefill-sampled anchor is committed in the first timed decode round. No SSE chunk counts or client arrival times enter this measurement. Interrupted requests have no timing result.
 
 `stream: false` answers one JSON body. `stream: true` answers `text/event-stream`: one `data:` line per chunk in the `chat.completion.chunk` shape, a final chunk carrying `finish_reason` and an empty `delta`, then a literal `data: [DONE]` line. With `stream_options.include_usage: true` a usage-only chunk (empty `choices`) precedes it. A request the engine could not run ends instead with one `{\"error\": {message, type, code}}` chunk (type and code `engine_error`) and then `[DONE]`: the status is already 200 by then.
 
@@ -2482,6 +2488,14 @@ async fn chat_completions(
         Ok(stop) => stop,
         Err(message) => return bad_request_param(&message, "stop"),
     };
+    if req.ignis_timing && (req.stream || !stop.is_empty()
+        || server.live().loop_guard.mode != crate::loop_guard::LoopGuardMode::Off)
+    {
+        return bad_request_param(
+            "ignis_timing requires stream: false, no stop sequences, and model.loop_guard: off",
+            "ignis_timing",
+        );
+    }
     let thinking = match resolve_thinking(
         &server,
         ThinkingRequestFields {
@@ -2541,7 +2555,8 @@ async fn chat_completions(
     let guarding = crate::loop_guard::Guarding::new(server.live().loop_guard.clone(), &input, starts_in_reasoning, server.metrics.clone());
     let rewound = guarding.rewound();
     let engine = loaded.text_engine();
-    let (request_id, stream) = match engine.submit_with_notes(input, class, notes).await {
+    let timing = req.ignis_timing.then(crate::generation_timing::TimingResult::default);
+    let (request_id, stream) = match engine.submit_with_timing(input, class, notes, timing.clone()).await {
         Ok(x) => x,
         Err(err) => return submit_error(&server, err),
     };
@@ -2655,7 +2670,10 @@ async fn chat_completions(
         Some(reason) => resolve_finish_reason(reason, !tool_calls.is_empty(), false),
         None => finish_reason_str(FinishReason::Length),
     };
-    let usage = Usage::new(prompt_tokens, completion_tokens, cached_tokens).with_rewound(&rewound);
+    let mut usage = Usage::new(prompt_tokens, completion_tokens, cached_tokens).with_rewound(&rewound);
+    if reason.is_some() {
+        usage.ignis_timing = timing.as_ref().and_then(|t| t.get()).cloned();
+    }
     let body = completion_body(
         id,
         created,
@@ -3102,6 +3120,9 @@ struct Usage {
     /// extension, additive).
     #[serde(skip_serializing_if = "Option::is_none")]
     completion_tokens_details: Option<CompletionTokensDetails>,
+    /// Opt-in phase timings; absent on an incomplete or unmeasured request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ignis_timing: Option<crate::generation_timing::GenerationTiming>,
 }
 
 impl Usage {
@@ -3112,6 +3133,7 @@ impl Usage {
             total_tokens: prompt_tokens.saturating_add(completion_tokens),
             prompt_tokens_details: PromptTokensDetails { cached_tokens },
             completion_tokens_details: None,
+            ignis_timing: None,
         }
     }
 

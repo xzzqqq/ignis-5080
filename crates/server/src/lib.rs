@@ -35,6 +35,7 @@ pub mod decoder;
 pub mod download;
 pub mod download_http;
 pub mod engine;
+mod generation_timing;
 pub mod expose;
 pub mod idle;
 pub mod image_encoder_input;

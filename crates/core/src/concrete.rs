@@ -5093,6 +5093,9 @@ impl Scheduler for ConcreteScheduler {
                             prefilled_tokens: r.prefill_progress,
                             encode_micros: outcome.encode_micros,
                         });
+                        if r.prefill_complete() {
+                            events.push(SchedEvent::PrefillComplete { request: request_id, at: Instant::now() });
+                        }
                         // core-07 — registration, driven by the job that
                         // actually published (P4-10, GitHub #126). The leaf
                         // publishes at the chunk boundary the job named,

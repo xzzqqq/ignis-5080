@@ -174,6 +174,7 @@ fn main() -> ExitCode {
         Some("oracle") => cmd_oracle(&args[1..]),
         Some("ttft") => cmd_ttft(&args[1..]),
         Some("small-card") => cmd_small_card(&args[1..]),
+        Some("coding-agent") => cmd_coding_agent(&args[1..]),
         Some("g2") => cmd_g2(&args[1..]),
         Some("g3") => cmd_g3(&args[1..]),
         Some("g3-gate") => cmd_g3_gate(&args[1..]),
@@ -206,6 +207,7 @@ fn print_usage() {
                    [--label ignis] [--profile <text>] [--session <id>] [--corpus <bank.ids>] [--out <record.json>]
   ignis-bench small-card --endpoint <url> [--metrics <url>|off] [--cells 8192,65536] [--samples 3]
                          [--decode-tokens 256] [--out <small-card.json>]
+  ignis-bench coding-agent --endpoint <url> --out <new-directory> [--capacity-only]
   ignis-bench g2 --ours <ignis-record.json> --ref <reference-record.json> [--note <text>] [--out <verdict.json>]
   ignis-bench g3 --endpoint <url> --artifact <artifact.ninfer> [--label ignis] [--profile <text>]
                  [--session <id>] [--corpus <bank.ids>] [--out <record.json>]
@@ -853,6 +855,19 @@ fn cmd_ttft(args: &[String]) -> ExitCode {
              record cannot decide the gate"
         );
         ExitCode::FAILURE
+    }
+}
+
+/// Fixed C1 request replay, or the independent exact-length capacity check.
+fn cmd_coding_agent(args: &[String]) -> ExitCode {
+    let run = || -> Result<(), String> {
+        let endpoint = require(args, "endpoint")?;
+        let out = require(args, "out")?;
+        ignis_bench::coding_agent::run(&endpoint, Path::new(&out), args.iter().any(|a| a == "--capacity-only"))
+    };
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => { eprintln!("coding-agent: {e}"); ExitCode::FAILURE }
     }
 }
 

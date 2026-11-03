@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use ignis_core::{
@@ -43,6 +43,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{oneshot, watch};
 
 use crate::media::MediaStats;
+use crate::generation_timing::{GenerationClock, TimingResult};
 use crate::metrics::Metrics;
 use ignis_core::flash_next_counters::FlashNextCounterSource;
 use crate::telemetry::{
@@ -58,6 +59,11 @@ pub type EventStream = UnboundedReceiver<SchedEvent>;
 /// A request's event route (the engine's side of its stream).
 pub type EventRoute = UnboundedSender<SchedEvent>;
 
+struct RoutedRequest {
+    route: EventRoute,
+    clock: Option<GenerationClock>,
+}
+
 /// A command sent from the async/HTTP side to the model thread: `submit`
 /// (design §"the command channel") and `cancel`, the two operations that
 /// must reach the scheduler the model thread owns. `model_id` is static,
@@ -72,6 +78,7 @@ enum Command {
         /// carried with the submission so it reaches telemetry before
         /// `Admitted`.
         notes: RequestNotes,
+        timing: Option<TimingResult>,
         reply: oneshot::Sender<Result<(RequestId, EventStream), SubmitError>>,
     },
     /// Whether the scheduler would refuse a request for good, whatever is
@@ -428,8 +435,18 @@ impl Engine {
         class: RequestClass,
         notes: RequestNotes,
     ) -> Result<(RequestId, EventStream), SubmitError> {
+        self.submit_with_timing(input, class, notes, None).await
+    }
+
+    pub(crate) async fn submit_with_timing(
+        &self,
+        input: RequestInput,
+        class: RequestClass,
+        notes: RequestNotes,
+        timing: Option<TimingResult>,
+    ) -> Result<(RequestId, EventStream), SubmitError> {
         let (reply, reply_rx) = oneshot::channel();
-        if self.commands.send(Command::Submit { input, class, notes, reply }).is_err() {
+        if self.commands.send(Command::Submit { input, class, notes, timing, reply }).is_err() {
             return Err(SubmitError::Full);
         }
         let mut pending = Unread { engine: self, reply: reply_rx, read: false };
@@ -552,7 +569,7 @@ fn model_thread_loop(
     facts: UnboundedSender<TelemetryFact>,
     freed: watch::Sender<u64>,
 ) {
-    let mut streams: HashMap<RequestId, EventRoute> = HashMap::new();
+    let mut streams: HashMap<RequestId, RoutedRequest> = HashMap::new();
     // A request was cancelled since the last step. The scheduler releases it
     // no later than its next step, and only then does `freed` move: a
     // submission handled before that step still finds the engine full.
@@ -612,14 +629,14 @@ fn model_thread_loop(
 /// log and the in-flight gauges close their books on it.
 fn end_in_flight(
     scheduler: &mut dyn Scheduler,
-    streams: &mut HashMap<RequestId, EventRoute>,
+    streams: &mut HashMap<RequestId, RoutedRequest>,
     facts: &UnboundedSender<TelemetryFact>,
 ) {
     for (request, route) in streams.drain() {
         // Before the `Done`: a caller that ends on it cannot cancel first,
         // as its consumer letting it go.
         let _ = facts.send(TelemetryFact::Cancelled(request, CancelCause::Shutdown));
-        let _ = route.send(SchedEvent::Done {
+        let _ = route.route.send(SchedEvent::Done {
             request,
             tokens: 0,
             reason: FinishReason::Error,
@@ -640,19 +657,22 @@ fn end_in_flight(
 fn handle_command(
     command: Command,
     scheduler: &mut dyn Scheduler,
-    streams: &mut HashMap<RequestId, EventRoute>,
+    streams: &mut HashMap<RequestId, RoutedRequest>,
     facts: &UnboundedSender<TelemetryFact>,
     freed: &watch::Sender<u64>,
 ) -> bool {
     match command {
-        Command::Submit { input, class, notes, reply } => {
+        Command::Submit { input, class, notes, timing, reply } => {
             // P3-06: the request log's `prompt_tokens` field is read here,
             // before `input` moves into `submit` — the scheduler's own
             // `Request` is not reachable from the telemetry consumer.
             let prompt_tokens = input.tokens.len() as u32;
+            let submitted = Instant::now();
             let result = scheduler.submit(input, class).map(|id| {
                 let (route, stream) = unbounded_channel();
-                streams.insert(id, route);
+                streams.insert(id, RoutedRequest {
+                    route, clock: timing.map(|result| GenerationClock::new(submitted, result)),
+                });
                 let _ = facts.send(TelemetryFact::Submitted(id, prompt_tokens, class, notes));
                 (id, stream)
             });
@@ -693,7 +713,7 @@ fn handle_command(
 /// streams, and push a copy of each onto the telemetry facts channel.
 fn route_events(
     events: &[SchedEvent],
-    streams: &mut HashMap<RequestId, EventRoute>,
+    streams: &mut HashMap<RequestId, RoutedRequest>,
     facts: &UnboundedSender<TelemetryFact>,
     freed: &watch::Sender<u64>,
 ) {
@@ -706,8 +726,11 @@ fn route_events(
         if let Some(request) = event_request(event) {
             // The route may be gone (the handler already reaped the
             // stream): a failed send is a no-op, not an error.
-            if let Some(route) = streams.get(&request) {
-                let _ = route.send(event.clone());
+            if let Some(route) = streams.get_mut(&request) {
+                if let Some(clock) = &mut route.clock {
+                    clock.observe(event, Instant::now());
+                }
+                let _ = route.route.send(event.clone());
             }
             if let SchedEvent::Done { .. } = event {
                 // Completion: close the stream (the dropped sender ends the
@@ -740,6 +763,7 @@ fn event_request(event: &SchedEvent) -> Option<RequestId> {
         | SchedEvent::PrefixReused { request, .. }
         | SchedEvent::StateReused { request, .. }
         | SchedEvent::PrefillChunk { request, .. }
+        | SchedEvent::PrefillComplete { request, .. }
         | SchedEvent::RetainedSlotSkipped { request, .. }
         | SchedEvent::DiskSpilled { request, .. } => Some(*request),
         SchedEvent::Protected { .. }
@@ -1680,6 +1704,9 @@ mod tests {
             TelemetryFact::Submitted(id, prompt_tokens, class, notes) => {
                 format!("submitted {id} {prompt_tokens} {class:?} {notes:?}")
             }
+            // Absolute clock readings differ across launches; event order
+            // and request identity must still be identical.
+            TelemetryFact::Routed(SchedEvent::PrefillComplete { request, .. }) => format!("routed PrefillComplete {request}"),
             TelemetryFact::Routed(event) => format!("routed {event:?}"),
             // The occupancy rides along, so the flag-off/flag-on comparison
             // is over the widened fact and not merely over its variant.

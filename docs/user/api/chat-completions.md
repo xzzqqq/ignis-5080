@@ -15,6 +15,13 @@ Accepts `messages` (role + content), `model`, `stream`, `max_tokens`,
 - `class` is an **Ignis extension**: the request's lane tag, `interactive`
   (default) or `agent`. The same class can be stated as an `@agent` suffix on
   the model name.
+- `ignis_timing: true` is an **Ignis extension** for benchmarking. It requires
+  `stream: false`, no stop strings, and `model.loop_guard: off` (otherwise 400).
+  Completed responses include `usage.ignis_timing`: `prefill_ms`, `decode_ms`,
+  `elapsed_ms`, `output_tokens`, `computed_prefill_tokens`, `prefill_passes`
+  and per-request `speculative` counters when available. These use model-thread
+  phase boundaries, independent of output buffering; an interrupted request
+  has no timing result. See the [measurement definition](../contributing/coding-agent-benchmark.md#read-the-measurement).
 - `thinking_budget` is an **Ignis extension**: the reasoning tokens this
   request may spend before its close is forced. Absent takes
   `--model-thinking-budget`, `0` means no budget, and `reasoning_effort: "max"`

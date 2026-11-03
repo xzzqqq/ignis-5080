@@ -10,6 +10,9 @@ suite is green. The full runbook — fixtures, the GPU profile's script, the
 measurement instruments — is [`docs/agents/testing.md`](../../agents/testing.md)
 and the per-area files it links; this page is the map.
 
+For three fixed real coding-agent requests at C1 and a separate 128K capacity
+check, use the [coding-agent benchmark](coding-agent-benchmark.md).
+
 ## The default suite: `cargo test`
 
 ```sh

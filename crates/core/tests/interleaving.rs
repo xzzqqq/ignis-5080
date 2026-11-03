@@ -56,6 +56,40 @@ fn sched_with_chunk(chunk: u32, compute: Arc<dyn Compute>) -> ConcreteScheduler 
 }
 
 #[test]
+fn prefill_boundary_precedes_the_first_decode_in_the_same_advance() {
+    struct BoundaryCompute {
+        inner: MockCompute,
+        boundaries: Mutex<Vec<Instant>>,
+    }
+    impl Compute for BoundaryCompute {
+        fn prefill_step(&self, jobs: &[PrefillJob]) -> Result<Vec<PrefillOutcome>, ComputeError> {
+            let result = self.inner.prefill_step(jobs);
+            self.boundaries.lock().unwrap().push(Instant::now());
+            result
+        }
+        fn decode_step(&self, jobs: &[DecodeJob]) -> Result<Vec<DecodeOutcome>, ComputeError> {
+            self.boundaries.lock().unwrap().push(Instant::now());
+            self.inner.decode_step(jobs)
+        }
+    }
+    let compute = Arc::new(BoundaryCompute { inner: MockCompute::new(), boundaries: Mutex::new(Vec::new()) });
+    let mut sched = sched_with_chunk(4, compute.clone());
+    let id = sched.submit(input(&[1, 2, 3, 4, 5], 1), RequestClass::Agent).unwrap();
+    let first = sched.advance();
+    assert!(!first.iter().any(|e| matches!(e, SchedEvent::PrefillComplete { .. })));
+    let last = sched.advance();
+    let boundaries: Vec<_> = last.iter().filter_map(|e| match e {
+        SchedEvent::PrefillComplete { request, at } if *request == id => Some(*at),
+        _ => None,
+    }).collect();
+    assert_eq!(boundaries.len(), 1);
+    let calls = compute.boundaries.lock().unwrap();
+    assert_eq!(calls.len(), 3, "two prefill chunks and one decode round");
+    assert!(calls[1] <= boundaries[0] && boundaries[0] <= calls[2]);
+    assert!(last.iter().any(|e| matches!(e, SchedEvent::Token { .. })));
+}
+
+#[test]
 fn a_long_prompt_is_split_into_chunk_wide_jobs() {
     // A 10-token prompt with a 4-token chunk width needs 3 chunks
     // (4 + 4 + 2): no single call may ever carry more than the configured

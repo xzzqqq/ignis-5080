@@ -180,6 +180,39 @@ async fn non_streaming_returns_a_tool_call_and_strips_it_from_content() {
     assert!(!body.contains("<tool_call"), "raw XML leaked: {body}");
 }
 
+#[tokio::test]
+async fn timing_counts_a_buffered_tool_call_without_using_http_deltas() {
+    let h = harness_with(RecordingTemplateProvider::permissive(single_call_decode_map(0)));
+    let req = serde_json::json!({
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1, "enable_thinking": false, "ignis_timing": true,
+    });
+    let (status, body) = call(&h.app, "POST", "/v1/chat/completions", Some(req)).await;
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "read_file");
+    let t = &v["usage"]["ignis_timing"];
+    assert_eq!(t["output_tokens"], v["usage"]["completion_tokens"]);
+    assert_eq!(t["computed_prefill_tokens"], v["usage"]["prompt_tokens"]);
+    assert_eq!(t["prefill_passes"], 1);
+    assert!(t["decode_ms"].as_f64().unwrap() > 0.0);
+    assert!(t["elapsed_ms"].as_f64().unwrap() >= t["decode_ms"].as_f64().unwrap());
+}
+
+#[tokio::test]
+async fn timing_refuses_windows_cut_by_streaming_or_stop_strings() {
+    let h = harness_with(RecordingTemplateProvider::permissive(single_call_decode_map(0)));
+    for extra in [serde_json::json!({"stream": true}), serde_json::json!({"stop": "END"})] {
+        let mut req = serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}], "ignis_timing": true,
+        });
+        req.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let (status, body) = call(&h.app, "POST", "/v1/chat/completions", Some(req)).await;
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("ignis_timing"));
+    }
+}
+
 /// A tool call left open when `max_tokens` cuts generation off mid-block
 /// (acceptance criterion 3): dropped whole, never returned half-written,
 /// and the text before the open tag is still delivered as ordinary content.

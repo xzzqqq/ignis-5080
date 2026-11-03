@@ -73,6 +73,7 @@
 
 pub mod canary;
 pub mod client;
+pub mod coding_agent;
 pub mod equivalence;
 pub mod flash_next;
 pub mod g2;

@@ -723,6 +723,10 @@ impl std::ops::Add for SpecCounters {
 /// counters are derived from these events).
 #[derive(Debug, Clone)]
 pub enum SchedEvent {
+    /// Timestamp at the final prefill chunk, BEFORE admission and the first
+    /// decode round (which may run in this same `advance`). Consumers must
+    /// use this timestamp, not the later delivery time of the event batch.
+    PrefillComplete { request: RequestId, at: std::time::Instant },
     /// A token was committed for a request — one event per token of a
     /// round's run, in order (P5-06, GitHub #154).
     Token { request: RequestId, token: TokenId },
