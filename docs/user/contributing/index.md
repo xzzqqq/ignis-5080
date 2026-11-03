@@ -5,7 +5,11 @@ sidebar:
   order: 1
 ---
 
-ignis is built by its owner and by coding agents working from GitHub issues.
+For this RTX 5080 fork, start with [remote development](remote-dev.md) and
+[`AGENTS.md`](../../../AGENTS.md): edit and run available CPU checks on the
+Laptop, and build CUDA and run GPU work on remote Linux.
+
+Upstream ignis is built by its owner and by coding agents working from GitHub issues.
 A human contributor follows the same rules the agents do; they are written
 down in [`AGENTS.md`](../../../AGENTS.md) and the files it points at under
 [`docs/agents/`](../../agents/), and this section is the readable tour of

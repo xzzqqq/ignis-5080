@@ -5,6 +5,11 @@ sidebar:
   order: 4
 ---
 
+For this RTX 5080 fork, read [remote development](../contributing/remote-dev.md)
+first. It describes the Laptop/Linux split, the Python entry point and private
+configuration. The upstream paths below remain references where applicable;
+[`AGENTS.md`](../../../AGENTS.md) defines this fork's workflow.
+
 For someone changing ignis — a fix, a feature, a kernel, a page of this
 guide. The owner works with coding agents, and the rules they follow are the
 rules here.

@@ -4,17 +4,32 @@ This file is for agents working **on** ignis: its code, its guide, its issues.
 An agent here for a user of ignis (to explain it, install it, or connect a
 client to it) wants [the agent path](docs/user/paths/agent.md) instead.
 
+## Project
+
+This is an RTX 5080-specific fork of Ignis, focused on Qwen3.8-27B: a
+low-latency local inference service for daily personal chat and coding agents.
+The performance goal is decode approaching SOL (Speed of Light). The fork
+starts from the unmodified upstream implementation.
+
+## Development mode
+
+The Laptop handles editing, CPU checks, commits and result analysis. CUDA
+builds and GPU execution run on remote Linux. Run Rust CPU tests locally
+where possible; tests that lack the required local platform or dependencies
+run on remote Linux.
+
+The single remote entry point from the Laptop is
+`python3 scripts/remote.py exec -- <command>`. Its private connection config
+is the repository-root `.remote.json`, which is not committed; the tracked,
+credential-free template is [.remote.example.json](.remote.example.json).
+SSH connection details are managed in `~/.ssh/config`.
+
+Use the Python entry point directly; macOS Makefile support is not required.
+Cargo currently pins a Windows target, so local CPU checks must pass an
+explicit host `--target`. Commands and current Linux target availability are
+in [Remote development](docs/user/contributing/remote-dev.md).
+
 ## Agent skills
-
-### Issue tracker
-
-GitHub Issues on `gpillon/ignis`, through the `gh` CLI: a spec is an issue and
-its tickets are sub-issues with native blocking. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-The five canonical roles and the two categories as same-name labels, plus the
-repo's `idea` and `quick` markers. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
@@ -80,8 +95,3 @@ server inherits a pipe (`| Tee-Object`, `| tail`) and holds it open for as
 long as it runs. Restarting a server whose log holds an incident: copy
 `ignis-server.log` and its `.err` out of `.scratch/serve/` first, since
 `make start` rewrites both.
-
-### Orchestrated builds
-
-Coordinating implementer agents on a spec's tickets:
-`docs/agents/orchestrated-builds.md`.

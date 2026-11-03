@@ -33,6 +33,9 @@ __pycache__/
 # per-machine Makefile overrides (template: local.mk.example)
 local.mk
 
+# private remote connection (template: .remote.example.json)
+/.remote.json
+
 # a local compose file (template: docker-compose.yml.example)
 /docker-compose.yml
 
