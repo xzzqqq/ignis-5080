@@ -1,0 +1,6 @@
+#!/bin/sh
+# ignis pre-push secret guard
+set -eu
+root=$(git rev-parse --show-toplevel)
+python=$(git config --get ignis.pythonBinary || printf '%s\n' python3)
+exec "$python" "$root/scripts/pre_push.py" check "$@"
