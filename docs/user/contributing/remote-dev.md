@@ -11,7 +11,8 @@ sidebar:
 服务。Laptop 负责编辑、CPU 检查、提交和分析；CUDA 构建、GPU 执行及依赖 Linux
 的检查在远端进行。上游 5090 的运行结果不代表此 fork 已完成 5080 验证。
 
-Laptop 需要 Python 3.10+ 和 OpenSSH 客户端；`scripts/remote.py` 只使用标准库。
+Laptop 和远端需要 Python 3.10+、Git；Laptop 还需 OpenSSH 客户端。
+`scripts/remote.py` 只使用标准库，远端命令通过 Bash 执行。
 在仓库根目录初始化私有配置：
 
 ```sh
@@ -32,6 +33,50 @@ cp .remote.example.json .remote.json
 的 `.remote.json`，从其他当前目录调用脚本也不会改用别处的配置。私有配置和凭据不入库。
 SSH 使用非交互认证，需事先配置好认证及主机信任；连接失败会直接返回错误。
 
+## 固定机器环境
+
+已验证的工具链放在远端稳定目录，用远端仓库根目录的 `.remote.env` 固定选择。
+每次 `exec` 和 `sync` 都在执行命令前加载它，加载失败则不执行命令。这个文件是
+Bash 脚本，需保持安静，不向标准输出写内容，例如：
+
+```sh
+export RUSTUP_TOOLCHAIN=<installed-version>
+export CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu
+export PATH="$PWD/.toolchain/bin:$HOME/.cargo/bin:$PATH"
+export CUDA_HOME=/path/to/validated/cuda
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export IGNIS_KERNEL_BUILD_JOBS=12
+export CARGO_BUILD_JOBS=12
+```
+
+按本机已安装版本填写，不直接执行含占位符的示例。`.remote.env`、`.toolchain/`、
+`.remote.cargo.toml` 和已有的 `local.mk` 都不提交，也不随源码同步。工具链、镜像
+配置放这些私有位置；模型路径和 Make 参数放 `local.mk`。环境文件选择已安装工具，
+不代替安装包或容器镜像；更换机器时仍需准备对应版本。日常不重复做整套环境预检。
+
+## 同步源码
+
+```sh
+python3 scripts/remote.py sync --dry-run
+python3 scripts/remote.py sync
+```
+
+`sync` 将 Laptop 当前工作区同步到远端：包含已提交源码、未提交修改、未被 Git
+忽略的新文件，以及源码删除。不要求先提交，也不改变 Laptop 的分支或暂存区。
+初次同步要求远端 HEAD 是本地历史中的祖先；此命令不负责创建 checkout。
+
+传输使用压缩的增量 Git bundle。输出中的 `bundle bytes` 是源码包大小，不含 SSH
+协议和接收脚本的控制开销；`--dry-run` 计算这个大小但不应用，内容不变时为 0。
+它保留远端的模型、`target/`、`kernel/build/`、工具链、私有配置和 `.scratch/`，
+不会来回传输构建产物。新增大文件仍可能产生大包，传输前可先看 `--dry-run`。
+已同步且内容未变的未提交文件也不重复传输。源码同步不启动服务或触发构建，可以
+多次编辑、同步后再构建；通常按一次需要远端验证的改动同步一次。
+
+远端 HEAD 跟随 Laptop HEAD；未提交的工作区快照由内部 Git ref 记录，并出现在
+远端暂存区。远端是构建副本，源码继续在 Laptop 编辑：若远端出现独立修改、
+非忽略的新文件或不同的 HEAD，下一次同步会拒绝，先保存并处理这些修改再重试。
+不要在同步过程中编辑远端源码；完成同步后再构建，避免编译读到新旧文件的混合版本。
+
 ## 唯一远端入口
 
 从 Laptop 的仓库根目录运行：
@@ -47,13 +92,42 @@ python3 scripts/remote.py exec -- make gpu-guard
 ```
 
 命令在配置中的远端仓库目录运行，保留标准输入、输出、错误及退出码。参数逐项传递；
-需要管道、重定向或环境初始化时，显式调用 `bash -lc '…'`，其中的 shell 内容由调用者
-控制。CUDA、Rust 等工具需已在远端命令环境中可用。Laptop 不需要 make 或 CUDA。
+需要管道或重定向时，显式调用 `bash -c '…'`，其中的 shell 内容由调用者控制。
+环境由 `.remote.env` 加载，避免登录 shell 重新改写 PATH。Laptop 不需要 make 或 CUDA。
 
 `exec` 不同步文件、不 checkout、不提交、不 push、不管理实验队列，也不自动重试。
-执行前需将待测版本准备到远端 checkout，再核对 commit 和未提交改动；本地编辑不会
-自动出现在远端。退出码 255 通常表示 SSH 连接问题，命令可能已经开始执行，重跑前先
+执行前先 `sync`，再核对 commit 和未提交改动；本地编辑不会自动出现在远端。
+退出码 255 通常表示 SSH 连接问题，命令可能已经开始执行，重跑前先
 核对远端状态。长时间服务需使用远端持久会话或 daemon；此入口不保证断线后任务继续。
+
+## Linux 服务与开发循环
+
+配置好远端 `local.mk` 中的模型路径、`UI` 和其他运行参数后：
+
+```sh
+python3 scripts/remote.py sync
+python3 scripts/remote.py exec -- make build CUDA=1
+python3 scripts/remote.py exec -- make gpu-status
+python3 scripts/remote.py exec -- make start
+python3 scripts/remote.py exec -- make status
+python3 scripts/remote.py exec -- make stop
+```
+
+Linux 复用现有 Make 目标图和参数：`start` 只运行最新构建，源码比构建新时拒绝启动，
+CUDA 启动仍经过 GPU guard。后台进程脱离 SSH 会话；启动等待公开的 `/ready` 返回
+200，失败或超过 `READY_TIMEOUT` 就停止本次进程并保留日志。`stop` 默认只停止
+本 checkout 记录的进程，记录包含 PID、启动时间和系统启动标识，避免误杀复用的 PID。
+`FORCE=1` 才额外停止同用户的其他 `ignis-server`。
+
+PID 和日志在 `.scratch/serve/`；再次启动会归档旧日志，`make logs` 跟踪当前日志。
+普通修改的循环是 `sync` 后 `exec -- make redeploy`：构建成功才停止旧服务并启动新
+服务，编译失败保留旧服务。`restart` 只重启，不构建。
+
+`dev` 是构建后前台运行；代理管理长期服务用 `start/stop`。已有 `make watch`
+需要 `cargo-watch`，检测远端文件变更并重新编译、重启进程；它不负责 Laptop 同步。
+CUDA 修改重启后会重新加载模型，不是在保留显存状态下热替换代码；CPU mock 的
+`make watch CUDA=0` 更适合快速检查服务逻辑。Linux 的 `dev-ui/run-ui` 联动尚未实现，
+前端可单独运行已有的 `make web-dev` 使用 Vite 热更新。
 
 ## 检查与当前限制
 
@@ -77,6 +151,6 @@ GPU 工作前先查看 `make gpu-status` 并通过 `make gpu-guard`，协调全�
 包括其他项目和 worktree。状态检查不是锁；上游 guard 的显存阈值也不证明 5080
 有足够余量。不能因检查通过就并行启动第二项 GPU 工作。
 
-Linux 已支持 CUDA build/check 和 GPU status/guard，但 `make gpu-profile` 及
-`make start/stop/status` 仍未实现（见 `mk/os/linux.mk`）。需要这些能力时另行实现并
-验证；不能把 Windows profile 的 skip 或未运行写成 Linux/5080 验收通过。
+Linux 已支持 CUDA build/check、GPU status/guard 和后台服务控制；`make gpu-profile`
+仍未实现（见 `mk/os/linux.mk`）。不能把 Windows profile 的 skip 或未运行写成
+Linux/5080 验收通过。构建目录长期保留供增量构建使用，不在同步或测试后自动清理。

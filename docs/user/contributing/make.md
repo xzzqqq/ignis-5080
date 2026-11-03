@@ -30,6 +30,13 @@ Knobs go on the command line (`make dev CUDA=0 PROFILE=dev`,
 `make dev-ui SPEC=off MAX_CONTEXT=40960`) or in an untracked `local.mk`
 (`local.mk.example`). `make config` prints what is in force.
 
+Linux implements the same `start` / `stop` / `status` hooks with Python 3.
+`start` waits for `/ready`, archives existing logs and records the process
+identity; `stop` targets that checkout's daemon. `redeploy` builds before it
+stops the old process, then loads the new one. `watch` also reloads the whole
+model on each CUDA change. Linux `dev-ui` / `run-ui` and `gpu-profile` remain
+unimplemented; see the fork's [remote workflow](remote-dev.md).
+
 `make MODEL=image` serves the [image model](../api/images.md) from
 `F:/ai/models/ignis-image-2.1-turbo/ignis_image_2_1_turbo-v2.ninfer` (`ARTIFACT`
 names another) as `ignis-image-2.1-turbo`. It has no context, lanes, prefill

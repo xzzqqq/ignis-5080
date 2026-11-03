@@ -35,6 +35,9 @@ local.mk
 
 # private remote connection (template: .remote.example.json)
 /.remote.json
+/.remote.env
+/.remote.cargo.toml
+/.toolchain/
 
 # a local compose file (template: docker-compose.yml.example)
 /docker-compose.yml

@@ -18,9 +18,10 @@ builds and GPU execution run on remote Linux. Run Rust CPU tests locally
 where possible; tests that lack the required local platform or dependencies
 run on remote Linux.
 
-The single remote entry point from the Laptop is
-`python3 scripts/remote.py exec -- <command>`. Its private connection config
-is the repository-root `.remote.json`, which is not committed; the tracked,
+The single remote entry point from the Laptop is `python3 scripts/remote.py`:
+`sync` transfers source, then `exec -- <command>` runs in the remote checkout.
+Remote `.remote.env` selects the validated toolchain automatically. The private
+connection config is the repository-root `.remote.json`, which is not committed; the tracked,
 credential-free template is [.remote.example.json](.remote.example.json).
 SSH connection details are managed in `~/.ssh/config`.
 

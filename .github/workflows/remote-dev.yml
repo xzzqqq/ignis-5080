@@ -1,0 +1,28 @@
+name: remote development
+
+on:
+  push:
+    paths:
+      - '.github/workflows/remote-dev.yml'
+      - 'scripts/remote*.py'
+      - 'mk/linux/**'
+      - 'mk/os/linux.mk'
+      - 'tests/test_*.py'
+  pull_request:
+    paths:
+      - '.github/workflows/remote-dev.yml'
+      - 'scripts/remote*.py'
+      - 'mk/linux/**'
+      - 'mk/os/linux.mk'
+      - 'tests/test_*.py'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source sync and daemon lifecycle (CPU only)
+        run: python3 -m unittest discover -s tests -p 'test_*.py'

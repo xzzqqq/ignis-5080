@@ -56,9 +56,10 @@ present, so it does not recompile the C++ leaf each time. On the MSVC triple the
 binary lands in `target/x86_64-pc-windows-msvc/release/`.
 
 Windows is the development host; Linux builds the same engine and is what the
-container image is built from. Some `make` targets are still Windows-only there
-— background server control (`start` / `stop` / `dev-ui`) and the GPU test
-profile; `mk/os/linux.mk` names them.
+container image is built from. Linux supports background server control
+(`start` / `stop` / `status`) and `redeploy`; the combined `dev-ui` session and
+the GPU test profile remain Windows-only. The fork's
+[remote workflow](remote-dev.md) keeps editing on the Laptop and CUDA work on Linux.
 
 ## Tests
 

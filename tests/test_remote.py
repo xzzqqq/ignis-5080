@@ -65,6 +65,20 @@ class RemoteTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "executed").exists())
 
+    def test_remote_private_environment_is_loaded_and_errors_stop_execution(self):
+        env = self.repo / ".remote.env"
+        env.write_text("export IGNIS_REMOTE_TEST='private env value'\n")
+        command = remote.ssh_command(self.config, [sys.executable, "-c",
+            "import os; print(os.environ['IGNIS_REMOTE_TEST'])"])
+        result = subprocess.run(["sh", "-c", command[-1]], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "private env value\n")
+        env.write_text("false\n")
+        command = remote.ssh_command(self.config, ["touch", "executed"])
+        result = subprocess.run(["sh", "-c", command[-1]], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.repo / "executed").exists())
+
     def test_cli_preserves_failures_without_retry(self):
         for code in [0, 7, 255, -15]:
             with self.subTest(code=code), patch.object(remote, "ROOT", self.root), \
