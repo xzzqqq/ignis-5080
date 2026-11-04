@@ -1,5 +1,12 @@
 # Benches and gate runs
 
+## RTX 5080 coding-agent baseline
+
+The [coding-agent benchmark guide](../../user/contributing/coding-agent-benchmark.md)
+owns the current optimization baseline, fixed-request protocol and comparison
+rules. It links the historical measurement and raw archive. Use its C1 replay
+and separate exact 131,072-token capacity check for this workload.
+
 ## The G2 measurement instrument (P2-05, GitHub #87)
 
 `ignis-bench ttft` measures time to first token at an **exact** prompt

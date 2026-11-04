@@ -243,28 +243,9 @@ These are observed results for this artifact, request set and protocol.
 
 ## Implications
 
-On 2026-11-04, the project owner designated this run as the starting baseline
-for RTX 5080 coding-agent decode optimization. Baseline ID:
-`rtx5080-coding-agent-v1-2026-11-03`; measured code:
-`e25780e21b240bca965b17bc6dbd600f170744e3`.
-
-The reference medians are Astropy **207.657749750205 tok/s**, Django
-**184.81640248687216 tok/s**, and SymPy **189.94180061893974 tok/s**.
-For each task, report speedup as the new three-repeat median divided by its
-reference median, and percentage change as `(speedup - 1) * 100`. Keep input
-and output token counts, finish reasons, prefill time and speculative counters
-beside the rates so a changed response length or acceptance pattern is visible.
-Do not silently replace this baseline when a later run is faster.
-
-`ignis-bench coding-agent` provides a repeatable baseline for later inference
-changes: keep the fixtures, model, cache policy and generation protocol fixed,
-and compare each task's full-window rate. The capacity pass remains a separate
-check. The first report's short, synthetic requests and SSE timing define a
-different workload and cannot be used as a direct speedup denominator.
-Keep the hardware and serving configuration fixed too; if an experiment changes
-one of these controls, identify it explicitly and report it as a separate
-comparison. Retain the existing sanity check and the independent exact 131,072
-input-token capacity check alongside subsequent performance results.
+The [benchmark guide](../user/contributing/coding-agent-benchmark.md#current-optimization-baseline)
+names the current optimization baseline and defines subsequent comparisons.
+This report preserves the measured run and its evidence.
 
 ## Limits and unknowns
 
