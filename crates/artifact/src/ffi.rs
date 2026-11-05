@@ -76,6 +76,9 @@ unsafe extern "C" {
     /// the figure the driver's version is checked against. No context.
     pub fn ignis_device_runtime_version(version: *mut i32) -> i32;
 
+    /// Resident memory attributed to `pid` by NVML, without creating a context.
+    pub fn ignis_device_nvml_process_bytes(device_id: i32, pid: u32, bytes: *mut u64) -> i32;
+
     /// Free / total memory of CUDA device `device_id` as NVML reports it,
     /// read without creating a CUDA context (GitHub #210).
     pub fn ignis_device_nvml_mem_info(

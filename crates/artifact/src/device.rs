@@ -387,6 +387,19 @@ impl CudaDevice {
         Ok((free, total))
     }
 
+    /// Resident memory attributed to this process by Linux NVML. This includes
+    /// the context and modules retained after a model unload.
+    #[cfg(target_os = "linux")]
+    pub fn nvml_process_bytes(device_id: i32) -> Result<u64> {
+        Self::require_driver()?;
+        let mut bytes = 0;
+        let rc = unsafe { crate::ffi::ignis_device_nvml_process_bytes(device_id, std::process::id(), &mut bytes) };
+        if rc != 0 {
+            return Err(fail("NVML process memory is unavailable"));
+        }
+        Ok(bytes)
+    }
+
     /// Asked first by everything here that reaches the GPU -- a load reaches
     /// [`CudaDevice::nvml_memory`] or [`CudaDevice::create`] before anything
     /// else -- so a machine without the driver is named as such (GitHub #329).

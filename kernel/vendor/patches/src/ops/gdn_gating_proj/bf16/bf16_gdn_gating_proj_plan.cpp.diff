@@ -1,0 +1,68 @@
+diff --git a/reference/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp b/vendor/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp
+index 315824b..95996e9 100644
+--- a/reference/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp
++++ b/vendor/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp
+@@ -308,9 +308,19 @@ std::size_t route_capacity(const std::array<RouteSpec, N>& routes, const Bf16Gdn
+     for (const RouteSpec& route : routes) {
+         if (route.cols.last < min_cols || route.cols.first > max_cols) { continue; }
+         const std::int32_t endpoint = std::min(route.cols.last, max_cols);
+-        maximum                     = std::max(
+-            maximum,
++        maximum = std::max(maximum,
+             bf16_gdn_gating_resolve_plan({base.heads, base.input_rows, endpoint}).workspace_bytes);
++        // A smaller GPU can halve SplitK inside a route. Its workspace peaks
++        // just before that boundary, not necessarily at the route's endpoint.
++        if (schedule_uses_mma(route.schedule) &&
++            route.schedule != Bf16GdnGatingScheduleId::MmaUnsplit) {
++            const auto tile = mma_tile_cols(base);
++            const auto first = std::max(route.cols.first, min_cols);
++            for (auto cols = ((first + tile - 1) / tile) * tile; cols < endpoint; cols += tile) {
++                maximum = std::max(maximum,
++                    bf16_gdn_gating_resolve_plan({base.heads, base.input_rows, cols}).workspace_bytes);
++            }
++        }
+     }
+     return maximum;
+ }
+@@ -391,8 +401,13 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
+                 }
+                 if (schedule_uses_mma(route.schedule) &&
+                     route.schedule != Bf16GdnGatingScheduleId::MmaUnsplit) {
+-                    return bf16_gdn_gating_resolve_candidate(
+-                        Bf16GdnGatingScheduleId::MmaUnsplit, problem);
++                    for (const auto fallback : {Bf16GdnGatingScheduleId::MmaCooperativeSplit4,
++                                                Bf16GdnGatingScheduleId::MmaCooperativeSplit2,
++                                                Bf16GdnGatingScheduleId::MmaUnsplit}) {
++                        if (candidate_is_legal(fallback, problem)) {
++                            return bf16_gdn_gating_resolve_candidate(fallback, problem);
++                        }
++                    }
+                 }
+             }
+         }
+@@ -404,8 +419,13 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
+                 }
+                 if (schedule_uses_mma(route.schedule) &&
+                     route.schedule != Bf16GdnGatingScheduleId::MmaUnsplit) {
+-                    return bf16_gdn_gating_resolve_candidate(
+-                        Bf16GdnGatingScheduleId::MmaUnsplit, problem);
++                    for (const auto fallback : {Bf16GdnGatingScheduleId::MmaCooperativeSplit4,
++                                                Bf16GdnGatingScheduleId::MmaCooperativeSplit2,
++                                                Bf16GdnGatingScheduleId::MmaUnsplit}) {
++                        if (candidate_is_legal(fallback, problem)) {
++                            return bf16_gdn_gating_resolve_candidate(fallback, problem);
++                        }
++                    }
+                 }
+             }
+         }
+@@ -435,7 +455,8 @@ Bf16GdnNormGatingPlan bf16_gdn_norm_gating_resolve_plan(const Bf16GdnGatingProbl
+                                                      problem);
+         schedule = Bf16GdnNormGatingScheduleId::MmaCooperativeSplit32;
+         norm_splits = 32;
+-    } else if (is_27(problem) && problem.cols <= 8) {
++    } else if (is_27(problem) && problem.cols <= 8 &&
++               candidate_is_legal(Bf16GdnGatingScheduleId::MmaCooperativeSplit40, problem)) {
+         control  = bf16_gdn_gating_resolve_candidate(Bf16GdnGatingScheduleId::MmaCooperativeSplit40,
+                                                      problem);
+         schedule = Bf16GdnNormGatingScheduleId::MmaCooperativeSplit40;

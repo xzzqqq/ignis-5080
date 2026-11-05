@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 struct ignis_device {
   cudaStream_t load_stream;
@@ -49,6 +50,7 @@ struct Nvml {
   decltype(&nvmlErrorString) error_string;
   decltype(&nvmlDeviceGetHandleByPciBusId_v2) handle_by_pci_bus_id;
   decltype(&nvmlDeviceGetMemoryInfo) memory_info;
+  decltype(&nvmlDeviceGetComputeRunningProcesses_v3) compute_processes;
 };
 
 template <typename Fn>
@@ -75,7 +77,9 @@ const Nvml *nvml() {
                           resolve_nvml(library, "nvmlErrorString", &table.error_string) &&
                           resolve_nvml(library, "nvmlDeviceGetHandleByPciBusId_v2",
                                        &table.handle_by_pci_bus_id) &&
-                          resolve_nvml(library, "nvmlDeviceGetMemoryInfo", &table.memory_info);
+                          resolve_nvml(library, "nvmlDeviceGetMemoryInfo", &table.memory_info) &&
+                          resolve_nvml(library, "nvmlDeviceGetComputeRunningProcesses_v3",
+                                       &table.compute_processes);
     return resolved ? &table : nullptr;
   }();
   return api;
@@ -313,6 +317,40 @@ extern "C" int32_t ignis_device_nvml_mem_info(int device_id, uint64_t *free_byte
   }
   *free_bytes = memory.free;
   *total_bytes = memory.total;
+  return 0;
+}
+
+// Linux NVML attributes resident memory to each compute process. Read the
+// caller's retained context/modules before a reload, without a device allocation.
+extern "C" int32_t ignis_device_nvml_process_bytes(int device_id, uint32_t pid,
+                                                   uint64_t *bytes) {
+  if (bytes == nullptr) return -1;
+  char bus_id[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE] = {};
+  if (cudaDeviceGetPCIBusId(bus_id, sizeof(bus_id), device_id) != cudaSuccess) return -1;
+  const Nvml *api = nvml();
+  if (api == nullptr || api->init() != NVML_SUCCESS) return -1;
+  nvmlDevice_t device = nullptr;
+  auto rc = api->handle_by_pci_bus_id(bus_id, &device);
+  unsigned count = 0;
+  std::vector<nvmlProcessInfo_t> processes;
+  if (rc == NVML_SUCCESS) {
+    rc = api->compute_processes(device, &count, nullptr);
+    // Retry if another process appears between the size and data queries.
+    for (int attempt = 0; rc == NVML_ERROR_INSUFFICIENT_SIZE && attempt < 3; ++attempt) {
+      processes.resize(count + 8);
+      count = static_cast<unsigned>(processes.size());
+      rc = api->compute_processes(device, &count, processes.data());
+    }
+  }
+  api->shutdown();
+  if (rc != NVML_SUCCESS) return -1;
+  *bytes = 0;
+  for (unsigned i = 0; i < count; ++i) {
+    if (processes[i].pid == pid) {
+      if (processes[i].usedGpuMemory == NVML_VALUE_NOT_AVAILABLE) return -1;
+      *bytes += processes[i].usedGpuMemory;
+    }
+  }
   return 0;
 }
 

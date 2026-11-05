@@ -832,6 +832,10 @@ pub fn qwen27b_load(
     // still holds is added back.
     let (nvml_free_bytes, _) = CudaDevice::nvml_memory(0)
         .map_err(|e| format!("VRAM budget: free memory is unreadable: {e}"))?;
+    #[cfg(target_os = "linux")]
+    let process_held_bytes = CudaDevice::nvml_process_bytes(0)
+        .map_err(|e| format!("VRAM budget: process memory is unreadable: {e}"))?;
+    #[cfg(not(target_os = "linux"))]
     let process_held_bytes = ignis_runtime::held_before_load(CudaDevice::context_created(), ignis_runtime::qwen27b_loaded());
     let free_at_start_bytes = nvml_free_bytes + process_held_bytes;
     let mut device = CudaDevice::create(0).map_err(|e| format!("CUDA device: {e}"))?;

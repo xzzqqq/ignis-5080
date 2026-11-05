@@ -87,6 +87,9 @@ int32_t ignis_device_runtime_version(int32_t *version);
  * not load, or on a bad argument. */
 int32_t ignis_device_nvml_mem_info(int device_id, uint64_t *free_bytes, uint64_t *total_bytes);
 
+/* Resident bytes attributed to pid by NVML; -1 if unavailable. */
+int32_t ignis_device_nvml_process_bytes(int device_id, uint32_t pid, uint64_t *bytes);
+
 /* Free a device allocation returned by ignis_device_alloc. NULL device or
  * pointer is a no-op. */
 void ignis_device_free(struct ignis_device *d, void *ptr);

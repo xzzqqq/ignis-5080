@@ -101,6 +101,8 @@ fn nvml_free_memory_counts_the_context_and_every_allocation() {
 
     // This binary's one GPU test: nothing has made the context yet.
     assert!(!CudaDevice::context_created(), "a context before the first device");
+    #[cfg(target_os = "linux")]
+    assert_eq!(CudaDevice::nvml_process_bytes(0).expect("process before context"), 0);
     let mut device = CudaDevice::create(0).expect("CUDA device");
     assert!(CudaDevice::context_created(), "the first device made the context");
     let (free_with_context, _) = CudaDevice::nvml_memory(0).expect("NVML after the context");
@@ -110,6 +112,8 @@ fn nvml_free_memory_counts_the_context_and_every_allocation() {
         "creating the context left NVML free memory at {free_with_context} (was {free_before})"
     );
 
+    #[cfg(target_os = "linux")]
+    let held_context = CudaDevice::nvml_process_bytes(0).expect("process context");
     let buffer = device.allocate(GIB).expect("1 GiB");
     let free_with_buffer = free_once_counted(
         || CudaDevice::nvml_memory(0).expect("NVML after the allocation").0,
@@ -122,6 +126,11 @@ fn nvml_free_memory_counts_the_context_and_every_allocation() {
         "a 1 GiB allocation moved NVML free memory by {} bytes within {COUNTED_WITHIN:?}",
         free_with_context.saturating_sub(free_with_buffer)
     );
+    #[cfg(target_os = "linux")]
+    {
+        let held = CudaDevice::nvml_process_bytes(0).expect("process allocation");
+        assert!(held.saturating_sub(held_context) >= GIB, "process count misses the allocation");
+    }
     device.deallocate(buffer).expect("free");
 
     // GitHub #324: dropping the device keeps the context, so the next load's
@@ -133,4 +142,11 @@ fn nvml_free_memory_counts_the_context_and_every_allocation() {
         "the dropped device gave its context back: NVML free {free_after_drop}, {free_before} before the context"
     );
     assert!(CudaDevice::context_created(), "the context outlives the device");
+    #[cfg(target_os = "linux")]
+    {
+        let held = CudaDevice::nvml_process_bytes(0).expect("process after teardown");
+        assert!(held > 0 && held < GIB, "teardown retained {held} bytes");
+        assert!(held.abs_diff(free_before - free_after_drop) <= 16 << 20,
+                "process count {held} disagrees with the exclusive card's free-memory delta");
+    }
 }

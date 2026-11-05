@@ -111,10 +111,18 @@ fn a_reload_plans_the_kv_pool_its_cold_start_planned() {
             "a reload adds back {added_back} B against the {held} B the process holds: more than {HELD_SLACK_BYTES} B over"
         );
     }
-    let (reload, reload_free) = one_load(artifact).expect("the reload loads what the cold start loaded");
-    println!("27B KV pool: cold {cold} pages, reload {reload} pages; NVML free once in: cold {cold_free} B, reload {reload_free} B");
-    assert!(
-        cold.abs_diff(reload) <= cold / 100,
-        "the reload planned {reload} pages against the cold start's {cold}: more than 1% apart"
-    );
+    #[cfg(target_os = "linux")]
+    {
+        let held = CudaDevice::nvml_process_bytes(0).expect("NVML process accounting");
+        println!("after teardown: process retains {held} B");
+        assert!(held > 0, "the retained CUDA context must be counted");
+    }
+    for _ in 0..3 {
+        let (reload, reload_free) = one_load(artifact).expect("the reload loads what the cold start loaded");
+        println!("27B KV pool: cold {cold} pages, reload {reload} pages; NVML free once in: cold {cold_free} B, reload {reload_free} B");
+        assert!(
+            cold.abs_diff(reload) <= cold / 100,
+            "the reload planned {reload} pages against the cold start's {cold}: more than 1% apart"
+        );
+    }
 }

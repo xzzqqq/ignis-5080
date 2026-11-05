@@ -361,7 +361,12 @@
     },
     {
       "path": "src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp",
-      "sha256": "8043b407c8882a0dc024dba37f899d26698ed51e6e0b49ab5a9c1d21a41dc33f"
+      "sha256": "8043b407c8882a0dc024dba37f899d26698ed51e6e0b49ab5a9c1d21a41dc33f",
+      "patch": {
+        "diff": "patches/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.cpp.diff",
+        "sha256": "554a711020b32d24fd6115906f1d56c179e4f985b746b62413e57b674661cdb1",
+        "reason": "Correctness: RTX 5080 cannot launch the 27B fused norm grid; choose composed norm and legal smaller SplitK candidates, keeping projection precision and covering interior workspace maxima. Tests: ignis_kernel_gdn_gating_proj_tests including every width in the capacity interval."
+      }
     },
     {
       "path": "src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h",
@@ -518,8 +523,8 @@
       "sha256": "bf75965478c764367af55406315af3f82538db965aa1f5d8c83a7bd602760e4a",
       "patch": {
         "diff": "patches/src/ops/kernel/hq_codec.cuh.diff",
-        "sha256": "92dbfa9d7abc8d2b6b38320a64db2eedbe15a3a374fe7850e99ded09f451c062",
-        "reason": "ADR 0031: cometkim feat/1m-context (2026-09-10). The hq-e8-2b prompt scratch decoder stages its temporary Rice symbols in shared memory instead of the output row in device memory, and moves each lattice word as one 16-byte vector; the default call (every other caller) is unchanged. Bit-exact. Fork, same artifact: prefill +16.2% at 262,144 populated tokens. ignis A/B: docs/findings/2026-09-24-upstream-quick-wins-ab.md. Then ADR 0031, GitHub #268: hq_decode_row_group_fast, the 8-lane group decode in throughput form for the verify kernel's throughput route, called by every lane of the warp at once with inactive groups (each lane's two 32-bit stream words walked as two branch-free terminator chains, unstrip by bit identities, the dither byte folded into the reference's one rounding); every row off the k = 0 path is hq_decode_row_group<true>. Opened by Nsight Compute on the verify kernel at 8 lanes x 30K keys: the 64-bit unary walk was 44% of 1.16e9 instructions at 35% issue. Bit-exact: ignis_hq_codec_kv_rows_test calls it as the kernel does (real, escalated and never-written rows, with and without inactive groups) and ignis_kernel_hq_verify_exact_test. docs/findings/2026-09-24-hq-verify-decode-cost.md."
+        "sha256": "4e91b45a8243e7b2c1654a622f9488347d91138a02bfa57b166171a695446075",
+        "reason": "Retains the recorded HQ decode performance patches. Correctness: store the FP16 row norm as one aligned 16-bit word; split byte stores corrupt its low byte in the Linux CUDA build. Regressions: ignis_kernel_kv_append_format_test (710 norm mismatches) and ignis_hq_codec_test (FP64 oracle mismatch)."
       }
     },
     {
@@ -1634,7 +1639,12 @@
     },
     {
       "path": "tests/ops/test_gdn_gating_proj.cpp",
-      "sha256": "5d6ea618f0b3338fa87792afaa031eec907b9c92e689d0fb3078ea948895375f"
+      "sha256": "5d6ea618f0b3338fa87792afaa031eec907b9c92e689d0fb3078ea948895375f",
+      "patch": {
+        "diff": "patches/tests/ops/test_gdn_gating_proj.cpp.diff",
+        "sha256": "9f772d75d70690245a09f2afe567a94b4f8c94305a0a64c786d2ac48d945f99d",
+        "reason": "Correctness regression: capacity must cover interior widths when device residency forces SplitK changes inside a route; endpoint-only witnesses miss underallocation on RTX 5080."
+      }
     },
     {
       "path": "tests/ops/test_gdn_input_proj.cpp",

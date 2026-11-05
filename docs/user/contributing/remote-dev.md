@@ -158,6 +158,15 @@ Linux 支持 CUDA build/check、GPU status/guard、后台服务控制和 GPU pro
 python3 scripts/remote.py exec -- python3 scripts/gpu_profile.py --artifact models/qwen3_8_27b_trellis_sc30-v2.ninfer --out .scratch/gpu-check
 ```
 
+投影对照测试还需要 `qwen3_8_27b_nvfp4full-v2.ninfer`，通过
+`--reference-artifact <path>` 指定。这份权重只供测试在 CPU 上计算参考输出；服务仍加载
+Trellis。历史固定版本来自 `gpillon/Qwen3.8-27B-nvfp4full-dflash2-NInfer`，revision
+`e961b419b672e183aa55df8c4b975abc82006e8a`，文件大小 19,406,942,468 字节，SHA-256 为
+`abb1e120d5f1f32d61689604d238227ff579ab76cbd9319628f3b3904fffd9af`。
+
+Linux 的模型重载预算使用 NVML 报告的本进程显存占用，计入卸载后保留的 CUDA context
+和模块。读不到该数值时加载报错，避免按其他平台的固定占用推算可用显存。
+
 使用尚不存在的输出目录。Profile 独占一张 RTX 5080，任何阶段失败或跳过都会导致
 整次检查失败。构建目录保留用于增量构建。
 
