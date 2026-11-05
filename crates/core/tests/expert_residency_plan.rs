@@ -124,6 +124,7 @@ fn a_host_plan_below_the_margin_refuses_naming_the_line_that_crosses_it() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn this_machine_reports_its_available_physical_memory() {
     // The host plan's one measured input. Every machine this suite runs on
     // (the 5090 box, the CI legs) has some, and none has a petabyte.

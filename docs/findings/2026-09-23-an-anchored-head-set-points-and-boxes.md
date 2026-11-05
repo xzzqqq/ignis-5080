@@ -5,7 +5,7 @@
 - Observed: 2026-09-23
 - Last verified: 2026-09-23
 - Scope: serving / `/v1/decide` `point` and `box` read from attention in one pass; kernel / attention readout cost
-- Related: https://github.com/gpillon/ignis/issues/263, [The heads outline the object](2026-09-22-the-heads-outline-the-object.md), [spec 13](../specs/decide/13-point-by-attention-head.md), [spec 14](../specs/decide/14-point-and-box-from-the-head-set.md), [ADR 0038](../adr/0038-the-seam-carries-one-attention-head.md), `tools/pointing-scenes/` (`ensemble_score.py`, `rectangles.py`, `pointing-heads-4bdc7b13.json`, `bench_readout.cu`)
+- Related: https://github.com/gpillon/ignis/issues/263, [The heads outline the object](2026-09-22-the-heads-outline-the-object.md), [spec 13](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/13-point-by-attention-head.md), [spec 14](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/14-point-and-box-from-the-head-set.md), [ADR 0038](../adr/0038-the-seam-carries-one-attention-head.md), `tools/pointing-scenes/` (`ensemble_score.py`, `rectangles.py`, `pointing-heads-4bdc7b13.json`, `bench_readout.cu`)
 - Superseded by: none
 
 ## Question

@@ -18,21 +18,14 @@ describe("App", () => {
     expect(html).toContain("Warming up");
   });
 
-  it("keeps the Decide tab mounted behind the chat, so a typed request survives a look elsewhere", () => {
-    const html = renderToStaticMarkup(<App />);
-    expect(html).toContain("Nothing is generated");
-    // Its three columns, each with its own scroll.
-    expect(html).toContain('aria-label="Decisions"');
-    expect(html).toContain('aria-label="Answers"');
-    expect(html).toContain('aria-label="Questions"');
-  });
 
-  it("offers the Decide tab from the start and the Monitor only once /ui/metrics has answered", () => {
+
+  it("offers chat and settings from the start and the Monitor only once /ui/metrics has answered", () => {
     const html = renderToStaticMarkup(<App />);
     // The Decide tab talks to /v1/decide, so it never waits on the metrics
     // listener; the Monitor is the one view that does.
     expect(html).toContain('aria-label="View"');
-    expect(html).toContain(">Decide<");
+    expect(html).not.toContain(">Decide<");
     expect(html).not.toContain(">Monitor<");
     expect(html).not.toContain('aria-label="Monitor"');
   });
@@ -44,11 +37,7 @@ describe("App", () => {
     expect(html).not.toContain('aria-label="Model"');
   });
 
-  it("offers the Transcribe view from the start, and mounts it only once it is opened (spec speech/07, AC 1)", () => {
-    const html = renderToStaticMarkup(<App />);
-    expect(html).toContain(">Transcribe<");
-    expect(html).not.toContain('aria-label="Transcripts"');
-  });
+
 
   it("gives every form field an id or a name, as the browser asks", () => {
     const fields = renderToStaticMarkup(<App />).match(/<(input|textarea|select)\b[^>]*>/g) ?? [];

@@ -9,8 +9,8 @@
   topic and many multi-word terms; the guard `copies_context`, its near-copy rule (`speech.context_copy_edits`) and
   a same-language control of what that rule takes of real speech
 - Related: [#442](https://github.com/gpillon/ignis/issues/442), [the first measurement](2026-10-27-asr-context-echo.md),
-  [#428](https://github.com/gpillon/ignis/issues/428), [spec speech/07](../specs/speech/07-transcribe.md),
-  [Speech to text](../user/api/transcriptions.md)
+  [#428](https://github.com/gpillon/ignis/issues/428), [spec speech/07](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/speech/07-transcribe.md),
+  [Speech to text](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/user/api/transcriptions.md)
 - Superseded by: none
 
 ## Question

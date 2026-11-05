@@ -55,7 +55,7 @@ pub fn fields_text() -> String {
     let mut text = String::from(
         "Every field ignis-server takes. Precedence, highest first:\n  \
          <family>-flag > flag > <family>-env > env > <family>-file > file > profile > default\n\
-         Families: qwen38 (Qwen3.8-27B), qwen38flashnext (Qwen3.8-Flash-Next).\n",
+         Family: qwen38 (Qwen3.8-27B).\n",
     );
     for (group, fields) in GROUPS {
         text.push_str(&format!("\n[{group}]\n"));
@@ -387,7 +387,7 @@ mod tests {
                 assert!(text.contains(&name), "{name} missing from help --fields");
             }
             if meta.scoped {
-                assert!(text.contains(&meta.scoped_flag(ModelFamily::FlashNext)), "{}", meta.file_key());
+                assert!(text.contains(&meta.scoped_flag(ModelFamily::Qwen38_27b)), "{}", meta.file_key());
             }
         }
         let json: Vec<Value> =
@@ -452,7 +452,7 @@ mod tests {
                     "yaml",
                     "--reuse-kv-host-pool-bytes",
                     "8G",
-                    "--qwen38flashnext-reuse-kv-host-pool-bytes",
+                    "--qwen38-reuse-kv-host-pool-bytes",
                     "1G",
                 ],
                 &[("IGNIS_SERVER_REQUEST_TIMEOUT", "45")],
@@ -462,13 +462,13 @@ mod tests {
         );
         let document = yaml(&text);
         assert_eq!(document["reuse"]["kv_host_pool_bytes"], "8G");
-        assert_eq!(document["reuse"]["qwen38flashnext"]["kv_host_pool_bytes"], "1G");
+        assert_eq!(document["reuse"]["qwen38"]["kv_host_pool_bytes"], "1G");
         assert_eq!(document["server"]["request_timeout"], 45, "the environment is resolved as a start would");
         assert!(text.find("server:").unwrap() < text.find("model:").unwrap(), "groups in declaration order:\n{text}");
         let files = MemFiles::with(&[("g.yaml", &text)]);
         let read = started(&["--config", "g.yaml"], &files);
-        assert_eq!(read.for_family(ModelFamily::FlashNext).unwrap().host_pool_bytes, 1 << 30);
-        assert_eq!(read.for_family(ModelFamily::Qwen38_27b).unwrap().host_pool_bytes, 8 << 30);
+        assert_eq!(read.for_family(ModelFamily::Qwen38_27b).unwrap().host_pool_bytes, 1 << 30);
+        assert_eq!(read.host_pool_bytes, 8 << 30);
     }
 
     #[test]
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn patch_writes_the_flags_and_the_environment_and_keeps_everything_else() {
-        let original = "profile: rtx5090\nserver:\n  request_timeout: 77\nreuse:\n  qwen38:\n    retained_host: 4\nprofiles:\n  mine:\n    vram:\n      headroom_bytes: 2G\n";
+        let original = "profile: rtx50-16gb\nserver:\n  request_timeout: 77\nreuse:\n  qwen38:\n    retained_host: 4\nprofiles:\n  mine:\n    vram:\n      headroom_bytes: 2G\n";
         let files = MemFiles::with(&[("c.yaml", original)]);
         let (path, contents) = written(
             run(&["config", "patch", "--file", "c.yaml", "--reuse-kv-host-pool-bytes", "8G"], &[("IGNIS_MODEL_MAX_CONTEXT", "65536")], &files)
@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(document["server"]["request_timeout"], 77);
         assert_eq!(document["reuse"]["qwen38"]["retained_host"], 4);
         assert_eq!(document["profiles"]["mine"]["vram"]["headroom_bytes"], "2G");
-        assert_eq!(document["profile"], "rtx5090");
+        assert_eq!(document["profile"], "rtx50-16gb");
         assert!(document["vision"].is_null(), "a field nobody named is not added");
         let (other, _) = written(run(&["config", "patch", "--file", "c.yaml", "--out", "d.yaml"], &[], &files).unwrap());
         assert_eq!(other, PathBuf::from("d.yaml"));
@@ -578,18 +578,7 @@ mod tests {
         }
     }
 
-    const ALL_IDS: [&str; 10] = [
-        "qwen3.8-27b",
-        "qwen3.8-27b-abliterated",
-        "qwen3.8-flash-next",
-        "ignis-image-2.1-turbo",
-        "qwen3.8-27b-16g",
-        "qwen3.8-27b-abliterated-16g",
-        "qwen3-asr-1.7b",
-        "qwen3-asr-1.7b-q8",
-        "qwen3-asr-0.6b",
-        "nemotron-3-diarization",
-    ];
+    const ALL_IDS: [&str; 1] = ["qwen3.8-27b-16g"];
 
     /// Spec model-download/02 AC 12, the resolution half: the ids named, or
     /// every entry, or the configured `model.id`; into `download.path` or
@@ -598,19 +587,19 @@ mod tests {
     fn model_download_takes_ids_all_or_the_configured_model() {
         let files = MemFiles::default();
         let (ids, dir, endpoint, token) = download_of(run(&["model", "download"], &[], &files).unwrap());
-        assert_eq!((ids, dir, endpoint, token), (vec!["qwen3.8-27b".to_owned()], PathBuf::from("./models"), "https://huggingface.co".to_owned(), None));
-        let (ids, ..) = download_of(run(&["model", "download", "--model-id", "qwen3.8-flash-next"], &[], &files).unwrap());
-        assert_eq!(ids, ["qwen3.8-flash-next"], "no id: the configured model");
-        let (ids, ..) = download_of(run(&["model", "download", "qwen3.8-flash-next", "QWEN3.8-27B", "qwen3.8-27b"], &[], &files).unwrap());
-        assert_eq!(ids, ["qwen3.8-flash-next", "qwen3.8-27b"], "in the order named, each once");
+        assert_eq!((ids, dir, endpoint, token), (vec!["qwen3.8-27b-16g".to_owned()], PathBuf::from("./models"), "https://huggingface.co".to_owned(), None));
+        let (ids, ..) = download_of(run(&["model", "download", "--model-id", "qwen3.8-27b-16g"], &[], &files).unwrap());
+        assert_eq!(ids, ["qwen3.8-27b-16g"], "no id: the configured model");
+        let (ids, ..) = download_of(run(&["model", "download", "qwen3.8-27b-16g", "QWEN3.8-27B-16G", "qwen3.8-27b-16g"], &[], &files).unwrap());
+        assert_eq!(ids, ["qwen3.8-27b-16g"], "in the order named, each once");
         let (ids, ..) = download_of(run(&["model", "download", "--all", "--download-enabled", "false"], &[], &files).unwrap());
         assert_eq!(ids, ALL_IDS);
-        let (_, dir, ..) = download_of(run(&["model", "download", "qwen3.8-27b", "--download-path", "D:/m"], &[], &files).unwrap());
+        let (_, dir, ..) = download_of(run(&["model", "download", "qwen3.8-27b-16g", "--download-path", "D:/m"], &[], &files).unwrap());
         assert_eq!(dir, PathBuf::from("D:/m"));
-        let (ids, dir, ..) = download_of(run(&["model", "download", "--download-path", "D:/m", "qwen3.8-flash-next"], &[], &files).unwrap());
-        assert_eq!((ids, dir), (vec!["qwen3.8-flash-next".to_owned()], PathBuf::from("D:/m")), "an id after a flag and its value");
-        let (ids, dir, ..) = download_of(run(&["model", "download", "qwen3.8-27b", "--out", "E:/c", "qwen3.8-flash-next", "--download-enabled", "false"], &[], &files).unwrap());
-        assert_eq!((ids, dir), (vec!["qwen3.8-27b".to_owned(), "qwen3.8-flash-next".to_owned()], PathBuf::from("E:/c")), "ids on both sides of a flag");
+        let (ids, dir, ..) = download_of(run(&["model", "download", "--download-path", "D:/m", "qwen3.8-27b-16g"], &[], &files).unwrap());
+        assert_eq!((ids, dir), (vec!["qwen3.8-27b-16g".to_owned()], PathBuf::from("D:/m")), "an id after a flag and its value");
+        let (ids, dir, ..) = download_of(run(&["model", "download", "qwen3.8-27b-16g", "--out", "E:/c", "qwen3.8-27b-16g", "--download-enabled", "false"], &[], &files).unwrap());
+        assert_eq!((ids, dir), (vec!["qwen3.8-27b-16g".to_owned()], PathBuf::from("E:/c")), "ids on both sides of a flag");
         let (_, dir, ..) = download_of(run(&["model", "download", "--out", "E:/carry", "--download-path", "D:/m"], &[("IGNIS_DOWNLOAD_PATH", "C:/x")], &files).unwrap());
         assert_eq!(dir, PathBuf::from("E:/carry"), "--out wins over download.path");
     }
@@ -620,11 +609,11 @@ mod tests {
     #[test]
     fn model_download_refuses_an_unknown_id_naming_the_known_ones() {
         let files = MemFiles::default();
-        let err = run(&["model", "download", "qwen3.8-27b", "qwen9"], &[], &files).unwrap_err().0;
+        let err = run(&["model", "download", "qwen3.8-27b-16g", "qwen9"], &[], &files).unwrap_err().0;
         assert!(err.contains("`qwen9`") && err.contains(&ALL_IDS.join(", ")), "{err}");
         let err = run(&["model", "download", "--model-id", "custom"], &[], &files).unwrap_err().0;
         assert!(err.contains("`custom`"), "{err}");
-        assert!(run(&["model", "download", "qwen3.8-27b", "--all"], &[], &files).unwrap_err().0.contains("not both"));
+        assert!(run(&["model", "download", "qwen3.8-27b-16g", "--all"], &[], &files).unwrap_err().0.contains("not both"));
         for verb in ["verify", "convert", "fetch"] {
             let err = run(&["model", verb], &[], &files).unwrap_err().0;
             assert!(err.contains(&format!("unknown command `model {verb}`")) && err.contains("download and list"), "{err}");
@@ -664,10 +653,10 @@ mod tests {
         let (ids, ..) = download_of(run_on(&["model", "download"], &files, sixteen.clone()).unwrap());
         assert_eq!(ids, ["qwen3.8-27b-16g"]);
         let err = run_on(&["model", "download", "qwen3.8-flash-next"], &files, sixteen).unwrap_err().0;
-        assert!(err.contains("nothing fetched") && err.contains("32 GB") && err.contains("16 GB"), "{err}");
-        let five_090 = Card::Total(super::super::profile::RTX_5090_TOTAL_BYTES);
+        assert!(err.contains("not in the catalog"), "{err}");
+        let five_090 = Card::Total(super::super::profile::RTX_5080_TOTAL_BYTES);
         let (ids, ..) = download_of(run_on(&["model", "download"], &files, five_090).unwrap());
-        assert_eq!(ids, ["qwen3.8-27b"]);
+        assert_eq!(ids, ["qwen3.8-27b-16g"]);
     }
 
     /// `docs/user/guides/models.md`: the CUDA build fetches and lists on a machine
@@ -694,11 +683,11 @@ mod tests {
     /// refuses the command.
     #[test]
     fn model_list_reads_the_catalog_the_config_file_names_beside_it() {
-        let catalog = "models:\n  - id: acme-ft\n    repo: acme/ft\n    revision: v1\n    artifact: a.ninfer\n    card_class: 32\n    files:\n      - { name: a.ninfer.graft.json, bytes: 1, sha256: 0000000000000000000000000000000000000000000000000000000000000001 }\n      - { name: a.ninfer, bytes: 2, sha256: 0000000000000000000000000000000000000000000000000000000000000002 }\n";
+        let catalog = "models:\n  - id: acme-ft\n    repo: acme/ft\n    revision: v1\n    artifact: a.ninfer\n    card_class: 16\n    files:\n      - { name: a.ninfer.graft.json, bytes: 1, sha256: 0000000000000000000000000000000000000000000000000000000000000001 }\n      - { name: a.ninfer, bytes: 2, sha256: 0000000000000000000000000000000000000000000000000000000000000002 }\n";
         let files = MemFiles::with(&[("conf/ignis.config.yaml", "download:\n  catalog: acme.yaml\n  path: /srv/models\n"), ("conf/acme.yaml", catalog)]);
         match run(&["model", "list", "--config", "conf/ignis.config.yaml", "--format", "json"], &[], &files).unwrap() {
             ConfigOutcome::Model(ModelCommand::List { catalog, dir, format }) => {
-                assert_eq!(catalog.ids(), ["qwen3.8-27b", "qwen3.8-27b-abliterated", "qwen3.8-flash-next", "ignis-image-2.1-turbo", "qwen3.8-27b-16g", "qwen3.8-27b-abliterated-16g", "qwen3-asr-1.7b", "qwen3-asr-1.7b-q8", "qwen3-asr-0.6b", "nemotron-3-diarization", "acme-ft"]);
+                assert_eq!(catalog.ids(), ["qwen3.8-27b-16g", "acme-ft"]);
                 assert_eq!((dir, format), (PathBuf::from("/srv/models"), ListFormat::Json));
             }
             other => panic!("{other:?}"),

@@ -1450,7 +1450,7 @@ mod tests {
         assert_eq!(ModelFamily::of_model_id("qwen3.8-flash-next"), Some(ModelFamily::FlashNext));
         // ADR 0050: served as `ignis-image-2.1-turbo`, "Qwen" never its primary name.
         assert_eq!(ModelFamily::of_model_id("ignis-image-2.1-turbo"), Some(ModelFamily::QwenImage21));
-        assert_eq!(ModelFamily::QwenImage21.model_id(), ignis_artifact::qwen_image::MODEL_ID);
+        assert_eq!(ModelFamily::QwenImage21.model_id(), "ignis-image-2.1-turbo");
         assert_eq!(ModelFamily::of_model_id("fixture-model"), None);
         for family in ModelFamily::ALL {
             assert_eq!(ModelFamily::of_model_id(family.model_id()), Some(family));

@@ -395,13 +395,7 @@ pub enum Unswitchable {
     /// that fits (ADR 0064 §3): `409 model_above_card_class`, before anything
     /// is prepared or torn down.
     AboveClass(ClassRefusal),
-    /// A speech model's catalog entry (ADR 0067): loaded beside the active
-    /// model by the first transcription, never switched to.
-    Speech,
-    /// The diarizer's catalog entry (ADR 0069): one GGUF the speech model's
-    /// worker loads at the first session that asks for speakers.
-    Diarizer,
-}
+    }
 
 /// A model `GET /v1/models` lists besides the loaded one
 /// ([`Switcher::servable_models`]).
@@ -591,19 +585,6 @@ impl Switcher {
         listed
     }
 
-    /// Whether `model` names a speech model's catalog entry (`kind: speech`,
-    /// ADR 0067): loaded beside the active model, never switched to, so it
-    /// is no model a switch resolves, lists or fetches an artifact for.
-    pub fn is_speech(&self, model: &str) -> bool {
-        self.catalog.as_ref().and_then(|catalog| catalog.catalog.entry(model)).is_some_and(|entry| entry.is_speech())
-    }
-
-    /// Whether `model` names the diarizer's catalog entry (`kind: diarizer`,
-    /// ADR 0069): like the speech model, no model a switch goes to.
-    pub fn is_diarizer(&self, model: &str) -> bool {
-        self.catalog.as_ref().and_then(|catalog| catalog.catalog.entry(model)).is_some_and(|entry| entry.is_diarizer())
-    }
-
     /// The catalog a switch can go to, with the directory it is looked up in.
     pub fn catalog(&self) -> Option<&CatalogModels> {
         self.catalog.as_ref()
@@ -625,12 +606,6 @@ impl Switcher {
     pub fn resolve(&self, model: &str) -> Result<PathBuf, Unswitchable> {
         if let Some(refusal) = self.above_class(model) {
             return Err(Unswitchable::AboveClass(refusal));
-        }
-        if self.is_speech(model) {
-            return Err(Unswitchable::Speech);
-        }
-        if self.is_diarizer(model) {
-            return Err(Unswitchable::Diarizer);
         }
         if let Some(listed) = self.listed_models().remove(model) {
             return if listed.is_file() { Ok(listed) } else { Err(Unswitchable::KnownMissing { artifact: listed }) };
@@ -782,7 +757,6 @@ impl Switcher {
         };
         catalog
             .chain(known.keys().cloned())
-            .filter(|id| !self.is_speech(id) && !self.is_diarizer(id))
             .filter(|id| seen.insert(id.clone()))
             .filter_map(|id| match self.known(&id) {
                 Some(_) => Some(Servable { id, unavailable: None }),
@@ -801,10 +775,6 @@ impl Switcher {
     /// entry's. A catalog id above the card's class is not one, listed or
     /// not (ADR 0064 §3): a request naming it never switches.
     pub fn known(&self, model: &str) -> Option<PathBuf> {
-        // A speech model is no model to switch to (ADR 0067).
-        if self.is_speech(model) || self.is_diarizer(model) {
-            return None;
-        }
         if self.above_class(model).is_some() {
             return None;
         }
@@ -1591,21 +1561,6 @@ pub(crate) async fn unload(server: &Server, unloading: Unloading, cause: UnloadC
     }
 }
 
-/// The image model `failed` stopped serving on a fault of its own — a
-/// runner call panicked mid-job, and the job closed its queue and dropped
-/// its runner (`images::job::spawn`): unloaded as the idle clock unloads a
-/// model ([`claim_unload`], [`unload`]), so the next request that needs it
-/// loads it again ([`ensure_loaded`]). Nothing when it is no longer the
-/// model serving — a switch has replaced it, or one under way replaces it
-/// anyway — or the server could not load it again (no switcher): then each
-/// request on it is answered `503 model_stopped`.
-pub(crate) async fn unload_failed(server: &Server, failed: &crate::images::ImageModel, reason: String) {
-    let unloading = claim_unload_if(server, |active| active.image_model().is_some_and(|model| model.is(failed)));
-    if let Some(unloading) = unloading {
-        unload(server, unloading, UnloadCause::Failed(reason)).await;
-    }
-}
-
 /// The switch itself, steps 2 to 5 of the module doc, from where `begun`
 /// says it began: a switch may also begin from [`ModelStatus::Failed`], the
 /// way out of a switch that left nothing serving, and a refusal then must
@@ -1951,7 +1906,6 @@ fn publish(server: &Server, model: ActiveModel) {
     *server.fork_history.lock().expect("fork history lock") = crate::reuse::ForkHistory::default();
     server.active.store(Arc::new(model));
     server.usage.touch();
-    crate::decide::log_load_heads(&server.active());
 }
 
 /// After a failed load: load `old` again from where it came from, so a bad
@@ -2035,13 +1989,13 @@ mod tests {
             margin_bytes: ignis_core::residency::DEFAULT_HOST_MARGIN_BYTES,
         })
         .expect_err("short of RAM");
-        let load = crate::load::LoadError::from(crate::runtime::FlashNextLoadError::HostPlan(refusal.clone()));
+        let load = crate::load::LoadError::HostPlan(refusal.clone());
         assert_eq!(load, crate::load::LoadError::HostPlan(refusal.clone()));
         let failure = LoadFailure::from(load);
         assert_eq!(failure.host_plan.as_ref(), Some(&refusal));
         assert_eq!(failure.reason, refusal.to_string());
-        let other = LoadFailure::from(crate::load::LoadError::from(crate::runtime::FlashNextLoadError::from("no MTP head")));
-        assert_eq!(other, LoadFailure { reason: "no MTP head".to_owned(), host_plan: None });
+        let other = LoadFailure::from(crate::load::LoadError::LoadFailed("load failed".into()));
+        assert_eq!(other, LoadFailure { reason: "load failed".to_owned(), host_plan: None });
     }
 
     /// ADR 0062: the 27B's host plan refusal reaches the switch whole too,

@@ -365,7 +365,7 @@ builds, on the RTX 5090 (PCIe Gen 3). Every trellis run loads as a 16 GB card wo
    65536)`, decode 476 tok/s median on the coding prompts and 437 on the agent turns, 4.78 accepted drafts a round,
    and the 64K cell as not fitting (it names `--cells 65528`), with no note
    (`.scratch/340/final/live-b3-main-2.json`; the B0 run: `.scratch/340/small-card/live-b0.json`). The user guide's
-   page: [measure a 16 GB card](../../user/guides/measure-a-16gb-card.md).
+   page: [measure a 16 GB card](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/user/guides/measure-a-16gb-card.md).
 8. **One finding per gate group: done.** The three findings above, with their rows in
    [`docs/findings/README.md`](../../findings/README.md).
 

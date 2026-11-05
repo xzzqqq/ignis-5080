@@ -2,7 +2,6 @@ import type { ToolExtras } from "../api/request.ts";
 import { AGENT_TOOL, AGENT_TOOL_NAME, AGENTS_IGNIS_PROMPT } from "./agents/agents.ts";
 import { ASK_USER_IGNIS_PROMPT, ASK_USER_TOOL, ASK_USER_TOOL_NAME } from "./ask/ask.ts";
 import { dateTimePrompt } from "./datetime/datetime.ts";
-import { IMAGE_IGNIS_PROMPT, IMAGE_TOOL, isImageTool } from "./image/image.ts";
 import {
   isLocalTool,
   MEMORY_DELETE_TOOL,
@@ -45,7 +44,6 @@ export type ToolsState = {
   /** list_files, read_file, write_file, edit_file and delete_file on the chat's workspace, files attached in the prompt box, and the files the turn notice names. */
   workspace: boolean;
   /** make_image: pictures from the image model, a switch there and back per reply that calls it. */
-  images: boolean;
   /**
    * An option of every tool, not a tool: how many replies in a row may call
    * tools before the calls stop being run — the conversation's own loop, and
@@ -69,7 +67,6 @@ export const NO_TOOLS: ToolsState = {
   plan: false,
   memory: false,
   workspace: false,
-  images: false,
   maxRounds: DEFAULT_TOOL_ROUNDS,
 };
 
@@ -86,11 +83,10 @@ export const ALL_TOOLS: ToolsState = {
   plan: true,
   memory: true,
   workspace: true,
-  images: true,
   maxRounds: DEFAULT_TOOL_ROUNDS,
 };
 
-const CHOICES = ["agents", "web", "askUser", "dateTime", "runJs", "plan", "memory", "workspace", "images"] as const;
+const CHOICES = ["agents", "web", "askUser", "dateTime", "runJs", "plan", "memory", "workspace"] as const;
 
 /** How many tools are in use. */
 export const toolsInUse = (tools: ToolsState) => (tools.enabled ? CHOICES.filter((choice) => tools[choice]).length : 0);
@@ -114,7 +110,6 @@ function inUse(tools: ToolsState) {
     plan: on("plan"),
     memory: on("memory"),
     workspace: on("workspace"),
-    images: on("images"),
   };
 }
 
@@ -130,7 +125,6 @@ export function ignisPrompt(tools: ToolsState, context: PromptContext = {}): str
     on.plan ? PLAN_PROMPT : "",
     on.memory ? MEMORY_PROMPT : "",
     on.workspace ? WORKSPACE_PROMPT : "",
-    on.images ? IMAGE_IGNIS_PROMPT : "",
   ]
     .filter((part) => part !== "")
     .join("\n\n");
@@ -160,7 +154,6 @@ export function toolExtras(tools: ToolsState, context: PromptContext = {}): Tool
       ...(on.plan ? [UPDATE_PLAN_TOOL] : []),
       ...(on.memory ? [MEMORY_SAVE_TOOL, MEMORY_READ_TOOL, MEMORY_DELETE_TOOL] : []),
       ...(on.workspace ? [LIST_FILES_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL, EDIT_FILE_TOOL, DELETE_FILE_TOOL] : []),
-      ...(on.images ? [IMAGE_TOOL] : []),
     ],
   };
 }
@@ -178,7 +171,7 @@ export function toolExtras(tools: ToolsState, context: PromptContext = {}): Tool
  * is also what keeps every agent of a session opening with the same tokens.
  */
 export function agentExtras(tools: ToolsState, context: PromptContext = {}): ToolExtras {
-  return toolExtras({ ...tools, agents: false, askUser: false, plan: false, images: false, dateTimeLive: false }, context);
+  return toolExtras({ ...tools, agents: false, askUser: false, plan: false, dateTimeLive: false }, context);
 }
 
 /**
@@ -197,10 +190,9 @@ export function setAllTools(tools: ToolsState, enabled: boolean): ToolsState {
  * else — a tool the model made up never runs, and gets the list of the ones
  * it has.
  */
-export function routeCall(name: string, available: string[]): "agent" | "web" | "ask" | "image" | "local" | "unknown" {
+export function routeCall(name: string, available: string[]): "agent" | "web" | "ask" | "local" | "unknown" {
   if (!available.includes(name)) return "unknown";
   if (isWebTool(name)) return "web";
-  if (isImageTool(name)) return "image";
   if (isLocalTool(name)) return "local";
   if (name === ASK_USER_TOOL_NAME) return "ask";
   return name === AGENT_TOOL_NAME ? "agent" : "unknown";

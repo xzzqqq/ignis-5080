@@ -5,7 +5,7 @@
 - Observed: 2026-09-27
 - Last verified: 2026-09-27
 - Scope: `/v1/decide` / attention readout over a text state — spec 19 phases 1 and 2 (spans, profiles, the full row), development sets E1+E2
-- Related: [GitHub #276](https://github.com/gpillon/ignis/issues/276); [spec 19](../specs/decide/19-a-span-read-from-attention.md); [phase 0: a vote of heads finds the line](2026-09-27-a-head-vote-finds-the-line.md); [the literature pass](2026-09-27-span-from-attention-literature.md); [`attention_span_locate_gpu.rs`](../../crates/server/tests/attention_span_locate_gpu.rs), [`tools/locate-sets/`](../../tools/locate-sets/README.md) (`spans.py`, `generation.py`, `spanscore.py`)
+- Related: [GitHub #276](https://github.com/gpillon/ignis/issues/276); [spec 19](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/19-a-span-read-from-attention.md); [phase 0: a vote of heads finds the line](2026-09-27-a-head-vote-finds-the-line.md); [the literature pass](2026-09-27-span-from-attention-literature.md); [`attention_span_locate_gpu.rs`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/crates/server/tests/attention_span_locate_gpu.rs), [`tools/locate-sets/`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/tools/locate-sets/README.md) (`spans.py`, `generation.py`, `spanscore.py`)
 - Superseded by: none
 
 ## Question

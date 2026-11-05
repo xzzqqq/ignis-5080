@@ -47,12 +47,6 @@ pub struct EngineShape {
     pub kv_pool: Option<ignis_core::KvPoolSize>,
     /// How the load's VRAM budget is chosen (GitHub #210, ADR 0030).
     pub vram: ignis_core::VramMode,
-    /// `--vram-allow-expert-cache-below-floor` (ADR 0045): a Flash-Next load whose
-    /// expert cache falls below its floor starts with a warning.
-    pub allow_expert_cache_below_floor: bool,
-    /// `--vram-pinned-expert-bytes` (GitHub #329 item 12): a Flash-Next load's
-    /// pinned hot set, held in its expert cache with no copy in the host pool.
-    pub pinned_expert_bytes: u64,
     /// The KV-RAM host tier's budget, in bytes (`--reuse-kv-host-pool-bytes`,
     /// P4-07 GitHub #125): pinned host memory for evicted (suspended)
     /// request snapshots, independent of the GPU-resident pool above.
@@ -84,9 +78,6 @@ pub struct EngineShape {
     pub speculation: Option<ignis_core::Speculation>,
     /// `--spec-backend off` (GitHub #307): no speculation, the default one included.
     pub speculation_off: bool,
-    /// Flash-Next's draft row budget (`--spec-draft-rows`, GitHub #307); 0 = the
-    /// default's 8 rows.
-    pub draft_rows: u32,
     /// The decode lanes (`--spec-decode-lanes`, GitHub #306; the 27B's too
     /// since GitHub #336); 0 = the family's default
     /// ([`EngineShape::decode_lanes_for`]).
@@ -118,10 +109,6 @@ pub struct EngineShape {
     /// How the 27B holds its BF16 exception tensors (`--model-exception-weights`,
     /// GitHub #341): the binder places them converted to FP8 or as stored.
     pub exception_weights: ignis_core::ExceptionWeights,
-    /// Flash-Next's n-gram hot-row budget (`--ngram-hot-bytes`, GitHub
-    /// #306): 1 GiB unless named; `auto` is resolved against the host plan
-    /// at load.
-    pub ngram_hot_bytes: ignis_core::ngram_table::HotBudget,
     /// KV-disk's budget (`--kv-disk-bytes`, spec vram-budget/03); `None`
     /// takes the family's ([`EngineShape::kv_disk_bytes_for`]). Where its
     /// files go is not a shape's: the loader is handed it.
@@ -148,8 +135,6 @@ impl Default for EngineShape {
             vram: ignis_core::VramMode::Derived {
                 headroom_bytes: crate::config::DEFAULT_VRAM_HEADROOM_BYTES,
             },
-            allow_expert_cache_below_floor: false,
-            pinned_expert_bytes: 0,
             host_pool_bytes: crate::config::DEFAULT_HOST_POOL_BYTES,
             host_margin_bytes: crate::config::DEFAULT_HOST_MARGIN_BYTES,
             prompt_reuse: crate::config::DEFAULT_PROMPT_REUSE,
@@ -160,7 +145,6 @@ impl Default for EngineShape {
             retained_interactive_ttl: ignis_core::host::DEFAULT_RETAINED_INTERACTIVE_TTL,
             speculation: None,
             speculation_off: false,
-            draft_rows: 0,
             decode_lanes: 0,
             vision: None,
             rope_scaling: ignis_core::RopeScaling::NONE,
@@ -171,7 +155,6 @@ impl Default for EngineShape {
             adapt_ladder: crate::adaptation::Ladder::default(),
             prefill_attention: ignis_core::PrefillAttention::default(),
             exception_weights: ignis_core::ExceptionWeights::default(),
-            ngram_hot_bytes: ignis_core::ngram_table::HotBudget::default(),
             kv_disk_bytes: None,
             transfer_pace: None,
         }
@@ -188,8 +171,6 @@ impl From<&crate::config::Config> for EngineShape {
             kv_format: config.kv_format,
             kv_pool: config.kv_pool,
             vram: config.vram,
-            allow_expert_cache_below_floor: config.allow_expert_cache_below_floor,
-            pinned_expert_bytes: config.pinned_expert_bytes,
             host_pool_bytes: config.host_pool_bytes,
             host_margin_bytes: config.host_margin_bytes,
             prompt_reuse: config.prompt_reuse,
@@ -202,7 +183,6 @@ impl From<&crate::config::Config> for EngineShape {
             )),
             speculation: config.speculation,
             speculation_off: config.speculation_off,
-            draft_rows: config.draft_rows.unwrap_or(0),
             decode_lanes: config.decode_lanes.unwrap_or(0),
             vision: config.vision,
             rope_scaling: config.rope_scaling,
@@ -211,33 +191,10 @@ impl From<&crate::config::Config> for EngineShape {
             adapt_ladder: config.adapt_ladder(),
             prefill_attention: config.prefill_attention,
             exception_weights: config.exception_weights,
-            ngram_hot_bytes: config.ngram_hot_bytes.unwrap_or_default(),
             kv_disk_bytes: config.kv_disk_bytes,
             transfer_pace: None,
         }
     }
-}
-
-/// A Flash-Next load's speculation (spec flash-next/07): its MTP head only
-/// when `--spec-backend mtp` names it -- off by default, the owner's call after the
-/// head measured PCIe-bound on the 5090 (finding 2026-10-07) -- at the
-/// operator's draft tokens, cut by the row budget. A named head needs its
-/// companion (`companion_present`). The served-model check refused any other
-/// backend before this.
-pub fn flash_next_speculation(
-    shape: &EngineShape,
-    companion_present: bool,
-) -> Result<Option<ignis_core::speculation::FlashNextSpeculation>, String> {
-    use ignis_core::speculation::FlashNextSpeculation;
-    let Some(speculation) = shape.speculation.filter(|_| !shape.speculation_off) else {
-        return Ok(None);
-    };
-    if !companion_present {
-        return Err("--spec-backend mtp: the MTP head's companion container is not beside the artifact (spec flash-next/07)"
-            .to_string());
-    }
-    FlashNextSpeculation::new(ignis_core::SpeculativeBackend::Mtp, speculation.draft_tokens(), shape.draft_rows)
-        .map(Some)
 }
 
 impl EngineShape {
@@ -551,40 +508,6 @@ pub fn log_draft_head_auto(head: ignis_core::ProposalHead) {
     );
 }
 
-/// A Flash-Next load the host plan refused (spec flash-next/03), as an agent
-/// reads it: one `ignis.runtime.flash_next_host_plan_refused` event with
-/// every line, the memory available, the margin, what the plan needed and how
-/// far short it fell, in exact bytes. Its message is the refusal as a person
-/// reads it, the text the load then fails with.
-pub fn log_host_plan_refused(refusal: &ignis_core::residency::HostPlanError) {
-    let ignis_core::residency::HostPlanError::BelowMargin {
-        available_bytes,
-        planned_bytes,
-        margin_bytes,
-        crossing_line,
-        lines,
-        ..
-    } = refusal;
-    let line = |name: &str| lines.iter().find(|(line, _)| *line == name).map_or(0, |(_, bytes)| *bytes);
-    // hotpath-lint-allow: one line per refused load.
-    tracing::warn!(
-        name: "ignis.runtime.flash_next_host_plan_refused",
-        available_bytes = *available_bytes,
-        planned_bytes = *planned_bytes,
-        margin_bytes = *margin_bytes,
-        needed_bytes = refusal.needed_bytes(),
-        short_bytes = refusal.short_bytes(),
-        crossing_line = *crossing_line,
-        expert_pool_bytes = line("expert_pool"),
-        load_staging_bytes = line("load_staging"),
-        ngram_hot_rows_bytes = line("ngram_hot_rows"),
-        staging_bytes = line("staging"),
-        retained_host_slots_bytes = line("retained_host_slots"),
-        kv_ram_arena_bytes = line("kv_ram_arena"),
-        "{refusal}"
-    );
-}
-
 /// The 27B's host plan request (ADR 0062): what its load pins for its life
 /// -- the token embedding's mapped table (`token_embedding_bytes`), the
 /// vision tower's spans beside it under the `host` vision residency
@@ -750,40 +673,6 @@ impl std::fmt::Display for Qwen27bLoadError {
     }
 }
 
-/// Why a Flash-Next load failed: its host plan's refusal, kept whole so a
-/// switch can report it in bytes (`GET /v1/models`, `last_switch.host_plan`),
-/// a pinned hot set it cannot hold, kept whole so the load names its budget
-/// where the config took it from (`LoadError::from_flash_next`), or anything
-/// else, as the text it always was.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FlashNextLoadError {
-    HostPlan(ignis_core::residency::HostPlanError),
-    PinnedExperts(ignis_core::residency::PinRefused),
-    Other(String),
-}
-
-impl From<String> for FlashNextLoadError {
-    fn from(message: String) -> Self {
-        Self::Other(message)
-    }
-}
-
-impl From<&str> for FlashNextLoadError {
-    fn from(message: &str) -> Self {
-        Self::Other(message.to_owned())
-    }
-}
-
-impl std::fmt::Display for FlashNextLoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::HostPlan(refusal) => refusal.fmt(f),
-            Self::PinnedExperts(refusal) => refusal.fmt(f),
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
 /// One `ignis.runtime.vram_oversubscribed` warning per reason a plan's start
 /// proceeds anyway, on either model's load.
 pub fn log_vram_warnings(plan: &ignis_core::VramPlan) {
@@ -791,91 +680,6 @@ pub fn log_vram_warnings(plan: &ignis_core::VramPlan) {
         // hotpath-lint-allow: at most two lines per model load.
         tracing::warn!(name: "ignis.runtime.vram_oversubscribed", warning = %warning, "vram oversubscribed");
     }
-}
-
-/// The startup report of a Flash-Next load's VRAM plan: one
-/// `ignis.runtime.flash_next_plan` event with the budget, the lines the load
-/// reports, the KV pool policy's branch with the pool's pages, tokens and
-/// bytes (ADR 0045), residency's fixed lines and, of them, the prefill staging
-/// ring (0 on the resident branch, whose residency never stages: GitHub #329),
-/// the expert cache and the hit
-/// rate its split expects, the lanes and the speculation, and what of the free
-/// memory this process already held (GitHub #324).
-pub fn log_flash_next_plan(
-    plan: &ignis_core::VramPlan, expected_hit_rate: f64, lanes: u32, speculation: &str, process_held_bytes: u64,
-) {
-    let lines = plan.lines;
-    // hotpath-lint-allow: one line per model load.
-    tracing::info!(
-        name: "ignis.runtime.flash_next_plan",
-        budget_bytes = plan.budget_bytes,
-        weights_bytes = lines.weights,
-        program_bytes = lines.workspace + lines.sampling + lines.decode_graph,
-        pool_bytes = plan.kv_pool_bytes + lines.lane_state + lines.hq_residual_window,
-        kv_pool_policy = plan.kv_pool_policy.as_str(),
-        kv_pool_pages = plan.kv_page_count,
-        kv_pool_tokens = plan.kv_token_capacity(),
-        kv_pool_bytes = plan.kv_pool_bytes,
-        retained_device_bytes = lines.retained_slots,
-        residency_fixed_bytes = plan.residency_bytes,
-        prefill_staging_bytes = plan.staging_ring_bytes,
-        expert_cache_bytes = plan.expert_cache_bytes,
-        expected_hit_rate,
-        oversubscribed = plan.oversubscribed,
-        lanes,
-        verify_round_bytes = lines.verify_round,
-        speculation,
-        process_held_bytes,
-        "flash-next vram plan"
-    );
-}
-
-/// `ignis.runtime.flash_next_pinned_experts` (GitHub #329 item 12): a load that
-/// asked for a pinned hot set (`--vram-pinned-expert-bytes`) says what it
-/// pinned -- the bytes the host pool no longer holds, the experts and
-/// projections, per class, and the LRU's slots left around them -- or, on a
-/// device-only load, that it pinned nothing, its pool being 0 already.
-pub fn log_flash_next_pinned_experts(
-    budget_bytes: u64, pinned: &ignis_core::residency::PinnedExperts, cache: &ignis_core::residency::ExpertCachePlan,
-    device_only: bool,
-) {
-    use ignis_core::residency::KClass;
-    let lru = pinned.lru_capacity(cache.capacity());
-    let per_class = |slots: &[u32; KClass::COUNT]| {
-        KClass::ALL.iter().map(|c| format!("{} {}", c.as_str(), slots[c.index()])).collect::<Vec<_>>().join(", ")
-    };
-    // hotpath-lint-allow: one line per model load.
-    tracing::info!(
-        name: "ignis.runtime.flash_next_pinned_experts",
-        pinned_expert_budget_bytes = budget_bytes,
-        pinned_bytes = pinned.bytes,
-        pinned_experts = pinned.experts(),
-        pinned_projections = pinned.projections.len(),
-        pinned_per_class = %per_class(&pinned.per_class),
-        lru_slots_per_class = %per_class(&lru),
-        device_only,
-        "flash-next pinned experts"
-    );
-}
-
-/// `ignis.runtime.expert_cache_below_floor` (ADR 0045): the WARN a Flash-Next
-/// load emits when `--vram-allow-expert-cache-below-floor` started it with an
-/// expert cache below `floor_bytes` -- the cache, the floor, and the knobs
-/// that would lift it. Nothing for a cache at or above the floor.
-pub fn warn_expert_cache_below_floor(cache: &ignis_core::residency::ExpertCachePlan, floor_bytes: u64) {
-    if !cache.below_floor {
-        return;
-    }
-    // hotpath-lint-allow: one line per model load.
-    tracing::warn!(
-        name: "ignis.runtime.expert_cache_below_floor",
-        expert_cache_bytes = cache.cache_bytes,
-        floor_bytes,
-        expected_hit_rate = cache.expected_hit_rate,
-        knobs = "a smaller --vram-kv-pool-bytes, --model-prefill-chunk or --vram-headroom-bytes, fewer --reuse-retained-device, \
-                 or --spec-backend off",
-        "the expert cache is below its floor (--vram-allow-expert-cache-below-floor): decode slows sharply below it"
-    );
 }
 
 /// The leaf the operator's [`EngineShape`] is loaded as: the last step
@@ -1235,403 +1039,13 @@ pub fn qwen27b_load(
         budget_bytes: vram.budget_bytes,
         kv_pool_pages: capacity_pages,
         kv_page_bytes: stats.kv_page_bytes,
-        residency_bytes: 0,
-        expert_cache_bytes: 0,
-        condition_budget_bytes: 0,
         kv_ram_arena_bytes: shape.host_pool_bytes,
         retained_slots: sched.retained_slot_count(),
         retained_host_slots: shape.retained_host_slots,
         retained_host_bytes: reservations.retained_host_bytes,
         kv_disk_bytes,
-        flash_next: None,
-    };
+        };
     Ok((sched, reserved, shape, adapted.steps))
-}
-
-/// GitHub #302: the scheduler for a Qwen3.8-Flash-Next artifact, over
-/// [`ignis_runtime::FlashNextLeaf`]. The VRAM budget (`shape.vram`, as the
-/// 27B's) holds the weights, the CUDA context, the program's reservations,
-/// the sequence pool, residency's staging ring and tables; the expert cache
-/// takes the rest and is refused below its floor (spec flash-next/03).
-///
-/// Prompt reuse and the KV-RAM tier are the 27B's (spec flash-next/05, ADR
-/// 0029): the shape's `--reuse-prompt`, retained slots (host 8 and device 0
-/// unless named, [`EngineShape::for_family`]) and `--reuse-kv-host-pool-bytes`
-/// arena, which the leaf pins as its own. The retained slots are lines of
-/// the pool (device) and of the host plan (host), the arena a host-plan
-/// line; the scheduler's lanes are the load's decode lanes.
-#[cfg(feature = "cuda")]
-pub fn flash_next_scheduler(
-    artifact_path: &std::path::Path,
-    model_id: String,
-    eos: TokenId,
-    shape: EngineShape,
-    thinking_close: Option<Arc<ignis_core::thinking_budget::ThinkingClose>>,
-) -> Result<(ConcreteScheduler, crate::metrics::LoadReservations), String> {
-    flash_next_scheduler_with_ngram_cache(
-        artifact_path,
-        model_id,
-        eos,
-        shape,
-        thinking_close,
-        Default::default(),
-        &Default::default(),
-    )
-}
-
-#[cfg(feature = "cuda")]
-pub fn flash_next_scheduler_with_ngram_cache(
-    artifact_path: &std::path::Path, model_id: String, eos: TokenId, shape: EngineShape,
-    thinking_close: Option<Arc<ignis_core::thinking_budget::ThinkingClose>>,
-    ngram_cache: ignis_core::ngram_cache::PersistenceOptions,
-    kv_disk_location: &ignis_core::ngram_cache::CacheLocation,
-) -> Result<(ConcreteScheduler, crate::metrics::LoadReservations), String> {
-    flash_next_load(artifact_path, model_id, eos, shape, thinking_close, ngram_cache, kv_disk_location)
-        .map_err(|e| e.to_string())
-}
-
-/// The options a Flash-Next load of `shape` runs with, but for what its
-/// plans decide (the KV pool's pages, the expert cache, the n-gram hot
-/// rows). Separate from [`flash_next_load`] for the same reason as
-/// [`leaf_config_for_shape`]: the rotary table among them (ADR 0059) is the
-/// one value the reservation plan, the leaf's load and KV-disk's identity
-/// read, and a field left to `EngineOptions::default()` here would load the
-/// linear table under a plan and a label that say otherwise.
-#[cfg(feature = "cuda")]
-fn flash_next_engine_options(
-    shape: &EngineShape,
-    lanes: u32,
-    speculation: Option<ignis_core::speculation::FlashNextSpeculation>,
-    ngram_cache: ignis_core::ngram_cache::PersistenceOptions,
-) -> ignis_core::flash_next::EngineOptions {
-    ignis_core::flash_next::EngineOptions {
-        ngram_cache,
-        prefill_chunk_tokens: shape.prefill_chunk,
-        max_context_tokens: shape.max_context,
-        kv_format: shape.kv_format,
-        decode_lanes: lanes,
-        pinned_expert_bytes: shape.pinned_expert_bytes,
-        capture_graphs: true,
-        retained_device_slots: shape.retained_device_slots,
-        retained_host_slots: shape.retained_host_slots,
-        kv_ram_arena_bytes: shape.host_pool_bytes,
-        speculation,
-        rope_scaling: shape.rope_scaling,
-        ..ignis_core::flash_next::EngineOptions::default()
-    }
-}
-
-/// [`flash_next_scheduler_with_ngram_cache`], with a host plan's refusal
-/// kept whole ([`FlashNextLoadError::HostPlan`]): the server's load reads it.
-#[cfg(feature = "cuda")]
-pub(crate) fn flash_next_load(
-    artifact_path: &std::path::Path, model_id: String, eos: TokenId, shape: EngineShape,
-    thinking_close: Option<Arc<ignis_core::thinking_budget::ThinkingClose>>,
-    ngram_cache: ignis_core::ngram_cache::PersistenceOptions,
-    kv_disk_location: &ignis_core::ngram_cache::CacheLocation,
-) -> Result<(ConcreteScheduler, crate::metrics::LoadReservations), FlashNextLoadError> {
-    use ignis_artifact::flash_next::{self, FlashNextGeometry};
-    use ignis_artifact::{CudaDevice, Reader};
-    use ignis_core::compute::ModelConfig;
-    use ignis_core::flash_next::{
-        device_only, expert_traffic, plan_cache_request, residency_pools, PoolsRefused,
-        LOOKAHEAD_WIDTH,
-    };
-    use ignis_core::residency::load::{catalog, pinned_staging_bytes, pool_layout, pool_layout_without, stream_staging_bytes};
-    use ignis_core::ngram_table::NgramTable;
-    use ignis_core::residency::{
-        available_physical_bytes, ngram_hot_rows_room, plan_expert_cache, plan_host, prefill_staging_ring_bytes,
-        residency_table_bytes, HostPlanRequest, EXPERT_CACHE_FLOOR_BYTES,
-    };
-    use ignis_core::seq::SeqPool;
-    use ignis_runtime::{FlashNextLeaf, KV_PAGE_TOKENS};
-
-    let shape = shape.for_family(ignis_core::compute::ModelFamily::FlashNext);
-    let lanes = shape.decode_lanes_for(ignis_core::compute::ModelFamily::FlashNext);
-    // As the 27B's load reads it (GitHub #210, #324), but for the 27B's
-    // per-process state: no line here charges it, so a 27B's, if one ran,
-    // stays outside this budget.
-    let (nvml_free_bytes, _) = CudaDevice::nvml_memory(0)
-        .map_err(|e| format!("VRAM budget: free memory is unreadable: {e}"))?;
-    let process_held_bytes = ignis_runtime::held_before_load(CudaDevice::context_created(), false);
-    let free_at_start_bytes = nvml_free_bytes + process_held_bytes;
-
-    // The plan, before anything is on the device.
-    let reader = Reader::open(artifact_path).map_err(|e| format!("open artifact: {e}"))?;
-    let geometry = FlashNextGeometry::qwen38_flash_next();
-    let plan = flash_next::bind(&reader, &geometry).map_err(|e| format!("bind the Flash-Next artifact: {e:?}"))?;
-    // Spec flash-next/07: the MTP head, its companion pinned to this container and bound for the
-    // plan (its weights are a line of their own, taken from the expert cache).
-    let companion = artifact_path.parent().map(ignis_core::flash_next_mtp::companion_path);
-    let speculation = flash_next_speculation(&shape, companion.as_ref().is_some_and(|path| path.exists()))?;
-    let mtp_plan = match (speculation, &companion) {
-        (Some(_), Some(path)) => {
-            let sidecar = ignis_artifact::packer::sidecar_path(path);
-            let text = std::fs::read(&sidecar).map_err(|e| format!("the MTP head: read {}: {e}", sidecar.display()))?;
-            let sidecar: serde_json::Value =
-                serde_json::from_slice(&text).map_err(|e| format!("the MTP head: {}: {e}", sidecar.display()))?;
-            flash_next::mtp::check_pair(&sidecar, &reader).map_err(|e| e.to_string())?;
-            let companion_reader =
-                Reader::open(path).map_err(|e| format!("the MTP head: open {}: {e}", path.display()))?;
-            Some(flash_next::mtp::bind(&companion_reader, &geometry).map_err(|e| format!("bind the MTP head: {e}"))?)
-        }
-        (Some(_), None) => return Err("the MTP head: the artifact path has no directory".into()),
-        (None, _) => None,
-    };
-    // The options the leaf loads with, but for the KV pool's pages and the
-    // expert cache, which the plan below decides: one budget for the pool the
-    // plan charges and the pool the leaf builds.
-    let mut options = flash_next_engine_options(&shape, lanes, speculation, ngram_cache);
-    let reserved =
-        ignis_core::model_load::plan_flash_next_reservations(&plan, &geometry, options.load_shape(), mtp_plan.as_ref())?;
-    let config = ModelConfig::flash_next_from(&geometry);
-    // The sequence pool at any page count (ADR 0045): the lanes' state, the
-    // retained slots, the residual window and the n-gram state do not move
-    // with it; the arena its pages take -- KV and the indexer's keys, both
-    // paged -- is the plan's KV pool.
-    let pool_plan_at = |pages: u32| SeqPool::plan(&config, &options.pool_budget_of(pages), options.pool_backend());
-    let pool_plan = pool_plan_at(1)?;
-    let kv_arena_bytes = |pages: u32| pool_plan_at(pages).map_or(u64::MAX, |plan| plan.kv_bytes + plan.indexer_bytes);
-    let cat = catalog(&plan.experts)?;
-    let max_tokens = shape.prefill_chunk.max(lanes);
-    let staging_ring = prefill_staging_ring_bytes(&cat);
-    let tables = residency_table_bytes(
-        u64::from(cat.layers()),
-        u64::from(cat.experts()),
-        u64::from(max_tokens),
-        u64::from(LOOKAHEAD_WIDTH),
-    );
-    let lines = ignis_core::VramLines {
-        weights: plan.plan.device_capacity_bytes + mtp_plan.as_ref().map_or(0, |p| p.plan.device_capacity_bytes),
-        cuda_context: ignis_runtime::CUDA_CONTEXT_BYTES,
-        workspace: reserved.workspace_bytes + reserved.activation_bytes,
-        sampling: reserved.sampling_bytes,
-        decode_graph: reserved.decode_graph_bytes,
-        verify_round: reserved.verify_round_bytes,
-        lane_state: pool_plan.lane_state_bytes + pool_plan.ngram_conv_bytes,
-        retained_slots: pool_plan.retained_state_bytes,
-        hq_residual_window: pool_plan.hq_residual_bytes,
-        ..ignis_core::VramLines::default()
-    };
-    // ADR 0045: the KV pool follows residency -- offloaded on a card that
-    // cannot hold every expert, 524,288 tokens reserved first and the rest to
-    // the expert cache; resident on one that can, the pool taking the rest,
-    // the staging ring's bytes included (a device-only residency never
-    // stages, ADR 0054: the plan places the ring on the offloaded branch only).
-    // The arena reads a pool the leaf refuses to plan as one that never fits;
-    // `pool_plan` above already surfaced that refusal by name.
-    let vram = ignis_core::plan_vram(&ignis_core::VramRequest {
-        mode: shape.vram,
-        free_at_start_bytes,
-        lines,
-        kv_page_bytes: config.paged_sections(shape.kv_format).bytes_per_token() * u64::from(KV_PAGE_TOKENS),
-        max_context_tokens: shape.max_context,
-        retained_slots: options.retained_slots(),
-        kv_pool: shape.kv_pool,
-        residency: ignis_core::Residency::Experts(ignis_core::ExpertResidency {
-            expert_pool_bytes: cat.total_bytes(),
-            staging_ring_bytes: staging_ring,
-            table_bytes: tables,
-            decode_lanes: lanes,
-        }),
-        embedding_pool_named: false,
-        kv_arena_bytes: &kv_arena_bytes,
-        can_page: cfg!(windows),
-    })
-    .map_err(|e| e.to_string())?;
-    let indexer_bytes = pool_plan_at(vram.kv_page_count)?.indexer_bytes;
-    // The expert cache's floor and class minimum, at plan time: what the
-    // plan left it, split by the calibration traffic as the leaf will split
-    // it. Below the floor only with --vram-allow-expert-cache-below-floor; below
-    // a class's minimum -- the widest decode step's slots, a verify round's
-    // rows under MTP -- never. The plan's total holds the cache, so that
-    // total is the budget the cache's share is read against, and the ring is
-    // the one the plan placed (none on the resident branch).
-    let traffic = expert_traffic(artifact_path, &cat)?;
-    let plan_split = plan_expert_cache(&plan_cache_request(
-        &vram,
-        tables,
-        shape.allow_expert_cache_below_floor,
-        &options,
-        &cat,
-        &traffic,
-    ))
-    .map_err(|e| e.to_string())?;
-    log_vram_warnings(&vram);
-    warn_expert_cache_below_floor(&plan_split, EXPERT_CACHE_FLOOR_BYTES);
-    let speculation_text = speculation.map_or_else(
-        || "off".to_owned(),
-        |s| format!("mtp draft tokens {} rows {} (k at 1/2/3 lanes: {}/{}/{})", s.draft_tokens(), s.row_budget(),
-                    s.window(1), s.window(2), s.window(3)),
-    );
-    log_flash_next_plan(&vram, plan_split.expected_hit_rate, lanes, &speculation_text, process_held_bytes);
-    options.kv_pool_pages = Some(vram.kv_page_count);
-    options.expert_cache_bytes = vram.expert_cache_bytes;
-    // GitHub #329 item 12: the load's pools and pinned hot set, from the call
-    // `build_residency` makes with these same options, so the host plan
-    // charges the pool the load fills; refused here, before anything loads,
-    // when the pin cannot leave every class its widest decode step (the
-    // load names where its budget was set). Logged only when asked for, so
-    // a load at 0 logs what it did before.
-    let load_pools = residency_pools(&options, &cat, &traffic).map_err(|refused| match refused {
-        PoolsRefused::Pin(refusal) => FlashNextLoadError::PinnedExperts(refusal),
-        split => FlashNextLoadError::Other(split.to_string()),
-    })?;
-    if shape.pinned_expert_bytes > 0 {
-        let device_only = device_only(&options, &cat);
-        log_flash_next_pinned_experts(shape.pinned_expert_bytes, &load_pools.pinned, &load_pools.cache, device_only);
-    }
-    let pinned = load_pools.pinned;
-    // Spec flash-next/05: what one sequence's reusable state costs, derived
-    // from the topology -- the image a retained slot or a blob holds, and
-    // what each token adds to the pages.
-    // hotpath-lint-allow: one line per model load.
-    tracing::info!(
-        name: "ignis.runtime.flash_next_state",
-        state_image = %config.state_image(shape.kv_format),
-        paged = %config.paged_sections(shape.kv_format),
-        "flash-next sequence state"
-    );
-    // The host plan (spec flash-next/03), measured before the first pinned
-    // allocation: the expert pool and the n-gram hot rows must leave the
-    // margin, or the start is refused naming the line that crosses it.
-    let footprint = NgramTable::footprint(
-        &reader,
-        &plan,
-        config.ngram.ok_or("the Flash-Next topology has no n-gram embedding")?,
-    )?;
-    // Spec vram-budget/03: KV-disk's two pinned windows are the plan's
-    // staging line when the tier is named.
-    let kv_disk_bytes = shape.kv_disk_bytes_for(ignis_core::compute::ModelFamily::FlashNext);
-    let kv_disk_staging_bytes = if kv_disk_bytes > 0 { ignis_runtime::kv_disk::STAGING_BYTES } else { 0 };
-    // A load whose cache holds every expert pins no expert pool: its records
-    // go from the file to their slots through a few layer buffers, the
-    // load staging line's (`build_residency`), all freed before the leaf
-    // reads the n-gram hot rows (`FlashNextLeaf::open`).
-    let (expert_pool_bytes, load_staging_bytes) = if device_only(&options, &cat) {
-        (0, stream_staging_bytes(&plan.experts).map_err(|e| e.to_string())?)
-    } else if pinned.is_empty() {
-        (pool_layout(&plan.experts).bytes, 0)
-    } else {
-        // The pool without the pinned records, which go to their slots
-        // through a few buffers held while the experts load.
-        let by_key = pinned.by_key(&cat);
-        (
-            pool_layout_without(&plan.experts, &by_key).bytes,
-            pinned_staging_bytes(&plan.experts, &by_key).map_err(|e| e.to_string())?,
-        )
-    };
-    let mut host_request = available_physical_bytes().map(|available| HostPlanRequest {
-        available_physical_bytes: available,
-        scope: crate::config::field::scope(ignis_core::compute::ModelFamily::FlashNext),
-        token_embedding_bytes: 0,
-        vision_tower_bytes: 0,
-        vision_pool_bytes: 0,
-        expert_pool_bytes,
-        load_staging_bytes,
-        ngram_hot_rows_bytes: 0,
-        staging_bytes: kv_disk_staging_bytes,
-        retained_host_slots_bytes: pool_plan.retained_host_bytes,
-        kv_ram_arena_bytes: options.kv_ram_arena_bytes,
-        margin_bytes: shape.host_margin_bytes,
-    });
-    // GitHub #306: `--ngram-hot-bytes` as named, or `auto` from the room the
-    // other lines leave; the line charges the budget, capped at what the
-    // table can hold at it.
-    options.ngram.hot_bytes = shape.ngram_hot_bytes.resolve(&footprint, host_request.as_ref().map(ngram_hot_rows_room));
-    let ngram_hot_rows_bytes = footprint.line_bytes(options.ngram.hot_bytes);
-    if let Some(note) = shape.ngram_hot_bytes.warning(&footprint, host_request.is_some()) {
-        // hotpath-lint-allow: one line per model load.
-        tracing::warn!(
-            name: "ignis.runtime.ngram_hot_budget",
-            ngram_hot_budget = %shape.ngram_hot_bytes,
-            ngram_hot_budget_bytes = options.ngram.hot_bytes,
-            ngram_hot_rows_bytes,
-            ngram_whole_table_bytes = footprint.whole_table_bytes(),
-            "{note}"
-        );
-    }
-    if let Some(request) = host_request.as_mut() {
-        request.ngram_hot_rows_bytes = ngram_hot_rows_bytes;
-        let host = plan_host(request).map_err(|refusal| {
-            log_host_plan_refused(&refusal);
-            FlashNextLoadError::HostPlan(refusal)
-        })?;
-        // hotpath-lint-allow: one line per model load.
-        tracing::info!(
-            name: "ignis.runtime.flash_next_host_plan",
-            available_bytes = request.available_physical_bytes,
-            planned_bytes = host.total_bytes,
-            left_bytes = host.left_bytes,
-            margin_bytes = request.margin_bytes,
-            ngram_hot_budget = %shape.ngram_hot_bytes,
-            ngram_hot_budget_bytes = options.ngram.hot_bytes,
-            ngram_hot_rows_bytes,
-            ngram_whole_table = footprint.is_whole(options.ngram.hot_bytes),
-            retained_host_slots = options.retained_host_slots,
-            retained_host_bytes = pool_plan.retained_host_bytes,
-            kv_ram_arena_bytes = options.kv_ram_arena_bytes,
-            expert_pool_bytes = request.expert_pool_bytes,
-            load_staging_bytes = request.load_staging_bytes,
-            staging_bytes = request.staging_bytes,
-            kv_disk_staging_bytes,
-            "flash-next host plan"
-        );
-    }
-    drop(reader);
-    let leaf = FlashNextLeaf::open(artifact_path, options)?;
-    // ADR 0059: KV-disk labels its files with the table the leaf rotates at.
-    let rope_scaling = leaf.options().rope_scaling;
-    // GitHub #301, #302: the telemetry consumer reads the leaf's counters
-    // through their source, never through the leaf, which drops with its
-    // model.
-    let counters = leaf.counter_source();
-    let gate = leaf.prefill_gate();
-    let model = Arc::new(Model::load(Arc::new(leaf)).map_err(|e| format!("model load: {e:?}"))?);
-    let stats = model.stats().map_err(|e| format!("runtime stats: {e:?}"))?;
-    let capacity_pages = stats.kv_page_count;
-    // The 27B's reuse configuration (prompt reuse, retained slots, the
-    // KV-RAM tier's bytes), over this load's lanes, and KV-disk below it.
-    let kv_disk = KvDiskLoad {
-        artifact_path,
-        model_id: &model_id,
-        location: kv_disk_location,
-        bytes: kv_disk_bytes,
-        rope_scaling,
-        gate,
-        restore_floor_tokens: ignis_runtime::kv_disk::restore_floor_tokens(ignis_core::compute::ModelFamily::FlashNext),
-        pace: shape
-            .transfer_pace
-            .unwrap_or_else(|| ignis_runtime::TransferPace::for_family(ignis_core::compute::ModelFamily::FlashNext)),
-    };
-    let (sched, kv_disk_bytes) = scheduler_with_kv_disk(
-        SchedulerConfig {
-            thinking_close,
-            ..scheduler_config_for_shape(model_id.clone(), shape, KV_PAGE_TOKENS, capacity_pages, lanes)
-        },
-        model,
-        eos,
-        kv_disk,
-    )?;
-    let reserved = crate::metrics::LoadReservations {
-        // `/metrics` keeps the indexer's keys under the lanes' state, as
-        // before ADR 0045 moved them to the pool's pages in the plan: its
-        // KV pool is the leaf's pages of KV alone.
-        lines: ignis_core::VramLines { residual: 0, lane_state: lines.lane_state + indexer_bytes, ..lines },
-        budget_bytes: vram.budget_bytes,
-        kv_pool_pages: capacity_pages,
-        kv_page_bytes: stats.kv_page_bytes,
-        residency_bytes: vram.residency_bytes,
-        expert_cache_bytes: vram.expert_cache_bytes,
-        condition_budget_bytes: 0,
-        kv_ram_arena_bytes: shape.host_pool_bytes,
-        retained_slots: sched.retained_slot_count(),
-        retained_host_slots: shape.retained_host_slots,
-        retained_host_bytes: pool_plan.retained_host_bytes,
-        kv_disk_bytes,
-        flash_next: Some(counters),
-    };
-    Ok((sched, reserved))
 }
 
 #[cfg(test)]
@@ -1714,40 +1128,6 @@ mod tests {
         {
             assert!(model_scope_27b(&shape).fp8_exceptions);
             assert!(!model_scope_27b(&EngineShape::default()).fp8_exceptions);
-        }
-    }
-
-    /// ADR 0059: a Flash-Next load's options carry its shape's rotary table,
-    /// the one value its reservation plan is asked under, its leaf loads with
-    /// and KV-disk's identity reads back off the leaf; the identity's rope
-    /// bits are then the four scalars the leaf's load crosses
-    /// (`model_load::flash_next_options`, pinned in ignis-core). The plan
-    /// and the load are both asked under the options' one load shape, the
-    /// shape's own chunk, context and KV format among it.
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn flash_next_engine_options_carry_the_shapes_rope_table_to_the_kv_disk_identity() {
-        use ignis_core::RopeScaling;
-        for (scaling, scalars) in [
-            (RopeScaling::NONE, [0.0f32, 0.1, 32.0, 1.0]),
-            (RopeScaling::yarn(2.25).unwrap(), [2.25, 0.1, 32.0, 1.0]),
-        ] {
-            let shape = EngineShape { rope_scaling: scaling, ..EngineShape::default() };
-            let options = flash_next_engine_options(&shape, 3, None, Default::default());
-            assert_eq!(options.rope_scaling, scaling, "{scaling}");
-            let load = options.load_shape();
-            assert_eq!(
-                (load.prefill_chunk_tokens, load.max_context_tokens, load.kv_format, load.decode_lanes, load.rope_scaling),
-                (shape.prefill_chunk, shape.max_context, shape.kv_format, 3, scaling),
-                "{scaling}"
-            );
-            let identity = ignis_runtime::kv_disk::DiskIdentity::of_load(
-                "qwen3.8-flash-next",
-                &ignis_core::BlobIdentity::UNSET,
-                options.rope_scaling,
-                None,
-            );
-            assert_eq!(identity.rope_scaling, scalars.map(f32::to_bits), "{scaling}");
         }
     }
 
@@ -1870,141 +1250,6 @@ mod tests {
     }
 
     #[test]
-    fn a_flash_next_load_takes_its_family_decode_share_unless_one_is_named() {
-        // GitHub #306: a Flash-Next chunk runs for seconds, the 27B's for
-        // ~110 ms (ADR 0018); since #92 both default to a quarter (owner decision 2026-10-07).
-        use ignis_core::compute::ModelFamily;
-        let unnamed = EngineShape::default();
-        let flash = unnamed.for_family(ModelFamily::FlashNext);
-        // Owner decision 2026-10-07 (ADR 0018's amendment): a quarter on both.
-        assert_eq!(ModelFamily::FlashNext.default_decode_share_percent(), 25);
-        assert_eq!(ModelFamily::Qwen38_27b.default_decode_share_percent(), 25);
-        assert_eq!(flash.decode_share_percent, Some(25));
-        let on_27b = unnamed.with_family_decode_share(ModelFamily::Qwen38_27b);
-        assert_eq!(on_27b.decode_share_percent, Some(25), "the 27B's load reads its family's share too");
-        let zero_27b = EngineShape { decode_share_percent: Some(0), ..unnamed };
-        assert_eq!(
-            zero_27b.with_family_decode_share(ModelFamily::Qwen38_27b).decode_share_percent,
-            Some(0),
-            "--model-decode-share 0 restores one round per chunk"
-        );
-        let named_27b = EngineShape { decode_share_percent: Some(50), ..unnamed };
-        assert_eq!(named_27b.with_family_decode_share(ModelFamily::Qwen38_27b).decode_share_percent, Some(50));
-        let off = EngineShape { prompt_reuse: false, ..unnamed };
-        assert_eq!(off.for_family(ModelFamily::FlashNext).decode_share_percent, flash.decode_share_percent);
-        let named = EngineShape { decode_share_percent: Some(0), ..unnamed };
-        assert_eq!(named.for_family(ModelFamily::FlashNext).decode_share_percent, Some(0), "a named share stands");
-        let config = scheduler_config_for_shape("m".into(), unnamed, 16, 64, 8);
-        assert_eq!(config.decode_share, 0.0, "unresolved, one round per chunk");
-    }
-
-    #[test]
-    fn only_a_flash_next_load_lets_the_opener_s_page_ride_the_capture() {
-        // ADR 0029 as amended 2026-10-07 (GitHub #306): Flash-Next hands the
-        // pages below an opener over with its checkpoint, the 27B keeps its
-        // imaged prefix at a cut of its own.
-        use ignis_core::compute::ModelFamily;
-        let unnamed = EngineShape::default();
-        let flash = scheduler_config_for_shape("m".into(), unnamed.for_family(ModelFamily::FlashNext), 64, 1024, 8);
-        assert!(flash.opener_page_rides_capture);
-        let off = EngineShape { prompt_reuse: false, ..unnamed };
-        assert!(
-            scheduler_config_for_shape("m".into(), off.for_family(ModelFamily::FlashNext), 64, 1024, 8)
-                .opener_page_rides_capture,
-            "a property of the family, inert while reuse is off"
-        );
-        // The 27B's load takes only the decode-share step (`main.rs`), and
-        // nothing on that path may switch it on.
-        let on_27b = unnamed.with_family_decode_share(ModelFamily::Qwen38_27b);
-        assert!(!scheduler_config_for_shape("m".into(), on_27b, 64, 1024, 8).opener_page_rides_capture);
-        assert!(!scheduler_config_for_shape("m".into(), unnamed.for_family(ModelFamily::Qwen38_27b), 64, 1024, 8)
-            .opener_page_rides_capture);
-    }
-
-    #[test]
-    fn a_flash_next_load_keeps_eight_host_retained_slots_unless_one_is_named() {
-        // Spec flash-next/05: host 8, device 0 and a 2 GiB arena by default.
-        use ignis_core::compute::ModelFamily;
-        let unnamed = EngineShape::default();
-        let flash = unnamed.for_family(ModelFamily::FlashNext);
-        assert_eq!((flash.retained_device_slots, flash.retained_host_slots), (0, 8));
-        assert_eq!(flash.host_pool_bytes, 2 << 30);
-        assert_eq!(unnamed.for_family(ModelFamily::Qwen38_27b).retained_host_slots, 16, "the 27B's own");
-        // GitHub #336: two per lane on the 27B, Flash-Next's 8 whatever its lanes.
-        let two = EngineShape { decode_lanes: 2, ..EngineShape::default() };
-        assert_eq!(two.for_family(ModelFamily::Qwen38_27b).retained_host_slots, 4);
-        assert_eq!(two.for_family(ModelFamily::FlashNext).retained_host_slots, 8);
-
-        let named = EngineShape { retained_host_slots: 16, retained_host_named: true, ..EngineShape::default() };
-        assert_eq!(named.for_family(ModelFamily::FlashNext).retained_host_slots, 16, "a named count stands");
-        let off = EngineShape { prompt_reuse: false, retained_host_slots: 0, ..EngineShape::default() };
-        assert_eq!(off.for_family(ModelFamily::FlashNext).retained_host_slots, 0, "reuse off retains nothing");
-    }
-
-    /// GitHub #307: Flash-Next's MTP head is off by default -- the owner's
-    /// call after the bench found it PCIe-bound on the 5090 (finding
-    /// 2026-10-07). `--spec-backend mtp` turns it on at its draft tokens and the
-    /// operator's row budget, and refuses a load without the companion.
-    #[test]
-    fn flash_next_speculation_is_off_unless_named() {
-        let shape = EngineShape { draft_rows: 6, ..EngineShape::default() };
-        assert_eq!(flash_next_speculation(&shape, true).unwrap(), None, "off by default, companion or not");
-        assert_eq!(flash_next_speculation(&shape, false).unwrap(), None);
-        let named = EngineShape {
-            speculation: Some(ignis_core::Speculation::new(ignis_core::SpeculativeBackend::Mtp, 3).unwrap()),
-            ..shape
-        };
-        let on = flash_next_speculation(&named, true).unwrap().expect("--spec-backend mtp turns it on");
-        assert_eq!((on.draft_tokens(), on.row_budget()), (3, 6));
-        let missing = flash_next_speculation(&named, false).unwrap_err();
-        assert!(missing.contains("companion"), "{missing}");
-        let off = EngineShape { speculation_off: true, ..named };
-        assert_eq!(flash_next_speculation(&off, true).unwrap(), None);
-    }
-
-    #[test]
-    fn the_ngram_hot_budget_reaches_the_engine_shape_and_defaults_to_1_gib() {
-        use ignis_core::ngram_table::{HotBudget, DEFAULT_HOT_BYTES};
-        let shape_of = |flags: &[&str]| {
-            let args: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
-            let crate::config::ConfigOutcome::Config(config) = crate::config::resolve(&args, |_| None).expect("resolve")
-            else {
-                panic!("expected a runnable config");
-            };
-            EngineShape::from(&config).ngram_hot_bytes
-        };
-        assert_eq!(shape_of(&[]), HotBudget::Bytes(DEFAULT_HOT_BYTES));
-        assert_eq!(shape_of(&["--ngram-hot-bytes", "auto"]), HotBudget::Auto);
-        assert_eq!(shape_of(&["--ngram-hot-bytes", "32G"]), HotBudget::Bytes(32 << 30));
-    }
-
-    /// Spec vram-budget/03 AC 12: KV-disk is on at 4 GiB on Flash-Next and
-    /// off on the 27B unless named; a named budget, 0 included, is the
-    /// operator's on both. The shape alone never turns the tier on: the
-    /// scheduler config it builds has no disk until a store opens.
-    #[test]
-    fn the_kv_disk_budget_is_the_family_default_unless_named() {
-        use ignis_core::compute::ModelFamily;
-        let shape_of = |argv: &[&str]| {
-            let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
-            match crate::config::resolve(&argv, |_| None).expect("resolve") {
-                crate::config::ConfigOutcome::Config(config) => EngineShape::from(&config),
-                _ => panic!("a config"),
-            }
-        };
-        let unnamed = shape_of(&[]);
-        assert_eq!(unnamed.kv_disk_bytes_for(ModelFamily::FlashNext), 4 << 30);
-        assert_eq!(unnamed.kv_disk_bytes_for(ModelFamily::Qwen38_27b), 0, "the 27B writes nothing at its defaults");
-        let named = shape_of(&["--kv-disk-bytes", "4G"]);
-        assert_eq!(named.kv_disk_bytes_for(ModelFamily::FlashNext), 4 << 30);
-        assert_eq!(named.kv_disk_bytes_for(ModelFamily::Qwen38_27b), 4 << 30);
-        let off = shape_of(&["--kv-disk-bytes", "0"]);
-        assert_eq!(off.kv_disk_bytes_for(ModelFamily::FlashNext), 0);
-        let config = scheduler_config_for_shape("m".into(), unnamed.for_family(ModelFamily::FlashNext), 64, 1024, 8);
-        assert_eq!(config.kv_disk_capacity_bytes, 0);
-    }
-
-    #[test]
     fn the_operator_prefill_chunk_reaches_the_scheduler_config() {
         let shape = EngineShape {
             prefill_chunk: 512,
@@ -2014,8 +1259,6 @@ mod tests {
             kv_format: ignis_core::KvFormat::Bf16,
             kv_pool: Some(ignis_core::KvPoolSize::Tokens(512 * 1024)),
             vram: EngineShape::default().vram,
-            allow_expert_cache_below_floor: true,
-            pinned_expert_bytes: 0,
             host_pool_bytes: crate::config::DEFAULT_HOST_POOL_BYTES,
             host_margin_bytes: crate::config::DEFAULT_HOST_MARGIN_BYTES,
             prompt_reuse: true,
@@ -2026,7 +1269,6 @@ mod tests {
             retained_interactive_ttl: std::time::Duration::from_secs(60),
             speculation: None,
             speculation_off: false,
-            draft_rows: 0,
             decode_lanes: 0,
             vision: None,
             rope_scaling: ignis_core::RopeScaling::NONE,
@@ -2035,7 +1277,6 @@ mod tests {
             adapt_ladder: crate::adaptation::Ladder::default(),
             prefill_attention: ignis_core::PrefillAttention::default(),
             exception_weights: ignis_core::ExceptionWeights::default(),
-            ngram_hot_bytes: ignis_core::ngram_table::HotBudget::Auto,
             kv_disk_bytes: None,
             transfer_pace: None,
         };
@@ -2056,31 +1297,8 @@ mod tests {
         assert_eq!(config.retained_interactive_ttl, std::time::Duration::from_secs(60));
     }
 
-    #[test]
-    fn the_default_max_tokens_reaches_the_scheduler_on_both_models() {
-        // ADR 0045: 38,912 unless named, and a named value -- 8,192 -- on
-        // either family's load, through the one shape both build from.
-        use ignis_core::compute::ModelFamily;
-        let shape_of = |flags: &[&str]| {
-            let args: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
-            let crate::config::ConfigOutcome::Config(config) = crate::config::resolve(&args, |_| None).expect("resolve")
-            else {
-                panic!("expected a runnable config");
-            };
-            EngineShape::from(&config)
-        };
-        for (flags, cap) in [(&[][..], 38_912), (&["--model-default-max-tokens", "8192"][..], 8_192), (&["--model-default-max-tokens", "0"][..], 0)] {
-            let shape = shape_of(flags);
-            let flash = shape.for_family(ModelFamily::FlashNext);
-            let qwen = shape.with_family_decode_share(ModelFamily::Qwen38_27b);
-            for (family, shape) in [("Flash-Next", flash), ("27B", qwen)] {
-                assert_eq!(scheduler_config_for_shape("m".into(), shape, 64, 1024, 8).default_max_tokens, cap, "{family} {flags:?}");
-            }
-        }
-    }
-
     /// The 27B's shape under `rtx5090` with `flags`, as its load is handed it.
-    fn rtx5090_27b(flags: &[&str]) -> EngineShape {
+    fn rtx5080_27b(flags: &[&str]) -> EngineShape {
         let args: Vec<String> = flags.iter().map(|flag| flag.to_string()).collect();
         let crate::config::ConfigOutcome::Config(config) = crate::config::resolve(&args, |_| None).expect("resolve") else {
             panic!("expected a runnable config");
@@ -2096,22 +1314,22 @@ mod tests {
     fn a_shape_at_an_adapted_attempt_re_resolves_what_follows_its_values() {
         use crate::adaptation::{Adaptable, Attempt};
         use ignis_core::{ProposalHead, RopeScaling};
-        let shape = rtx5090_27b(&[]);
+        let shape = rtx5080_27b(&[]);
         assert_eq!(shape.adaptable, Adaptable::ALL);
-        assert_eq!(rtx5090_27b(&["--model-max-context", "131072"]).adaptable, Adaptable { max_context: false, ..Adaptable::ALL });
+        assert_eq!(rtx5080_27b(&["--model-max-context", "131072"]).adaptable, Adaptable { max_context: false, ..Adaptable::ALL });
         assert_eq!(shape.rope_setting, ignis_core::RopeSetting::Auto);
         assert_eq!(shape.adapt_ladder, crate::adaptation::Ladder { context_step: 65_536, spare_tokens: 65_536 });
-        let ladder = rtx5090_27b(&["--model-adapt-context-step", "131072", "--vram-adapt-spare-tokens", "0"]).adapt_ladder;
+        let ladder = rtx5080_27b(&["--model-adapt-context-step", "131072", "--vram-adapt-spare-tokens", "0"]).adapt_ladder;
         assert_eq!(ladder, crate::adaptation::Ladder { context_step: 131_072, spare_tokens: 0 }, "the fields reach the shape");
-        assert_eq!((shape.max_context, shape.rope_scaling.factor()), (917_504, 3.5));
+        assert_eq!((shape.max_context, shape.rope_scaling.factor()), (262_144, 0.0));
         let start = shape.adaptation_start();
-        assert_eq!(start, Attempt { max_context: 917_504, decode_lanes: 8, draft_head: Some(ProposalHead::Full) });
+        assert_eq!(start, Attempt { max_context: 262_144, decode_lanes: 2, draft_head: Some(ProposalHead::Full) });
         assert_eq!(shape.at(start), shape, "at its own values, itself");
 
         let narrower = shape.at(Attempt { max_context: 786_432, ..start });
         assert_eq!((narrower.max_context, narrower.rope_scaling.factor()), (786_432, 3.0), "auto re-resolved");
         assert_eq!(shape.at(Attempt { max_context: 196_608, ..start }).rope_scaling, RopeScaling::NONE, "within the trained positions");
-        let fixed = rtx5090_27b(&["--model-rope-scaling", "yarn:4"]);
+        let fixed = rtx5080_27b(&["--model-rope-scaling", "yarn:4"]);
         assert!(!fixed.rope_setting.is_auto());
         assert_eq!(fixed.at(Attempt { max_context: 786_432, ..start }).rope_scaling, fixed.rope_scaling, "a spelled-out table stays");
 
@@ -2128,43 +1346,15 @@ mod tests {
         let one = shape.at(Attempt { decode_lanes: 1, ..start });
         assert_eq!((one.decode_lanes_for(ignis_core::compute::ModelFamily::Qwen38_27b), one.retained_host_slots), (1, 2));
         assert_eq!((one.max_context, one.rope_scaling), (shape.max_context, shape.rope_scaling));
-        let named = rtx5090_27b(&["--reuse-retained-host", "16"]);
+        let named = rtx5080_27b(&["--reuse-retained-host", "16"]);
         assert_eq!(named.at(Attempt { decode_lanes: 1, ..start }).retained_host_slots, 16, "a named count stays");
-        let off = rtx5090_27b(&["--reuse-prompt", "off"]);
+        let off = rtx5080_27b(&["--reuse-prompt", "off"]);
         assert_eq!(off.at(Attempt { decode_lanes: 1, ..start }).retained_host_slots, 0, "reuse off keeps none");
 
         let full = shape.at(Attempt { draft_head: Some(ProposalHead::Full), ..start });
         assert_eq!(full, shape);
         let short = Attempt { draft_head: Some(ProposalHead::Shortlist), ..start };
         assert_eq!(shape.at(short).speculation.map(|s| s.proposal_head()), Some(ProposalHead::Shortlist));
-    }
-
-    /// GitHub #336: a load's scheduler holds no more requests in flight, in
-    /// one prefill batch or on a pool slot than the load has lanes -- the
-    /// 27B's as its shape names them, 8 when none is, as Flash-Next's.
-    #[test]
-    fn the_scheduler_takes_the_loads_decode_lanes() {
-        use ignis_core::compute::ModelFamily;
-        for (named, lanes) in [(1, 1), (2, 2), (8, 8), (0, 8)] {
-            let shape = EngineShape { decode_lanes: named, ..EngineShape::default() };
-            let config = scheduler_config_for_shape("m".into(), shape, 64, 1024, shape.decode_lanes_for(ModelFamily::Qwen38_27b));
-            assert_eq!(
-                (config.max_in_flight, config.max_prefill_batch, config.resident_slot_capacity),
-                (lanes, lanes, lanes as u32),
-                "the 27B at {named} lanes named"
-            );
-        }
-        let flash = EngineShape::default().for_family(ModelFamily::FlashNext);
-        let config = scheduler_config_for_shape("m".into(), flash, 64, 1024, flash.decode_lanes_for(ModelFamily::FlashNext));
-        assert_eq!((config.max_in_flight, config.resident_slot_capacity), (3, 3), "Flash-Next's own 3");
-        // Eight lanes are the scheduler's own defaults: the 27B's default load
-        // admits as it did before its lanes were a setting.
-        let eight = scheduler_config_for_shape("m".into(), EngineShape::default(), 64, 1024, 8);
-        let default = SchedulerConfig::default();
-        assert_eq!(
-            (eight.max_in_flight, eight.max_prefill_batch, eight.resident_slot_capacity),
-            (default.max_in_flight, default.max_prefill_batch, default.resident_slot_capacity)
-        );
     }
 
     #[test]
@@ -2197,19 +1387,6 @@ mod tests {
         let leaf = leaf_config_for_shape(shape, 1 << 30);
         assert_eq!((leaf.retained_device_slots, leaf.retained_host_slots), (2, 3));
         assert_eq!(scheduler_config_for_shape("m".into(), shape, 64, 1024, 8).retained_slots, 5);
-    }
-
-    /// GitHub #336: the 27B's leaf -- its pool's slots and its model's widest
-    /// round -- takes the shape's lanes, and the 27B's own 8 when none is
-    /// named; Flash-Next's 3 is never the 27B's.
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn the_27bs_leaf_takes_the_shapes_decode_lanes() {
-        let lanes = |decode_lanes| leaf_config_for_shape(EngineShape { decode_lanes, ..EngineShape::default() }, 1 << 30).slot_count;
-        assert_eq!(lanes(0), ignis_core::N_DECODE_LANES as u32);
-        assert_eq!(lanes(2), 2);
-        assert_eq!(lanes(1), 1);
-        assert_eq!(EngineShape::default().decode_lanes_for(ignis_core::compute::ModelFamily::FlashNext), 3);
     }
 
     #[test]
@@ -2278,63 +1455,6 @@ mod tests {
 
     /// What a reload's plan event names as held (GitHub #324).
     const PROCESS_HELD: u64 = ignis_runtime::CUDA_CONTEXT_BYTES + ignis_runtime::QWEN27B_PROCESS_STATE_BYTES;
-
-    /// The host plan refused on 2026-10-13: 41.6 GB available.
-    fn starved_plan() -> ignis_core::residency::HostPlanError {
-        ignis_core::residency::plan_host(&ignis_core::residency::HostPlanRequest {
-            available_physical_bytes: 41_632_530_432,
-            scope: "qwen38flashnext",
-            token_embedding_bytes: 0,
-            vision_tower_bytes: 0,
-            vision_pool_bytes: 0,
-            expert_pool_bytes: 37_795_446_784,
-            load_staging_bytes: 0,
-            ngram_hot_rows_bytes: 1 << 30,
-            staging_bytes: 64 << 20,
-            retained_host_slots_bytes: 1_040_115_712,
-            kv_ram_arena_bytes: 2 << 30,
-            margin_bytes: ignis_core::residency::DEFAULT_HOST_MARGIN_BYTES,
-        })
-        .expect_err("short of RAM")
-    }
-
-    /// The one event [`log_host_plan_refused`] logs for `refusal`.
-    fn refusal_event(refusal: &ignis_core::residency::HostPlanError) -> serde_json::Value {
-        use tracing_subscriber::layer::SubscriberExt;
-        let sink = std::sync::Arc::new(ignis_logging::MemorySink::new());
-        let subscriber = tracing_subscriber::registry().with(ignis_logging::JsonLayer::new(sink.clone()));
-        tracing::subscriber::with_default(subscriber, || log_host_plan_refused(refusal));
-        let mut events: Vec<serde_json::Value> =
-            sink.lines().iter().map(|line| serde_json::from_str(line).expect("valid json")).collect();
-        assert_eq!(events.len(), 1, "{events:?}");
-        events.remove(0)
-    }
-
-    #[test]
-    fn a_refused_host_plan_logs_every_line_in_bytes_beside_the_persons_message() {
-        let refusal = starved_plan();
-        let event = refusal_event(&refusal);
-        assert_eq!(event["event_name"], "ignis.runtime.flash_next_host_plan_refused");
-        assert_eq!(event["severity_text"], "WARN");
-        assert_eq!(event["body"], refusal.to_string(), "the message a person reads");
-        let attributes = &event["attributes"];
-        for (field, bytes) in [
-            ("available_bytes", 41_632_530_432u64),
-            ("planned_bytes", 42_123_896_832),
-            ("margin_bytes", 4 << 30),
-            ("needed_bytes", 46_418_864_128),
-            ("short_bytes", 4_786_333_696),
-            ("expert_pool_bytes", 37_795_446_784),
-            ("load_staging_bytes", 0),
-            ("ngram_hot_rows_bytes", 1 << 30),
-            ("staging_bytes", 64 << 20),
-            ("retained_host_slots_bytes", 1_040_115_712),
-            ("kv_ram_arena_bytes", 2 << 30),
-        ] {
-            assert_eq!(attributes[field], bytes, "{field}: {attributes}");
-        }
-        assert_eq!(attributes["crossing_line"], "expert_pool");
-    }
 
     /// ADR 0062: the 27B's host plan holds its token embedding, the host
     /// retained slots and the KV-RAM arena it pins, KV-disk's staging only
@@ -2418,7 +1538,7 @@ mod tests {
     #[test]
     fn the_embedding_pool_mib_sizes_the_host_plans_pool_line_under_host() {
         let pool = |flags: &[&str]| {
-            qwen27b_host_request(64 << 30, 1_350_860_800, 297_000_960, 0, &rtx5090_27b(flags)).vision_pool_bytes
+            qwen27b_host_request(64 << 30, 1_350_860_800, 297_000_960, 0, &rtx5080_27b(flags)).vision_pool_bytes
         };
         let host = ["--vision-enabled", "--vision-max-tokens", "4096", "--vision-residency", "host"];
         assert_eq!(pool(&host), 4096 * 5120 * 2, "the default: one envelope-wide item");
@@ -2427,7 +1547,7 @@ mod tests {
         let device = ["--vision-enabled", "--vision-max-tokens", "4096", "--vision-residency", "device", "--vision-embedding-pool-mib", "640"];
         assert_eq!(pool(&device), 0, "the device's pool is a VRAM line");
         let text_only = qwen27b_host_request(64 << 30, 1_350_860_800, 0, 0, &{
-            let mut shape = rtx5090_27b(&host);
+            let mut shape = rtx5080_27b(&host);
             shape.vision = None;
             shape
         });
@@ -2579,39 +1699,6 @@ mod tests {
         assert_eq!(text["vision_pool_bytes"], 0);
     }
 
-    /// A device-only load (ADR 0054) on a machine with 8.5 GB available: its
-    /// ~4.7 GB of layer buffers, the peak, do not fit. The event names them
-    /// apart from KV-disk's staging (GitHub #329 item 3).
-    #[test]
-    fn a_refused_device_only_plan_logs_its_layer_buffers_apart_from_kv_disks_staging() {
-        let refusal = ignis_core::residency::plan_host(&ignis_core::residency::HostPlanRequest {
-            available_physical_bytes: 8_500_000_000,
-            scope: "qwen38flashnext",
-            token_embedding_bytes: 0,
-            vision_tower_bytes: 0,
-            vision_pool_bytes: 0,
-            expert_pool_bytes: 0,
-            load_staging_bytes: 4_700_000_000,
-            ngram_hot_rows_bytes: 1 << 30,
-            staging_bytes: 64 << 20,
-            retained_host_slots_bytes: 1_040_115_712,
-            kv_ram_arena_bytes: 2 << 30,
-            margin_bytes: ignis_core::residency::DEFAULT_HOST_MARGIN_BYTES,
-        })
-        .expect_err("short of RAM");
-        let event = refusal_event(&refusal);
-        let attributes = &event["attributes"];
-        for (field, bytes) in [
-            ("planned_bytes", 4_700_000_000u64),
-            ("expert_pool_bytes", 0),
-            ("load_staging_bytes", 4_700_000_000),
-            ("staging_bytes", 64 << 20),
-        ] {
-            assert_eq!(attributes[field], bytes, "{field}: {attributes}");
-        }
-        assert_eq!(attributes["crossing_line"], "load_staging");
-    }
-
     fn plan_for(mode: ignis_core::VramMode, free: u64) -> ignis_core::VramPlan {
         let reserved = ignis_runtime::ReservedBytes {
             workspace: 1 << 30,
@@ -2744,128 +1831,6 @@ mod tests {
     }
 
     #[test]
-    fn the_flash_next_plan_event_says_which_branch_the_pool_took_and_its_size() {
-        // ADR 0045 (AC 7): `ignis.runtime.flash_next_plan` carries the policy,
-        // the pool's pages and tokens, on a plan the load's own call builds.
-        const PAGE: u64 = 4_224 * 64;
-        let arena = |pages: u32| 4_096 + u64::from(pages) * PAGE;
-        let lines = ignis_core::VramLines { weights: 5 << 30, workspace: 2 << 30, lane_state: 400 << 20, ..Default::default() };
-        let plan_at = |free_at_start_bytes: u64| {
-            ignis_core::plan_vram(&ignis_core::VramRequest {
-                mode: ignis_core::VramMode::Derived { headroom_bytes: 4 << 30 },
-                free_at_start_bytes,
-                lines,
-                kv_page_bytes: PAGE,
-                max_context_tokens: 262_144,
-                retained_slots: 8,
-                kv_pool: None,
-                residency: ignis_core::Residency::Experts(ignis_core::ExpertResidency {
-                    expert_pool_bytes: 37 << 30,
-                    staging_ring_bytes: 1_497 << 20,
-                    table_bytes: 3 << 20,
-                    decode_lanes: 3,
-                }),
-                embedding_pool_named: false,
-                kv_arena_bytes: &arena,
-                can_page: true,
-            })
-            .expect("fits")
-        };
-        let held = ignis_runtime::CUDA_CONTEXT_BYTES;
-        let event_of = |plan: &ignis_core::VramPlan| {
-            use tracing_subscriber::layer::SubscriberExt;
-            let sink = std::sync::Arc::new(ignis_logging::MemorySink::new());
-            let subscriber = tracing_subscriber::registry().with(ignis_logging::JsonLayer::new(sink.clone()));
-            tracing::subscriber::with_default(subscriber, || log_flash_next_plan(plan, 0.5, 3, "off", held));
-            let records: Vec<serde_json::Value> =
-                sink.lines().iter().map(|line| serde_json::from_str(line).expect("json")).collect();
-            assert_eq!(records.len(), 1, "{records:?}");
-            let event = records[0].clone();
-            assert_eq!(event["event_name"], "ignis.runtime.flash_next_plan", "{event}");
-            move |name: &str| {
-                event.get(name).or_else(|| event["attributes"].get(name)).cloned().unwrap_or_else(|| panic!("no `{name}` in {event}"))
-            }
-        };
-        let plan = plan_at(31 << 30);
-        let field = event_of(&plan);
-        assert_eq!(field("kv_pool_policy"), "offloaded");
-        assert_eq!(field("kv_pool_pages"), 8_192);
-        assert_eq!(field("kv_pool_tokens"), 524_288);
-        assert_eq!(field("kv_pool_bytes"), arena(8_192));
-        assert_eq!(field("expert_cache_bytes"), plan.expert_cache_bytes);
-        assert_eq!(field("residency_fixed_bytes"), 1_500u64 << 20);
-        assert_eq!(field("prefill_staging_bytes"), 1_497u64 << 20);
-        assert_eq!(field("budget_bytes"), 27u64 << 30);
-        assert_eq!(field("pool_bytes"), arena(8_192) + (400 << 20));
-        assert_eq!(field("lanes"), 3);
-        assert_eq!(field("oversubscribed"), false);
-        assert_eq!(field("process_held_bytes"), held);
-
-        // GitHub #329 item 2: resident, the residency is device-only and
-        // stages nothing, so the event shows no ring and the pool has its
-        // bytes: the budget less the lines, the tables and the experts.
-        let plan = plan_at(96 << 30);
-        let field = event_of(&plan);
-        assert_eq!(field("kv_pool_policy"), "resident");
-        assert_eq!(field("prefill_staging_bytes"), 0);
-        assert_eq!(field("residency_fixed_bytes"), 3u64 << 20);
-        let rest = (92u64 << 30) - lines.total() - (3 << 20) - (37 << 30);
-        assert_eq!(field("kv_pool_pages"), (rest - 4_096) / PAGE);
-    }
-
-    /// GitHub #329 item 12: a load that asked for a pinned hot set says what
-    /// it pinned, by class, and what the LRU keeps around it.
-    #[test]
-    fn the_pinned_experts_event_names_the_bytes_the_host_pool_gives_up() {
-        use ignis_core::residency::{ClassPool, ExpertCachePlan, KClass, PinnedExperts, Projection, ProjectionId};
-        let mut pools = [ClassPool::default(); KClass::COUNT];
-        (pools[3], pools[7]) = (ClassPool { slots: 100, bytes: 0 }, ClassPool { slots: 90, bytes: 0 });
-        let cache = ExpertCachePlan {
-            cache_bytes: 18 << 30,
-            pools,
-            staging_ring_bytes: 0,
-            table_bytes: 0,
-            expected_hit_rate: 0.6,
-            below_floor: false,
-        };
-        let pinned = PinnedExperts {
-            projections: Projection::ALL.map(|p| ProjectionId::new(7, 3, p)).to_vec(),
-            per_class: [0, 0, 0, 1, 0, 0, 0, 1],
-            bytes: 1_646_592 + 827_392,
-        };
-        let event = |pinned: &PinnedExperts, device_only: bool| {
-            use tracing_subscriber::layer::SubscriberExt;
-            let sink = std::sync::Arc::new(ignis_logging::MemorySink::new());
-            let subscriber = tracing_subscriber::registry().with(ignis_logging::JsonLayer::new(sink.clone()));
-            tracing::subscriber::with_default(subscriber, || log_flash_next_pinned_experts(1 << 30, pinned, &cache, device_only));
-            let records: Vec<serde_json::Value> =
-                sink.lines().iter().map(|line| serde_json::from_str(line).expect("json")).collect();
-            assert_eq!(records.len(), 1, "{records:?}");
-            assert_eq!(records[0]["event_name"], "ignis.runtime.flash_next_pinned_experts", "{}", records[0]);
-            let event = records[0].clone();
-            move |name: &str| {
-                event.get(name).or_else(|| event["attributes"].get(name)).cloned().unwrap_or_else(|| panic!("no `{name}` in {event}"))
-            }
-        };
-        let field = event(&pinned, false);
-        assert_eq!(field("pinned_expert_budget_bytes"), 1u64 << 30);
-        assert_eq!(field("pinned_bytes"), 1_646_592 + 827_392);
-        assert_eq!(field("pinned_experts"), 1);
-        assert_eq!(field("pinned_projections"), 2);
-        assert_eq!(
-            field("pinned_per_class"),
-            "gate_up_k2 0, gate_up_k2_5 0, gate_up_k3 0, gate_up_k4 1, down_k2 0, down_k2_5 0, down_k3 0, down_k4 1"
-        );
-        assert_eq!(
-            field("lru_slots_per_class"),
-            "gate_up_k2 0, gate_up_k2_5 0, gate_up_k3 0, gate_up_k4 99, down_k2 0, down_k2_5 0, down_k3 0, down_k4 89"
-        );
-        assert_eq!(field("device_only"), false);
-        let field = event(&PinnedExperts::default(), true);
-        assert_eq!((field("pinned_bytes"), field("device_only")), (0.into(), true.into()));
-    }
-
-    #[test]
     fn a_reload_plans_the_pool_its_cold_start_planned() {
         // GitHub #324: after a teardown NVML reads the free memory with the
         // context, and the 27B's per-process state once a 27B has loaded,
@@ -2885,52 +1850,6 @@ mod tests {
         }
         assert_eq!(held_before_load(false, false), 0, "a first load reads before its context exists");
         assert_eq!(held_before_load(false, true), 0, "nothing is held without a context");
-    }
-
-    #[test]
-    fn a_cache_started_below_its_floor_warns_with_the_cache_the_floor_and_the_knobs() {
-        // ADR 0045 (AC 6): what `--vram-allow-expert-cache-below-floor` buys is a
-        // start with this WARN, never a silent one.
-        use ignis_core::residency::{
-            plan_expert_cache, ExpertCacheRequest, ExpertCatalog, ExpertTraffic, KBits, EXPERT_CACHE_FLOOR_BYTES,
-        };
-        let catalog = ExpertCatalog::new(1, 4, vec![(KBits::K4, KBits::K4); 4], [100; 8]).expect("catalog");
-        let traffic = ExpertTraffic::new(&catalog, vec![1; 4]).expect("traffic");
-        let plan = |allow_below_floor, budget_bytes| {
-            plan_expert_cache(&ExpertCacheRequest {
-                budget_bytes,
-                planned_bytes: 0,
-                staging_ring_bytes: 0,
-                table_bytes: 0,
-                floor_bytes: 1_000,
-                allow_below_floor,
-                catalog: &catalog,
-                traffic: &traffic,
-                min_slots: 0,
-            })
-            .expect("planned")
-        };
-        let capture = |cache: &ignis_core::residency::ExpertCachePlan| {
-            use tracing_subscriber::layer::SubscriberExt;
-            let sink = std::sync::Arc::new(ignis_logging::MemorySink::new());
-            let subscriber = tracing_subscriber::registry().with(ignis_logging::JsonLayer::new(sink.clone()));
-            tracing::subscriber::with_default(subscriber, || warn_expert_cache_below_floor(cache, 1_000));
-            sink.lines().iter().map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json")).collect::<Vec<_>>()
-        };
-        let records = capture(&plan(true, 600));
-        assert_eq!(records.len(), 1, "{records:?}");
-        let event = &records[0];
-        assert_eq!(event["event_name"], "ignis.runtime.expert_cache_below_floor", "{event}");
-        assert_eq!(event["severity_text"], "WARN");
-        let field = |name: &str| event.get(name).or_else(|| event["attributes"].get(name)).cloned();
-        assert_eq!(field("expert_cache_bytes"), Some(600.into()));
-        assert_eq!(field("floor_bytes"), Some(1_000.into()));
-        let knobs = field("knobs").expect("knobs").as_str().unwrap().to_owned();
-        for knob in ["--vram-kv-pool-bytes", "--model-prefill-chunk", "--vram-headroom-bytes", "--reuse-retained-device"] {
-            assert!(knobs.contains(knob), "{knob}: {knobs}");
-        }
-        assert!(capture(&plan(true, 2_000)).is_empty(), "a cache above its floor warns nothing");
-        assert_eq!(EXPERT_CACHE_FLOOR_BYTES, 12 << 30);
     }
 
     #[test]

@@ -13,7 +13,7 @@ host, and is never reached by a switch.
 
 Sources: the session's decision log and the kernel survey, kept untracked in
 `.scratch/qwen-image-grill-2026-10-13/` (local to the owner's clone), and the
-finding [kernels for the image model on the 5090](../findings/2026-10-13-image-model-kernels-on-the-5090.md).
+finding [kernels for the image model on the 5090](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-13-image-model-kernels-on-the-5090.md).
 
 ## Context
 

@@ -9,7 +9,7 @@
   512-token prefill and one encoder window, on the owner's i9-10900K (Windows, 10 threads) and a 4-core podman
   container (Linux, 4 threads)
 - Related: [ADR 0068](../adr/0068-the-speech-models-cpu-executor-is-ours-in-rust.md),
-  [spec speech/01](../specs/speech/01-cpu-executor.md),
+  [spec speech/01](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/speech/01-cpu-executor.md),
   [Qwen3-ASR on the CPU](2026-10-24-qwen3-asr-on-cpu.md)
 - Superseded by: none
 

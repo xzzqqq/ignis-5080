@@ -221,9 +221,7 @@ pub fn field(group: &str, name: &str) -> Option<&'static FieldMeta> {
 }
 
 const ALL: Applicability = Applicability::AllFamilies;
-const FLASH_NEXT_ONLY: Applicability = Applicability::Only(&[ModelFamily::FlashNext]);
 const QWEN38_ONLY: Applicability = Applicability::Only(&[ModelFamily::Qwen38_27b]);
-const NEMOTRON_DIARIZATION_ONLY: Applicability = Applicability::Only(&[ModelFamily::Nemotron3Diarization]);
 const NO_RULE: Validator = Validator::None;
 
 const fn between(min: i64, max: i64) -> Validator {
@@ -243,57 +241,42 @@ config_group! {
     /// The HTTP server itself: where it listens, who may call it, what else
     /// it serves beside `/v1`.
     ServerGroup = "server" {
-        /// The API's listen address (host:port). Localhost on the OpenAI port
-        /// by default; never changed at runtime — a rebind is a restart.
+        /// API listen address (`host:port`), using localhost by default. Changing it
+        /// requires a restart.
         bind: Text = super::DEFAULT_BIND.to_owned(), NO_RULE, ALL, [Visible];
-        /// The key every `/v1` request must present as `Authorization: Bearer
-        /// <key>`; `auto` generates one at start and prints it (the only time
-        /// a key is printed). Unset keeps the API open, as it has always been
-        /// on localhost. Never shown by `GET /v1/config`.
+        /// Key required in `Authorization: Bearer <key>` for authenticated `/v1`
+        /// requests. `auto` generates and prints a key at startup. Unset disables
+        /// authentication. `GET /v1/config` hides this field.
         api_key: Opt<ApiKeyKind> = None, NO_RULE, ALL;
-        /// Expose the server beyond its bind address: `cloudflare-quick` opens
-        /// a public https://*.trycloudflare.com URL, printed at start. An
-        /// exposed server always requires an API key — `auto` when none is
-        /// set.
-        expose: Opt<ExposeKind> = None, Validator::OneOf(super::Expose::NAMES), ALL, [Visible];
-        /// Serve Prometheus metrics on their own listener (`metrics_bind`),
-        /// and at /ui/metrics unless the Playground is off. On by default;
-        /// `false` serves neither.
+        /// Serve Prometheus metrics on `metrics_bind` and, when the UI is enabled, at
+        /// `/ui/metrics`. Enabled by default; `false` disables both.
         metrics: Bool = super::DEFAULT_METRICS, NO_RULE, ALL, [Visible];
-        /// The metrics listener's address: loopback by default, no API key,
-        /// never exposed, never the API's `bind`; refused with `metrics` off.
-        /// The default address taken (a second server on the host) is a
-        /// warning, and the server starts without the listener; another
-        /// address that cannot be bound refuses the start.
+        /// Separate address for the metrics listener, using loopback by default with no
+        /// API key. Requires `metrics`. If the default address is occupied, startup
+        /// logs a warning and continues without this listener. Failure to bind a custom
+        /// address aborts startup.
         metrics_bind: Text = super::DEFAULT_METRICS_BIND.to_owned(), NO_RULE, ALL, [Visible];
-        /// Serve the Playground at /ui/. A binary built without web/dist
-        /// serves a page saying how to build it.
+        /// Serve the UI at `/ui/`. A binary built without `web/dist` shows build
+        /// instructions.
         ui: Bool = super::DEFAULT_UI, NO_RULE, ALL, [Visible];
-        /// Seconds a request answered whole may run, from its admission (an
-        /// image job's from its start), before its deadline ends it as
-        /// `timeout_reply` says: chat completions, the Responses API over
-        /// HTTP, each question of a decision, an image job, and a request's
-        /// media acquisition. 0 is no deadline.
+        /// Deadline in seconds from admission for non-streaming Chat Completions and
+        /// HTTP Responses, including media acquisition. `timeout_reply` controls the
+        /// timeout response. 0 disables the deadline.
         request_timeout: Secs = super::DEFAULT_REQUEST_TIMEOUT_SECS, between(0, super::MAX_REQUEST_TIMEOUT_SECS as i64), ALL, [Visible, Patchable];
-        /// Seconds a request that streams may run, from its admission (an
-        /// image job's from its start), before its deadline ends it as
-        /// `timeout_reply` says: chat completions and the Responses API
-        /// streamed, a Responses WebSocket's response, a streamed image job.
-        /// 0 is no deadline.
+        /// Deadline in seconds from admission for streaming Chat Completions, HTTP
+        /// Responses and Responses over WebSocket. `timeout_reply` controls the timeout
+        /// response. 0 disables the deadline.
         stream_timeout: Secs = super::DEFAULT_STREAM_TIMEOUT_SECS, between(0, super::MAX_REQUEST_TIMEOUT_SECS as i64), ALL, [Visible, Patchable];
-        /// What a request past its deadline is answered: `partial`, what was
-        /// generated by then as an answer a length limit cut
-        /// (`finish_reason: "length"`, or a response `incomplete` with
-        /// `max_output_tokens`); `error`, a 504 `request_timeout` or a
-        /// stream's error ending. A decision's question and an image job are
-        /// an error either way.
+        /// Response on deadline expiry: `partial` returns the generated output with
+        /// `finish_reason: "length"`, or an incomplete Response with reason
+        /// `max_output_tokens`. `error` returns HTTP 504 `request_timeout` or
+        /// terminates the stream with an error.
         timeout_reply: TimeoutReplyKind = crate::deadline::TimeoutReply::Partial, Validator::OneOf(&["partial", "error"]), ALL,
             [Visible, Patchable];
-        /// Seconds a Responses WebSocket may sit idle — no frame from the
-        /// client and no response running or queued on it — before the
-        /// server closes it with a normal close frame saying why; the
-        /// client's next request opens another. An open socket holds a
-        /// Knative pod, and its GPU, from scaling down. 0 never closes.
+        /// Seconds before closing an idle Responses WebSocket. A socket is idle when no
+        /// client frame arrives and no response is running or queued. The server sends
+        /// a normal close frame with the reason; the next request opens a new
+        /// connection. 0 disables idle closure.
         socket_idle_close: Secs = super::DEFAULT_SOCKET_IDLE_CLOSE_SECS, between(0, super::MAX_SOCKET_IDLE_CLOSE_SECS as i64), ALL,
             [Visible, Patchable];
         /// Where `system` messages go: `merge` joins a leading run into the
@@ -312,48 +295,42 @@ config_group! {
     /// The model being served and the shape of its load: context, KV
     /// format, prefill, thinking defaults, the rotary table.
     ModelGroup = "model" {
-        /// The id the model is served under. Unset, a load is served under
-        /// its own model's id (qwen3.8-27b or qwen3.8-flash-next); without an
-        /// artifact, qwen3.8-27b. An id naming the other model than the
-        /// artifact's is refused.
+        /// Model ID exposed by the service. Defaults to `qwen3.8-27b-16g`. An ID naming
+        /// a different model family from the artifact is refused.
         id: Opt<Text> = None, NO_RULE, ALL, [Visible];
         /// The .ninfer artifact to load. Unset, the model is looked for under
         /// `download.path`, and fetched when it is not there.
         artifact: Opt<Path> = None, NO_RULE, ALL, [Visible];
-        /// The largest prompt + generation a single request may reserve, in
-        /// tokens. On the 27B, bounded by its attention's envelope for the KV
-        /// format.
+        /// Maximum prompt and generation tokens a request may reserve, bounded by the
+        /// attention capacity of the selected KV format.
         max_context: Tokens = super::DEFAULT_MAX_CONTEXT, at_least(1), ALL, [Visible, Patchable, ReloadRequired, Scoped];
-        /// The max_tokens of a request that sends none, its reasoning
-        /// included, never past what its prompt leaves of `max_context`; an
-        /// explicit cap always wins. 0 = none, up to the context.
+        /// Output cap for requests that omit `max_tokens`, including reasoning tokens.
+        /// The prompt and output must fit within `max_context`. A request's explicit
+        /// cap takes precedence. 0 allows output up to the remaining context.
         default_max_tokens: Tokens = super::DEFAULT_MAX_TOKENS, NO_RULE, ALL, [Visible, Patchable, ReloadRequired, Scoped];
-        /// The KV storage format: `hq-e8-2b` (the serving default) or `bf16`
-        /// (the retained oracle format).
+        /// KV storage format: `hq-e8-2b` by default, or `bf16` for reference
+        /// comparisons.
         kv_format: KvFormatKind = KvFormat::default(), Validator::OneOf(&["bf16", "hq-e8-2b", "hq_e8_2b", "hq"]), ALL,
             [Visible, Patchable, ReloadRequired, Scoped];
-        /// The 27B's prompt attention precision (GitHub #335): `fp8` (the
-        /// default, the band pass in 8 bits) or `fp16` (the FP16-accumulate
-        /// fallback). Flash-Next's attention is QSA and has no such pass.
+        /// Prompt attention precision: `fp8` by default, or `fp16` for FP16
+        /// accumulation.
         prefill_attention: PrefillAttentionKind = PrefillAttention::default(), Validator::OneOf(&PrefillAttention::NAMES), QWEN38_ONLY,
             [Visible, Patchable, ReloadRequired];
-        /// How the 27B holds its nine BF16 exception tensors on the device
-        /// (GitHub #341): `bf16` (the default, as the artifact stores them)
-        /// or `fp8`, converted at load to FP8 row-scale for the FP8 tensor
-        /// cores. Flash-Next has none.
+        /// Device format for the nine BF16 exception tensors: `bf16` uses the
+        /// artifact's format; `fp8` converts them at load time to row-scaled FP8 for
+        /// tensor-core execution.
         exception_weights: ExceptionWeightsKind = ExceptionWeights::default(), Validator::OneOf(&ExceptionWeights::NAMES), QWEN38_ONLY,
             [Visible, Patchable, ReloadRequired];
         /// The prefill chunk width, in tokens.
         prefill_chunk: Tokens = super::DEFAULT_PREFILL_CHUNK, Validator::MultipleOf(super::PREFILL_CHUNK_ALIGNMENT as u64), ALL,
             [Visible, Patchable, ReloadRequired, Scoped];
-        /// The percent of the model's time decoding lanes keep while a prompt
-        /// prefills. Unset, the model's own: 25 on both. 0 is one decode
-        /// round per chunk, 50 splits time evenly.
+        /// Percentage of model time reserved for decode while a prompt prefills.
+        /// Defaults to 25. 0 runs one decode round per chunk; 50 splits time evenly.
         decode_share: Opt<Percent> = None, between(0, 99), ALL, [Visible, Patchable, ReloadRequired, Scoped];
-        /// Whether a request that says nothing thinks.
+        /// Whether to enable reasoning when a request omits the setting.
         enable_thinking: Bool = true, NO_RULE, ALL, [Visible, Patchable];
-        /// The reasoning_effort of a request that names none. Unset, the
-        /// template's own default.
+        /// Reasoning effort for requests that omit it. Unset uses the template's
+        /// default.
         reasoning_effort: Opt<Effort> = None, Validator::OneOf(&["none", "minimal", "low", "medium", "high", "xhigh", "max"]), ALL,
             [Visible, Patchable];
         /// The reasoning tokens a request may spend before the model's close
@@ -426,12 +403,10 @@ config_group! {
         /// The sentence every later rewind puts there, until
         /// `loop_guard_retries` nudges close the reasoning.
         loop_guard_nudge_again: Text = crate::loop_guard::DEFAULT_NUDGE_AGAIN.to_owned(), NO_RULE, ALL, [Visible, Patchable];
-        /// The text rotary table: `auto` (the default), `none` (the linear
-        /// table) or `yarn:F[,t=..][,bf=..][,bs=..]`, which rescales the
-        /// checkpoint's trained 262,144-position envelope — what a context
-        /// past it needs. `auto` decides per model from its
-        /// `model.max_context`: none up to 262,144, else YaRN at
-        /// `max_context / 262,144`. Both models run the table.
+        /// Text rotary scaling: `none` uses the linear table;
+        /// `yarn:F[,t=..][,bf=..][,bs=..]` rescales the checkpoint's 262,144-position
+        /// context. The default `auto` uses `none` up to 262,144 tokens and YaRN with
+        /// factor `max_context / 262,144` above it.
         rope_scaling: Rope = RopeSetting::Auto, NO_RULE, ALL, [Visible, Patchable, ReloadRequired, Scoped];
         /// Seconds with no request using the model after which it is unloaded
         /// — VRAM, pinned host memory and KV-RAM given back — while the server
@@ -439,13 +414,10 @@ config_group! {
         /// unloads.
         idle_unload: Secs = super::DEFAULT_MODEL_IDLE_UNLOAD_SECS, between(0, super::MAX_MODEL_IDLE_UNLOAD_SECS as i64), ALL,
             [Visible, Patchable];
-        /// What a text model's host plan must leave of the physical memory
-        /// available at load (free plus standby): a load whose pinned lines
-        /// — the 27B's token embedding, Flash-Next's experts and n-gram hot
-        /// rows, staging, retained host slots, the KV-RAM arena — leave less
-        /// is refused, naming the line to shrink, so the desktop is never
-        /// paged out. The image model makes no host plan: its start carries
-        /// it for a switch to a text model.
+        /// Physical memory to leave available at load time, after accounting for token
+        /// embeddings, staging, retained host slots and the KV-RAM arena. If these
+        /// reservations leave less than the margin, the load is refused and reports
+        /// which reservation to reduce.
         host_margin_bytes: Bytes = super::DEFAULT_HOST_MARGIN_BYTES, NO_RULE, ALL, [Visible, Patchable, ReloadRequired, Scoped];
         /// The 27B's adaptation (ADR 0063): when its VRAM plan refuses a
         /// `max_context` the profile or the default gave, the load lowers it
@@ -461,12 +433,9 @@ config_group! {
     /// The device memory a load may hold, and how the KV pool takes its
     /// share of it.
     VramGroup = "vram" {
-        /// The KV pool: a byte count (K/M/G suffix read) or tokens as
-        /// `<n>tok`, `<n>Ktok`, `<n>Mtok`. Unset, the KV pool policy's: the
-        /// rest of the VRAM budget when every weight is on the device (the
-        /// 27B); 524,288 tokens shared by the lanes when Flash-Next's experts
-        /// stream, the rest to the expert cache. Refused below one
-        /// `max_context` sequence and a page per retained slot.
+        /// KV pool capacity as bytes (K/M/G suffixes) or tokens (`<n>tok`, `<n>Ktok`,
+        /// `<n>Mtok`). Unset uses the remaining VRAM budget. The pool must fit one
+        /// `max_context` sequence and one page per retained slot.
         kv_pool_bytes: Opt<KvPool> = None, NO_RULE, ALL, [Visible, Patchable, ReloadRequired, Scoped];
         /// What a derived VRAM budget leaves to the desktop and every other
         /// process on the card: the budget is the memory free at start less
@@ -477,17 +446,6 @@ config_group! {
         budget_bytes: Opt<Bytes> = None, at_least(1), ALL, [Visible, Patchable, ReloadRequired, Scoped];
         /// Start above free memory, with a warning. Needs `budget_bytes`.
         allow_oversubscription: Bool = false, NO_RULE, ALL, [Visible, Patchable, ReloadRequired, Scoped];
-        /// Start Flash-Next with an expert cache below its 12 GiB floor, with
-        /// a warning — decode slows sharply below it.
-        allow_expert_cache_below_floor: Bool = false, NO_RULE, FLASH_NEXT_ONLY, [Visible, Patchable, ReloadRequired];
-        /// Flash-Next's calibration-hottest experts held in the expert cache
-        /// for the whole load, outside its LRU, with no copy in the pinned
-        /// host pool: whole experts, hottest first, until they reach this many
-        /// bytes. The pool takes that much less RAM; the LRU has those slots
-        /// fewer (on the 5090: nothing measurable at 1 GiB, ~1% of three-lane
-        /// decode at 2 GiB). 0 pins none; the `rtx5090` profile pins 2 GiB. A
-        /// card that holds every expert keeps none in RAM anyway and ignores it.
-        pinned_expert_bytes: Bytes = 0, NO_RULE, FLASH_NEXT_ONLY, [Visible, Patchable, ReloadRequired];
         /// The 27B's adaptation (ADR 0063): at more than one decode lane, a
         /// context the load lowers is kept only when the KV pool holds it and
         /// a spare reservation of this many tokens, room for a second request;
@@ -508,10 +466,9 @@ config_group! {
         /// first. Unset, 0. With prompt reuse off, a count shares heads
         /// between live siblings only.
         retained_device: Opt<Slots> = None, NO_RULE, ALL, [Visible, Patchable, ReloadRequired, Scoped];
-        /// Retained slots in one pinned host block reserved at start, ~222
-        /// MiB each, a PCIe copy per capture and per claim. Unset, the
-        /// model's own: two per decode lane on the 27B, 8 on Flash-Next; 0
-        /// with prompt reuse off.
+        /// Retained slots allocated in one pinned host block, about 222 MiB each.
+        /// Capturing or restoring a slot copies its state over PCIe. Defaults to two
+        /// slots per decode lane, or zero with prompt reuse disabled.
         retained_host: Opt<Slots> = None, NO_RULE, ALL, [Visible, Patchable, ReloadRequired, Scoped];
         /// Idle seconds after which a main-conversation checkpoint in KV-RAM
         /// ranks as a subagent's. Needs prompt reuse on.
@@ -548,30 +505,20 @@ config_group! {
 config_group! {
     /// Speculative decoding, and the decode lanes.
     SpecGroup = "spec" {
-        /// The speculative backend: `dflash2` (the 27B's drafter), `mtp`
-        /// (Flash-Next's head, with its companion container beside the
-        /// artifact), or `off`. Unset, no speculation.
-        backend: Opt<SpecBackend> = None, Validator::OneOf(&["dflash2", "mtp", "off"]), ALL, [Visible, Patchable, ReloadRequired, Scoped];
-        /// The draft window: required with `dflash2`; with `mtp`, the most
-        /// drafts a lane verifies (default 2). Needs a backend.
+        /// Speculative backend: `dflash2` or `off`. No backend means no speculation.
+        backend: Opt<SpecBackend> = None, Validator::OneOf(&["dflash2", "off"]), ALL, [Visible, Patchable, ReloadRequired, Scoped];
+        /// Number of tokens DFlash2 proposes per round. Required when `dflash2` is
+        /// enabled.
         draft_tokens: Opt<Tokens> = None, between(1, ignis_core::MAX_DRAFT_TOKENS as i64), ALL, [Visible, Patchable, ReloadRequired, Scoped];
-        /// Flash-Next's draft row budget: the rows a verify round takes across
-        /// lanes, 0 (= 8) or 2..=32; past 8, five to eight lanes draft too.
-        draft_rows: Opt<DraftRows> = None, between(0, ignis_core::speculation::FLASH_NEXT_MAX_VERIFY_ROWS as i64), FLASH_NEXT_ONLY,
-            [Visible, Patchable, ReloadRequired];
-        /// The decode lanes: the sequences a model decodes at once. On the
-        /// 27B each lane reserves its state (~233 MB with `dflash2` under
-        /// hq-e8-2b) and its share of the round buffers, and takes two of the
-        /// default host retained slots. On Flash-Next they decode sharing the
-        /// KV pool — min(524,288 tokens, lanes x `max_context`), never below
-        /// one `max_context` and a page per retained slot. Unset, the model's
-        /// own: 8 on the 27B, 3 on Flash-Next.
+        /// Number of sequences decoded at once. Each lane reserves sequence state
+        /// (about 233 MB with DFlash2 and hq-e8-2b), round buffers and two default
+        /// retained host slots. The base default is eight lanes; the `rtx50-16gb`
+        /// profile sets two.
         decode_lanes: Opt<Lanes> = None, between(1, ignis_core::N_DECODE_LANES as i64), ALL, [Visible, Patchable, ReloadRequired, Scoped];
-        /// The drafter's proposal head: `full` (the target's output head),
-        /// `shortlist` (the artifact's Q4 head over the 131,072 most frequent
-        /// tokens, ~357 MB more VRAM) or `auto` (`full` on every card class: the
-        /// shortlist frees no VRAM and measured slower). Needs a backend; `mtp`
-        /// has only `full`. Unset, `full`.
+        /// Drafter proposal head: `full` uses the target's output head; `shortlist`
+        /// uses the artifact's Q4 head over the 131,072 most frequent tokens and adds
+        /// about 357 MB of VRAM. `auto` selects `full`. Requires a speculative backend;
+        /// defaults to `full`.
         draft_head: Opt<DraftHead> = None, Validator::OneOf(&["full", "shortlist", "auto"]), ALL, [Visible, Patchable, ReloadRequired, Scoped];
     }
 }
@@ -618,296 +565,6 @@ config_group! {
 }
 
 config_group! {
-    /// The image model's serving (spec image-model/05, ADR 0050): its job
-    /// queue, what one request may ask for, the condition budget, prompt
-    /// enhancement. Read while any model is loaded — a text model is the
-    /// enhancer — so every family takes them, and each changes live.
-    ImageGroup = "image" {
-        /// The image jobs that may wait behind the one running, in order; one
-        /// more is refused `503 engine_full` with `Retry-After`. 0 runs one
-        /// at a time with none waiting.
-        queue_depth: Jobs = 4, between(0, 64), ALL, [Visible, Patchable];
-        /// The most images one request may ask for (`n`), made one after
-        /// another over the job's one condition prefix.
-        max_n: Images = 10, between(1, 64), ALL, [Visible, Patchable];
-        /// The most condition images one edit may send. At most 10, what the
-        /// image model's encoder holds.
-        max_condition_images: Images = 10, between(1, 10), ALL, [Visible, Patchable];
-        /// The largest a condition image may decode to, in Mi pixels
-        /// (1,048,576 pixels, a 1024x1024 image, each); a larger one is
-        /// refused. A condition image is encoded at 1024x1024 of area at
-        /// most, so 16 — a 16-megapixel photo, 64 MiB decoded — takes any
-        /// phone camera's own output and bounds what one condition image
-        /// decodes to.
-        max_condition_mipx: Mipx = 16, between(1, 64), ALL, [Visible, Patchable];
-        /// The most edits that decode their condition images at once; the
-        /// others wait their turn. Each holds up to `max_condition_images`
-        /// frames of up to `max_condition_mipx` while it decodes, and the
-        /// queue runs one job at a time, so more side by side buy memory,
-        /// not throughput.
-        max_condition_decodes: Jobs = 1, between(1, 16), ALL, [Visible, Patchable];
-        /// The sizes a request may ask for, `<width>x<height>` with each side
-        /// a multiple of 32: by default the checkpoint's presets and
-        /// 1024x1024, the size OpenAI clients often send. `auto` picks among
-        /// them.
-        sizes: Sizes = super::DEFAULT_IMAGE_SIZES.to_vec(), NO_RULE, ALL, [Visible, Patchable];
-        /// The largest image the image model's load makes room for, in
-        /// latent cells of 16x16 pixels: 16,800, 2400x1792, the checkpoint's
-        /// largest preset. The load sizes its working memory for the largest
-        /// of `sizes` within it; a size past it is not served, and the load
-        /// warns. Read by the load, so a change holds from the next one.
-        max_target_cells: Cells = ignis_core::image_leaf::MAX_TARGET_TOKENS, between(1, 1 << 20), ALL, [Visible, Patchable];
-        /// The condition budget, in condition-prefix tokens (~256 KiB each, a
-        /// 1024x1024 condition image 4,096 of them). 0 is the whole budget the
-        /// load planned; a value can only lower it.
-        condition_budget_tokens: Tokens = 0, NO_RULE, ALL, [Visible, Patchable];
-        /// The least condition budget the image model's load accepts, in
-        /// condition-prefix tokens: a load whose VRAM plan leaves less is
-        /// refused, naming the shortfall, rather than refuse its requests one
-        /// by one. 8,191, the longest text-to-image prompt the image model's
-        /// positions admit; 0 takes any. Read by the load, so a change holds
-        /// from the next one.
-        min_condition_budget_tokens: Tokens = ignis_core::image_leaf::DEFAULT_MIN_CONDITION_BUDGET_TOKENS, between(0, 1 << 20), ALL,
-            [Visible, Patchable];
-        /// The smallest the budget may scale a condition image down to, as
-        /// the side of a square of the same area, in pixels; a request whose
-        /// images would go below it is refused, naming the budget.
-        condition_floor_px: Pixels = 512, between(32, 1024), ALL, [Visible, Patchable];
-        /// Whether a request that does not say has its prompt rewritten by
-        /// `prompt_enhancer` before the image model reads it.
-        prompt_enhancement: Bool = false, NO_RULE, ALL, [Visible, Patchable];
-        /// The text model that rewrites prompts: the served id of a model an
-        /// explicit switch may name (`switch.known_models`, the start model,
-        /// or a downloaded catalog entry), whatever `switch.allow_implicit`
-        /// says, or the text model loaded. A `PATCH` naming any other is
-        /// refused, and a start warns of it; a request that meets one anyway
-        /// skips the rewrite, with a warning.
-        prompt_enhancer: Text = ModelFamily::Qwen38_27b.model_id().to_owned(), NO_RULE, ALL, [Visible, Patchable];
-        /// The most tokens one rewrite may take. Qwen's prompts ask for
-        /// about 200 words; a longer answer is cut here and used as it is.
-        prompt_enhancer_max_tokens: Tokens = 1024, between(16, 8192), ALL, [Visible, Patchable];
-    }
-}
-
-config_group! {
-    /// The speech model (spec speech/02, ADR 0067): Qwen3-ASR, loaded beside
-    /// the active model on the CPU at first use. Read while any model is
-    /// loaded, so every family takes them, and each changes live.
-    SpeechGroup = "speech" {
-        /// The speech model: `auto` (the 1.7B Q4_K_M catalog entry,
-        /// `qwen3-asr-1.7b`), a catalog entry's id, or `off`. It is enabled
-        /// when its files are on disk; nothing is ever downloaded by itself
-        /// (`ignis-server model download <id>`).
-        model: Text = super::DEFAULT_SPEECH_MODEL.to_owned(), NO_RULE, ALL, [Visible, Patchable];
-        /// The model names OpenAI clients send that the speech model answers
-        /// to, so an unmodified client works: Aider hard-codes `whisper-1`.
-        /// Not catalog aliases and not listed by `GET /v1/models`; a name
-        /// equal to a served id is refused at start.
-        compat_names: Names = super::DEFAULT_SPEECH_COMPAT_NAMES.iter().map(|name| (*name).to_owned()).collect(), NO_RULE, ALL,
-            [Visible, Patchable];
-        /// The threads the speech model computes with: `auto` is the physical
-        /// cores less one, counted within the CPUs the server may run on (a
-        /// container's cpuset or quota). Read by the load, so a change holds
-        /// from the next one; each load logs the count (`ignis.speech.threads`).
-        threads: Threads = None, NO_RULE, ALL, [Visible, Patchable];
-        /// The longest clip one transcription takes, in seconds; a longer one
-        /// is refused and nothing is split. 1,200, the model's limit.
-        max_clip_seconds: Secs = 1200, between(1, 1200), ALL, [Visible, Patchable];
-        /// The most tokens of context (`prompt` and `keywords[]`) a
-        /// transcription reads; over it the last ones are kept. 0 reads none.
-        context_max_tokens: Tokens = 512, between(0, 4096), ALL, [Visible, Patchable];
-        /// On a pause the model can write a line of its context in place of
-        /// what it heard: a transcript that only repeats this many words in a
-        /// row of one context line, or a whole line of two words or more, is
-        /// taken for no speech and comes back empty. One word alone never is.
-        /// 0 turns the guard off. Read when a session opens, so a change
-        /// holds from the next one.
-        context_copy_words: Words = ignis_speech::ContextCopy::DEFAULT.run as u32, between(0, 32), ALL, [Visible, Patchable];
-        /// The model can also write such a line with a word or two changed,
-        /// added or dropped (one inflected, the topic turned into an
-        /// imperative): above 0, a transcript this many words or fewer from a
-        /// whole context line, or from a piece of one between commas or
-        /// sentence marks, is a copy too, while it keeps `context_copy_words`
-        /// of its words. People say such lines too (a title after "So,", a
-        /// term with a word inflected), and they are emptied with the copies,
-        /// so 0, the default, keeps the exact rule. Read when a session opens,
-        /// so a change holds from the next one.
-        context_copy_edits: Words = ignis_speech::ContextCopy::DEFAULT.edits as u32, between(0, 3), ALL, [Visible, Patchable];
-        /// Pin the speech model's weights in host memory instead of mapping
-        /// the file. Read by the load, so a change holds from the next one.
-        pinned_weights: Bool = false, NO_RULE, ALL, [Visible, Patchable];
-        /// Seconds with no transcription, and no Realtime session open, after
-        /// which the speech model is unloaded, its host memory given back; the
-        /// next transcription loads it again. 0 never unloads.
-        idle_unload: Secs = super::DEFAULT_MODEL_IDLE_UNLOAD_SECS, between(0, super::MAX_MODEL_IDLE_UNLOAD_SECS as i64), ALL,
-            [Visible, Patchable];
-        /// How often at most a Realtime session's live transcript is
-        /// refreshed while audio arrives, in milliseconds: each refresh sends
-        /// the new stable text, and the provisional tail to a session that
-        /// opted in. Best effort: a refresh is skipped while the session's
-        /// windows are still being computed, and waits longer after a costly
-        /// one (`speech.partial_cost_factor`). Read by every open session at
-        /// its next refresh.
-        partial_interval_ms: Millis = 2000, between(100, 60_000), ALL, [Visible, Patchable];
-        /// How long a Realtime session's next refresh waits at least, as a
-        /// multiple of the compute time of its last one, from when that one
-        /// was queued; never less than `speech.partial_interval_ms`. Each
-        /// refresh decodes the item so far again, so it costs more as the
-        /// item grows: the refreshes then take at most about one part in this
-        /// many of the speech worker. 1 waits only for the last refresh to
-        /// finish; 2 and 3 measured no faster commits on a 10-core or a
-        /// 4-core CPU. Read by every open session at its next refresh.
-        partial_cost_factor: Times = 1, between(1, 16), ALL, [Visible, Patchable];
-        /// The tokens of a live transcript held back as provisional, the rest
-        /// being stable: the tail a Realtime session that asks for it gets.
-        /// Read by the speech executor when a session opens, so a change holds
-        /// from the next session.
-        rollback_tokens: Tokens = 10, between(0, 64), ALL, [Visible, Patchable];
-        /// The first refreshes of a Realtime session's live transcript that
-        /// make no text stable, whatever `speech.rollback_tokens` says: the
-        /// language and the opening words are decided on more than one
-        /// interval of audio (the official streaming's `unfixed_chunk_num`).
-        /// 0 fixes text from the first refresh. Read by the speech executor
-        /// when a session opens, so a change holds from the next session.
-        unfixed_partials: Partials = 2, between(0, 16), ALL, [Visible, Patchable];
-        /// The most Realtime transcription sessions open at once; past it
-        /// the next is refused at the upgrade `503` with `Retry-After`.
-        max_sessions: Sessions = 4, between(1, 64), ALL, [Visible, Patchable];
-        /// The batch transcriptions that may wait behind the one running, in
-        /// order; one more is refused `503 engine_full` with `Retry-After`.
-        /// 0 runs one at a time with none waiting.
-        max_queue: Requests = 4, between(0, 64), ALL, [Visible, Patchable];
-        /// The speech probability at or over which `server_vad` hears speech
-        /// in 32 ms of a Realtime session's audio: the default of its
-        /// `threshold`. Read when a session opens.
-        vad_threshold: Fraction = 500, NO_RULE, ALL, [Visible, Patchable];
-        /// The audio from before the speech that a `server_vad` item keeps,
-        /// in milliseconds: the default of its `prefix_padding_ms`. Read when
-        /// a session opens.
-        vad_prefix_padding_ms: Millis = 300, between(0, 10_000), ALL, [Visible, Patchable];
-        /// The silence after the speech at which `server_vad` commits the
-        /// item, in milliseconds: the default of its `silence_duration_ms`.
-        /// Read when a session opens.
-        vad_silence_duration_ms: Millis = 500, between(0, 60_000), ALL, [Visible, Patchable];
-        /// The digital silence put before each `server_vad` item's audio
-        /// when it is fed to the speech model, in milliseconds: the model's
-        /// transcript depends on the audio before the speech, and an item
-        /// starts only its prefix padding before it. No event and no `usage`
-        /// counts it; it counts toward `speech.max_clip_seconds`, as the model
-        /// reads it. A manual commit's item gets none. Read at each item's
-        /// start.
-        vad_leading_silence_ms: Millis = ignis_speech::vad::DEFAULT_LEADING_SILENCE_MS, between(0, 10_000), ALL, [Visible, Patchable];
-        /// How long a loan of free KV pages to the speech model outlives its
-        /// transcription, in seconds (spec speech/06), not served yet.
-        loan_grace_seconds: Secs = 30, between(0, 3600), ALL, [Visible, Patchable];
-        /// How long a transcription waits for a loan before it runs on the
-        /// CPU, in seconds (spec speech/06), not served yet.
-        loan_wait_seconds: Secs = 5, between(0, 600), ALL, [Visible, Patchable];
-        /// The length guard: once a `server_vad` item holds this many seconds
-        /// of audio, the server ends it at the next 32 ms the VAD hears under
-        /// its threshold, a pause too short to end it, or
-        /// `speech.utterance_cut_search_ms` later at the latest, and the
-        /// speech goes on in a new item; so a room that never falls silent
-        /// loses nothing to `speech.max_clip_seconds`. A session's own
-        /// `session.ignis.max_utterance_seconds` overrides it. 0 never cuts.
-        /// Read at each item's audio.
-        max_utterance_seconds: Secs = 120, between(0, 1200), ALL, [Visible, Patchable];
-        /// How long past `speech.max_utterance_seconds` the length guard looks
-        /// for a pause, in milliseconds, before it cuts where the audio is.
-        /// The search looks forward only, so no text already sent is past the
-        /// cut. In fluent speech the VAD hears a pause within 10 s 95 times in
-        /// 100 (spec speech/08, As built).
-        utterance_cut_search_ms: Millis = 10_000, between(0, 60_000), ALL, [Visible, Patchable];
-        /// The audio a Realtime session may hold that is not computed yet, in
-        /// seconds: received, and still waiting for the speech model's windows
-        /// or the diarizer's steps. An append past it is refused with an
-        /// `error`, `ignis_audio_queue_full`, and the session stays open: a
-        /// client feeding a file faster than the CPU computes it paces itself
-        /// by it, and one fed at real time never reaches it. Read at each
-        /// append.
-        max_queued_audio_seconds: Secs = 120, between(1, 3600), ALL, [Visible, Patchable];
-    }
-}
-
-config_group! {
-    /// The diarizer (spec speech/08, ADR 0069): Nemotron 3 Diarization, who
-    /// spoke when, beside the speech model on the CPU, for the Realtime
-    /// sessions that ask for speakers. The geometries and the speaker cache's
-    /// constants are Sortformer's, so only its family takes them. A session
-    /// reads them when its speakers start, so each changes live from the
-    /// next.
-    DiarizerGroup = "diarizer" {
-        /// The diarizer: `auto` (the catalog's diarizer entry), a catalog
-        /// entry's id, or `off`. It is enabled when its files are on disk;
-        /// nothing is ever downloaded by itself. A text, image or speech
-        /// model's id is refused. Loaded by the first session that asks for
-        /// speakers, unloaded with the speech model.
-        model: Text = super::DEFAULT_DIARIZER_MODEL.to_owned(), NO_RULE, ALL, [Visible, Patchable];
-        /// The threads the diarizer computes with, a pool of its own beside the
-        /// speech model's, so its steps never wait for the speech model's work:
-        /// `auto` is a third of the
-        /// physical cores, at least 2 (3 on a 10-core machine), counted within the CPUs the server may run on.
-        /// Read by the load, so a change holds from the next one; the load
-        /// logs the count (`ignis.diarizer.load`).
-        threads: Threads = None, NO_RULE, ALL, [Visible, Patchable];
-        /// The ghost rule, in seconds of speech: a voice the diarizer hears is
-        /// a speaker of its own once it has spoken this long, and until then
-        /// its speech counts for the speaker it sounds most like, so a short
-        /// mistaken voice splits no utterance. The session's first voice is a
-        /// speaker at once. 0 makes every voice a speaker at its first frame.
-        /// At 2 s a ghost voice of the synthetic conversations goes, and no
-        /// real meeting's quiet participant is lost (spec speech/08, As built).
-        min_speaker_seconds: Decimal = 2_000, decimal(0.0, 60.0), ALL, [Visible, Patchable];
-        /// The live geometry's speaker cache, in 80 ms frames: what the
-        /// diarizer keeps of every speaker heard so far.
-        live_speaker_cache_frames: Frames = 264, between(8, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The live geometry's FIFO, in 80 ms frames: the latest frames each
-        /// step reads beside its chunk.
-        live_fifo_frames: Frames = 264, between(0, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The live geometry's chunk, in 80 ms frames: the frames one step
-        /// scores. 25 is 2 s.
-        live_chunk_frames: Frames = 25, between(1, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The live geometry's right context, in 80 ms frames: the look-ahead
-        /// a step waits for. With the chunk, the latency: 2.32 s at 25 and 4.
-        live_right_context_frames: Frames = 4, between(0, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The live geometry's update period, in 80 ms frames: the oldest
-        /// frames an overflowing FIFO gives the speaker cache at once.
-        live_update_period_frames: Frames = 222, between(1, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The file geometry's speaker cache, in 80 ms frames, for a session
-        /// fed faster than real time (`session.ignis.diarization: "file"`).
-        file_speaker_cache_frames: Frames = 264, between(8, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The file geometry's FIFO, in 80 ms frames.
-        file_fifo_frames: Frames = 40, between(0, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The file geometry's chunk, in 80 ms frames: 340 is 27.2 s.
-        file_chunk_frames: Frames = 340, between(1, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The file geometry's right context, in 80 ms frames: with the chunk,
-        /// 30.4 s of latency at 340 and 40.
-        file_right_context_frames: Frames = 40, between(0, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The file geometry's update period, in 80 ms frames.
-        file_update_period_frames: Frames = 300, between(1, 1000), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The speaker cache's floor on a frame's probabilities when it scores
-        /// the frames to keep. `auto` is the checkpoint's (0.25).
-        prediction_score_threshold: AutoDecimal = None, decimal(0.001, 1.0), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// What the speaker cache adds to the scores of the frames the FIFO
-        /// just gave it. `auto` is the checkpoint's (0.05).
-        latest_frames_score_boost: AutoDecimal = None, decimal(0.0, 10.0), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The share of each speaker's room in the speaker cache whose best
-        /// frames get the strong boost. `auto` is the checkpoint's (0.75).
-        strong_boost_rate: AutoDecimal = None, decimal(0.0, 4.0), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The share of each speaker's room in the speaker cache whose best
-        /// frames get the weak boost. `auto` is the checkpoint's (1.5).
-        weak_boost_rate: AutoDecimal = None, decimal(0.0, 4.0), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The share of each speaker's room a speaker's positive scores must
-        /// fill before its other frames stop counting. `auto` is the
-        /// checkpoint's (0.5).
-        min_positive_scores_rate: AutoDecimal = None, decimal(0.0, 1.0), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-        /// The silence frames the speaker cache keeps for every speaker.
-        /// `auto` is the checkpoint's (1).
-        speaker_cache_silence_frames_per_speaker: AutoCount = None, between(0, 125), NEMOTRON_DIARIZATION_ONLY, [Visible, Patchable];
-    }
-}
-
-config_group! {
     /// Fetching a missing model.
     DownloadGroup = "download" {
         /// Fetch the model when no artifact is on disk — asked first when
@@ -948,31 +605,11 @@ config_group! {
 }
 
 config_group! {
-    /// Flash-Next's n-gram table.
-    NgramGroup = "ngram" {
-        /// Persist Flash-Next's n-gram hot rows between loads.
-        persist: Bool = true, NO_RULE, ALL, [Visible, Patchable, ReloadRequired];
-        /// Where the n-gram cache goes: `model` (beside the artifact), `auto`
-        /// (Windows LOCALAPPDATA/ignis/cache/ngram, Linux
-        /// XDG_CACHE_HOME/ignis/ngram or HOME/.cache/ignis/ngram), or a
-        /// directory.
-        persist_path: Location = CacheLocation::Model, NO_RULE, ALL, [Visible, Patchable, ReloadRequired];
-        /// The n-gram rows held in RAM, every other row read from NVMe when a
-        /// step needs it: a byte count, or `auto` — what the host plan leaves
-        /// after its other lines and the margin, less 256 MiB for the
-        /// load, the whole ~29 GB table when that fits, never below the
-        /// default. Unset, 1 GiB.
-        hot_bytes: Opt<HotBytes> = None, NO_RULE, FLASH_NEXT_ONLY, [Visible, Patchable, ReloadRequired];
-    }
-}
-
-config_group! {
     /// KV-disk, the tier below KV-RAM: evicted sequences and retained prompt
     /// checkpoints kept as files and read back instead of prefilled again.
     KvDiskGroup = "kv_disk" {
-        /// KV-disk's budget: a ceiling, cut at start to the volume's free
-        /// space less 10 GiB. Unset, the model's own: 4G on Flash-Next, 0
-        /// (off) on the 27B.
+        /// KV-disk budget, capped at startup to the volume's free space minus 10 GiB.
+        /// Defaults to 0 (disabled).
         bytes: Opt<Bytes> = None, NO_RULE, ALL, [Visible, Patchable, ReloadRequired, Scoped];
         /// Where KV-disk's files go: `model` (beside the artifact), `auto`
         /// (the per-user cache directory under kv-disk), or a directory. They
@@ -999,16 +636,9 @@ settings! {
     vision: VisionGroup,
     /// Media acquisition.
     media: MediaGroup,
-    /// The image model's serving.
-    image: ImageGroup,
-    /// The speech model.
-    speech: SpeechGroup,
-    /// The diarizer.
-    diarizer: DiarizerGroup,
     /// Model download.
     download: DownloadGroup,
     /// The n-gram table.
-    ngram: NgramGroup,
     /// KV-disk.
     kv_disk: KvDiskGroup,
 }
@@ -1048,11 +678,7 @@ mod tests {
             (SpecGroup::NAME, debug_field_names(&SpecGroup::default())),
             (VisionGroup::NAME, debug_field_names(&VisionGroup::default())),
             (MediaGroup::NAME, debug_field_names(&MediaGroup::default())),
-            (ImageGroup::NAME, debug_field_names(&ImageGroup::default())),
-            (SpeechGroup::NAME, debug_field_names(&SpeechGroup::default())),
-            (DiarizerGroup::NAME, debug_field_names(&DiarizerGroup::default())),
             (DownloadGroup::NAME, debug_field_names(&DownloadGroup::default())),
-            (NgramGroup::NAME, debug_field_names(&NgramGroup::default())),
             (KvDiskGroup::NAME, debug_field_names(&KvDiskGroup::default())),
         ];
         assert_eq!(groups.len(), GROUPS.len(), "a group missing from one of the two lists");
@@ -1077,47 +703,8 @@ mod tests {
         let names: Vec<&str> = GROUPS.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            ["server", "model", "vram", "reuse", "switch", "spec", "vision", "media", "image", "speech", "diarizer", "download", "ngram", "kv_disk"]
+            ["server", "model", "vram", "reuse", "switch", "spec", "vision", "media", "download", "kv_disk"]
         );
-    }
-
-    /// Spec speech/08, AC 14: every field that is a concept of Sortformer, the
-    /// two geometries and the speaker cache's six constants, only Nemotron 3
-    /// Diarization takes, under its plain key; the model, its threads and the
-    /// ghost rule every diarizer does. The geometries default to the measured
-    /// ones, the constants to the checkpoint's (`auto`), each override
-    /// bounded, the threads to `auto`.
-    #[test]
-    fn the_sortformer_fields_are_nemotron_diarizations_own() {
-        let shared = ["model", "threads", "min_speaker_seconds"];
-        for meta in DiarizerGroup::FIELDS {
-            let only = meta.applies == NEMOTRON_DIARIZATION_ONLY;
-            assert_eq!(only, !shared.contains(&meta.name), "{}", meta.name);
-            assert!(meta.visible && meta.patchable && !meta.reload_required && !meta.scoped, "{}", meta.name);
-            assert_eq!(meta.home_family(), None, "{} keeps its plain key", meta.name);
-            assert!(only == (meta.validator != NO_RULE) || meta.name == "min_speaker_seconds", "{} is bounded", meta.name);
-        }
-        let group = DiarizerGroup::default();
-        let geometry = |speaker_cache, fifo, chunk, right_context, update_period| [speaker_cache, fifo, chunk, right_context, update_period];
-        assert_eq!(
-            geometry(group.live_speaker_cache_frames, group.live_fifo_frames, group.live_chunk_frames, group.live_right_context_frames, group.live_update_period_frames),
-            [264, 264, 25, 4, 222]
-        );
-        assert_eq!(
-            geometry(group.file_speaker_cache_frames, group.file_fifo_frames, group.file_chunk_frames, group.file_right_context_frames, group.file_update_period_frames),
-            [264, 40, 340, 40, 300]
-        );
-        let constants = [
-            group.prediction_score_threshold,
-            group.latest_frames_score_boost,
-            group.strong_boost_rate,
-            group.weak_boost_rate,
-            group.min_positive_scores_rate,
-            group.speaker_cache_silence_frames_per_speaker,
-        ];
-        assert_eq!(constants, [None; 6], "auto: the checkpoint's own");
-        assert_eq!((group.model.as_str(), group.threads, group.min_speaker_seconds), ("auto", None, 2_000));
-        assert_eq!(field("diarizer", "weak_boost_rate").unwrap().validator.describe(), "0..=4");
     }
 
     /// No two fields share a spelling on any surface, family-scoped ones
@@ -1219,7 +806,6 @@ mod tests {
             names("model", "reasoning_effort"),
             crate::thinking::ReasoningEffort::ALL.map(|e| e.as_str()).to_vec()
         );
-        assert_eq!(names("server", "expose"), super::super::Expose::NAMES.to_vec());
         assert_eq!(names("server", "timeout_reply"), crate::deadline::TimeoutReply::ALL.map(|r| r.as_str()).to_vec());
         for name in names("model", "kv_format") {
             assert!(KvFormat::parse(name).is_ok(), "{name}");

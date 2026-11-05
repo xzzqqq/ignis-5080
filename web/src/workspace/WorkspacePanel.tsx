@@ -1,12 +1,10 @@
-import { type DragEvent, type ReactNode, useEffect, useState } from "react";
-import type { SpeechStatus } from "../api/model.ts";
-import { usePictureUrl } from "../image/pictures.tsx";
+import { type DragEvent, type ReactNode, useState } from "react";
+import { usePictureUrl } from "../store/pictureViews.tsx";
 import type { ImageId } from "../store/imageStore.ts";
 import { caption, fieldLook } from "../ui/classes.ts";
 import { isHtmlName } from "../ui/HtmlPreview.tsx";
 import { IconClose, IconDownload, IconPencil, IconPlus, IconTrash } from "../ui/icons.tsx";
 import { Lightbox } from "../ui/Lightbox.tsx";
-import { AudioViewer, Recording } from "./audio.tsx";
 import { type Author, KIND_LABEL, latest, present, refusal, timeLabel, USER, type Version, type Workspace, type WorkspaceFile } from "./files.ts";
 import { FileEditor, FileHistory, type SaveOutcome } from "./FileHistory.tsx";
 import { BUTTON, ExpandButton, Source } from "./looks.tsx";
@@ -14,7 +12,6 @@ import { CsvTable, MarkdownPreview, SitePreview, SvgPreview } from "./previews.t
 import { sheetAfter, TextFullscreen, textKind } from "./TextSheet.tsx";
 import { isCsvName, isMarkdownName, isSvgName } from "./site.ts";
 import { authorName, type ChatNames, createFile, downloadName, fileTree, saveText, sizeLabel, type TreeNode, uploadFiles } from "./panel.ts";
-import { createRecorder } from "./recorder.ts";
 import { exportWorkspace, importWorkspace } from "./transfer.ts";
 import type { WorkspaceView } from "./useWorkspaces.ts";
 import type { ChatBinding, Workspaces } from "./workspaces.ts";
@@ -61,7 +58,6 @@ export function WorkspacePanel({
   view,
   chat,
   chats,
-  speech,
   onClose,
 }: {
   workspaces: Workspaces;
@@ -72,15 +68,12 @@ export function WorkspacePanel({
   /** The chat the panel is open in, and the page's chats by their keys: who made each version. */
   chats: ChatNames;
   /** Whether the speech model can serve, from the models listing: a recording's microphone and transcript need it. */
-  speech?: SpeechStatus;
   onClose: () => void;
 }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [made, setMade] = useState<string | null>(null);
   const id = view.workspace?.id;
-  const [recorder] = useState(() => createRecorder());
   // A recording under way when the panel closes is saved, not lost.
-  useEffect(() => () => void recorder.stop(), [recorder]);
 
   /** `job`, with what the store refused said in the panel. */
   async function attempt<T>(job: () => Promise<T>): Promise<T | { refused: string }> {
@@ -144,12 +137,6 @@ export function WorkspacePanel({
     },
   };
 
-  // The chat a recording goes to is the one on screen when Record was pressed, whichever is on screen when it ends.
-  const recordInto = () => {
-    const binding = chat();
-    return async (file: File) => void (await uploadFiles(workspaces, binding, [file]));
-  };
-
   return (
     <PanelView
       workspace={view.workspace}
@@ -159,8 +146,6 @@ export function WorkspacePanel({
       made={made}
       onClose={onClose}
       actions={actions}
-      speech={speech}
-      recording={<Recording recorder={recorder} speech={speech} save={recordInto} />}
     />
   );
 }
@@ -183,8 +168,6 @@ export function PanelView({
   made,
   onClose,
   actions,
-  speech,
-  recording,
 }: {
   workspace: Workspace | null | undefined;
   files: WorkspaceFile[];
@@ -194,9 +177,7 @@ export function PanelView({
   made?: string | null;
   onClose: () => void;
   actions: PanelActions;
-  speech?: SpeechStatus;
   /** Record, and the recording under way. */
-  recording?: ReactNode;
 }) {
   const [opened, setOpened] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -241,7 +222,7 @@ export function PanelView({
       </div>
 
       {open ? (
-        <FileViewer key={open.id} file={open} whom={whom} onBack={() => setOpened(null)} actions={actions} speech={speech} files={files} />
+        <FileViewer key={open.id} file={open} whom={whom} onBack={() => setOpened(null)} actions={actions} files={files} />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -263,7 +244,6 @@ export function PanelView({
                 }}
               />
             </label>
-            {recording}
             <label className={`${BUTTON} cursor-pointer`} title="Make a new workspace of a zip">
               Import zip
               <input
@@ -461,7 +441,7 @@ const TAB_LABEL: Record<Exclude<ViewerTab, "history">, string> = { preview: "Pre
  * a text file's in its editor (an HTML file's a tab after its preview), and
  * its history a tab away. A deleted file opens on its history alone.
  */
-export function FileViewer({ file, whom, onBack, actions, speech, files = [] }: { file: WorkspaceFile; whom: (author: Author) => string; onBack: () => void; actions: PanelActions; speech?: SpeechStatus; files?: WorkspaceFile[] }) {
+export function FileViewer({ file, whom, onBack, actions, files = [] }: { file: WorkspaceFile; whom: (author: Author) => string; onBack: () => void; actions: PanelActions; files?: WorkspaceFile[] }) {
   const v = latest(file);
   const editable = v.text !== undefined;
   const drawn = editable && isDrawnName(file.name);
@@ -486,7 +466,7 @@ export function FileViewer({ file, whom, onBack, actions, speech, files = [] }: 
       </>
     );
   } else if (file.kind === "audio") {
-    body = <AudioViewer file={file} version={v} speech={speech} load={actions.content} transcribe={actions.derive} />;
+    body = <p className="text-xs text-ash">Audio transcription is not available in this fork.</p>;
   } else if (file.kind === "picture" && v.bytes?.store === "image") {
     body = <PictureView id={v.bytes.id} name={file.name} width={v.bytes.width} height={v.bytes.height} />;
   } else if (file.kind === "other") {

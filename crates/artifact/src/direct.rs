@@ -288,8 +288,11 @@ fn write_at(file: &File, offset: u64, buf: &[u8]) -> std::io::Result<usize> {
 
 #[cfg(windows)]
 const UNBUFFERED_FLAG: u32 = windows_sys::Win32::Storage::FileSystem::FILE_FLAG_NO_BUFFERING;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const UNBUFFERED_FLAG: u32 = libc::O_DIRECT as u32;
+// Laptop CPU checks use buffered I/O; macOS has no O_DIRECT open flag.
+#[cfg(all(unix, not(target_os = "linux")))]
+const UNBUFFERED_FLAG: u32 = 0;
 
 #[cfg(windows)]
 fn set_flags(options: &mut OpenOptions, flags: u32) {

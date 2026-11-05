@@ -30,7 +30,6 @@
 // merger's fc2 writes each page through a device page in the ring, then copies
 // it there (`VisionEncodeCall::page_bounce`).
 
-#include "ignis_image_vision.h"
 #include "ignis_step.h"
 
 #include "model_internal.h"
@@ -62,7 +61,6 @@
 namespace {
 
 thread_local std::string g_last_error;
-thread_local std::string g_image_last_error;
 
 void set_error(std::string message) {
   g_last_error = std::move(message);
@@ -72,9 +70,7 @@ constexpr std::size_t kVisionWorkspaceAlignment = 256;
 constexpr std::int32_t kVisionHeadDim = kVisionHidden / kVisionHeads;
 constexpr float kVisionRopeTheta = 10'000.0F;
 constexpr float kVisionNormEps = 1.0e-6F;
-// The image model's tower takes at most this many patches (32,768 merged tokens): the W8 dispatch's
-// K 4608 arm (the mergers' fc2) throws above that, after the blocks have been enqueued.
-constexpr std::uint32_t kImageVisionMaxPatches = 131072;
+
 
 struct VisionWorkspaceLayout {
   ninfer::TensorRegion position_ids;
@@ -593,184 +589,6 @@ void encode(const VisionWeights &w, const VisionEncodeCall &call,
   after(merger_stage + 1);
 }
 
-// GitHub #320: a W8G32 matrix of the image model's tower as `ops::linear`
-// takes it -- what model.cu's `to_weight` makes of a bound row-split W8
-// tensor, its K padded to 128 (`row-split-k128-v1`).
-ninfer::Weight image_w8(const ignis_image_vision_w8 &m, std::int32_t rows, std::int32_t cols) {
-  constexpr std::int32_t kRowSplitKAlignment = 128;
-  const std::int32_t padded = (cols + kRowSplitKAlignment - 1) / kRowSplitKAlignment * kRowSplitKAlignment;
-  ninfer::Weight w{};
-  w.qtype = ninfer::QType::W8G32_F16S;
-  w.layout = ninfer::QuantLayout::RowSplit;
-  w.qdata = m.codes;
-  w.scales = m.scales;
-  w.payload = m.codes;
-  w.payload_bytes = static_cast<std::uint64_t>(rows) * padded + static_cast<std::uint64_t>(rows) * (padded / 32) * 2;
-  w.ndim = 2;
-  w.shape[0] = rows;
-  w.shape[1] = cols;
-  w.padded_shape[0] = rows;
-  w.padded_shape[1] = padded;
-  w.n = rows;
-  w.k = cols;
-  w.group_size = 32;
-  w.group = 32;
-  w.scale_dtype = ninfer::DType::FP16;
-  return w;
-}
-
-// A BF16 vector (a bias, a norm, the position table): only its data is read.
-ninfer::Weight image_bf16(const void *data) {
-  ninfer::Weight w{};
-  w.qdata = data;
-  return w;
-}
-
-VisionMergerWeights image_merger(const ignis_image_vision_merger &m) {
-  return {image_w8(m.fc1, kVisionMergerHidden, kVisionMergerHidden), image_bf16(m.fc1_bias),
-          image_w8(m.fc2, IGNIS_IMAGE_VISION_OUT_HIDDEN, kVisionMergerHidden), image_bf16(m.fc2_bias),
-          image_bf16(m.norm_weight), image_bf16(m.norm_bias)};
-}
-
-// The tower's weights as the program reads them, every matrix through image_w8.
-VisionWeights image_weights(const ignis_image_vision_weights &in) {
-  VisionWeights w;
-  w.patch_embedding = image_w8(in.patch_embedding, kVisionHidden, kVisionPatchDim);
-  w.patch_embedding_bias = image_bf16(in.patch_embedding_bias);
-  w.position_embedding = image_bf16(in.position_embedding);
-  for (std::size_t b = 0; b < w.layers.size(); ++b) {
-    const ignis_image_vision_block &s = in.blocks[b];
-    VisionLayerWeights &d = w.layers[b];
-    d.qkv = image_w8(s.qkv, 3 * kVisionHidden, kVisionHidden);
-    d.qkv_bias = image_bf16(s.qkv_bias);
-    d.output = image_w8(s.output, kVisionHidden, kVisionHidden);
-    d.output_bias = image_bf16(s.output_bias);
-    d.fc1 = image_w8(s.fc1, kVisionIntermediate, kVisionHidden);
-    d.fc1_bias = image_bf16(s.fc1_bias);
-    d.fc2 = image_w8(s.fc2, kVisionHidden, kVisionIntermediate);
-    d.fc2_bias = image_bf16(s.fc2_bias);
-    d.norm1_weight = image_bf16(s.norm1_weight);
-    d.norm1_bias = image_bf16(s.norm1_bias);
-    d.norm2_weight = image_bf16(s.norm2_weight);
-    d.norm2_bias = image_bf16(s.norm2_bias);
-  }
-  const VisionMergerWeights merger = image_merger(in.merger);
-  w.merger_fc1 = merger.fc1;
-  w.merger_fc1_bias = merger.fc1_bias;
-  w.merger_fc2 = merger.fc2;
-  w.merger_fc2_bias = merger.fc2_bias;
-  w.merger_norm_weight = merger.norm_weight;
-  w.merger_norm_bias = merger.norm_bias;
-  return w;
-}
-
-bool aligned(const void *p, std::uintptr_t alignment) {
-  return (reinterpret_cast<std::uintptr_t>(p) & (alignment - 1)) == 0;
-}
-
-bool merger_complete(const ignis_image_vision_merger &m) {
-  return m.fc1.codes != nullptr && m.fc1.scales != nullptr && m.fc1_bias != nullptr &&
-         m.fc2.codes != nullptr && m.fc2.scales != nullptr && m.fc2_bias != nullptr &&
-         m.norm_weight != nullptr && m.norm_bias != nullptr;
-}
-
-bool block_complete(const ignis_image_vision_block &b) {
-  for (const ignis_image_vision_w8 *m : {&b.qkv, &b.output, &b.fc1, &b.fc2}) {
-    if (m->codes == nullptr || m->scales == nullptr) {
-      return false;
-    }
-  }
-  return b.qkv_bias != nullptr && b.output_bias != nullptr && b.fc1_bias != nullptr &&
-         b.fc2_bias != nullptr && b.norm1_weight != nullptr && b.norm1_bias != nullptr &&
-         b.norm2_weight != nullptr && b.norm2_bias != nullptr;
-}
-
-// The image tower's argument checks: the reason for the first refusal, or empty.
-std::string image_vision_refusal(const ignis_image_vision_weights *weights,
-                                 const ignis_image_vision_input *input, const void *embeds,
-                                 void *const *deepstack, const void *workspace,
-                                 std::uint64_t workspace_bytes) {
-  if (weights == nullptr || input == nullptr || embeds == nullptr || workspace == nullptr) {
-    return "null argument";
-  }
-  if (weights->block_count != IGNIS_IMAGE_VISION_BLOCKS || weights->blocks == nullptr) {
-    return "the tower has " + std::to_string(weights->block_count) + " blocks, the leaf runs " +
-           std::to_string(IGNIS_IMAGE_VISION_BLOCKS);
-  }
-  if (weights->patch_embedding.codes == nullptr || weights->patch_embedding.scales == nullptr ||
-      weights->patch_embedding_bias == nullptr || weights->position_embedding == nullptr ||
-      !merger_complete(weights->merger)) {
-    return "a null weight pointer";
-  }
-  for (std::uint32_t b = 0; b < weights->block_count; ++b) {
-    if (!block_complete(weights->blocks[b])) {
-      return "block " + std::to_string(b) + " has a null weight pointer";
-    }
-  }
-  for (std::uint32_t i = 0; i < IGNIS_IMAGE_VISION_DEEPSTACK; ++i) {
-    const std::uint32_t layer = weights->deepstack_layers[i];
-    if (layer >= weights->block_count || (i > 0 && layer <= weights->deepstack_layers[i - 1])) {
-      return "deepstack_layers must ascend below the block count";
-    }
-    if (deepstack != nullptr && deepstack[i] != nullptr && !merger_complete(weights->deepstack[i])) {
-      return "DeepStack merger " + std::to_string(i) + " has a null weight pointer";
-    }
-  }
-  if (input->segments == 0 || input->segments > IGNIS_IMAGE_VISION_MAX_SEGMENTS) {
-    return "segments must be 1 .. " + std::to_string(IGNIS_IMAGE_VISION_MAX_SEGMENTS);
-  }
-  if (input->patches == 0 || input->patches % IGNIS_IMAGE_VISION_MERGE_UNIT != 0 ||
-      input->patches > kImageVisionMaxPatches) {
-    return "patches must be a positive multiple of " +
-           std::to_string(IGNIS_IMAGE_VISION_MERGE_UNIT) + ", at most " +
-           std::to_string(kImageVisionMaxPatches);
-  }
-  if (input->patch_rows == nullptr || input->position_ids == nullptr ||
-      input->cu_seqlens == nullptr || input->position_table_indices == nullptr ||
-      input->position_table_weights == nullptr) {
-    return "null input array";
-  }
-  if (input->cu_seqlens[0] != 0 ||
-      input->cu_seqlens[input->segments] != static_cast<std::int32_t>(input->patches)) {
-    return "cu_seqlens must run from 0 to patches";
-  }
-  for (std::uint32_t s = 0; s < input->segments; ++s) {
-    const std::int32_t length = input->cu_seqlens[s + 1] - input->cu_seqlens[s];
-    if (length <= 0 || length % static_cast<std::int32_t>(IGNIS_IMAGE_VISION_MERGE_UNIT) != 0) {
-      return "segment " + std::to_string(s) + " is not a positive multiple of " +
-             std::to_string(IGNIS_IMAGE_VISION_MERGE_UNIT) + " patches";
-    }
-  }
-  const std::uint32_t tokens = input->patches / IGNIS_IMAGE_VISION_MERGE_UNIT;
-  const std::uint64_t need = ignis_image_vision_workspace_bytes(tokens, input->segments);
-  if (workspace_bytes < need || !aligned(workspace, kVisionWorkspaceAlignment)) {
-    return "the workspace must hold " + std::to_string(need) + " bytes, 256-byte aligned";
-  }
-  // The outputs and the workspace: 16-byte aligned, no two overlapping.
-  const std::uint64_t out_bytes =
-      static_cast<std::uint64_t>(tokens) * IGNIS_IMAGE_VISION_OUT_HIDDEN * 2;
-  std::vector<std::pair<std::uintptr_t, std::uint64_t>> ranges{
-      {reinterpret_cast<std::uintptr_t>(workspace), workspace_bytes},
-      {reinterpret_cast<std::uintptr_t>(embeds), out_bytes}};
-  for (std::uint32_t i = 0; deepstack != nullptr && i < IGNIS_IMAGE_VISION_DEEPSTACK; ++i) {
-    if (deepstack[i] != nullptr) {
-      ranges.emplace_back(reinterpret_cast<std::uintptr_t>(deepstack[i]), out_bytes);
-    }
-  }
-  for (std::size_t a = 1; a < ranges.size(); ++a) {
-    if (!aligned(reinterpret_cast<const void *>(ranges[a].first), 16)) {
-      return "the outputs must be 16-byte aligned";
-    }
-    for (std::size_t b = 0; b < a; ++b) {
-      if (ranges[a].first < ranges[b].first + ranges[b].second &&
-          ranges[b].first < ranges[a].first + ranges[a].second) {
-        return "the outputs overlap each other or the workspace";
-      }
-    }
-  }
-  return {};
-}
-
 } // namespace
 
 std::size_t ignis_vision_workspace_bytes(std::int32_t tokens, std::int32_t segments) {
@@ -985,70 +803,4 @@ extern "C" void ignis_media_embedding_release(struct ignis_media_embedding *embe
 
 extern "C" const char *ignis_media_last_error(void) {
   return g_last_error.c_str();
-}
-
-extern "C" uint64_t ignis_image_vision_workspace_bytes(uint32_t tokens, uint32_t segments) {
-  if (tokens == 0 || segments == 0 || tokens > kImageVisionMaxPatches / static_cast<std::uint32_t>(kVisionMergeUnit) ||
-      segments > IGNIS_IMAGE_VISION_MAX_SEGMENTS) {
-    return 0;
-  }
-  try {
-    return build_workspace_layout(static_cast<std::int32_t>(tokens * kVisionMergeUnit),
-                                  static_cast<std::int32_t>(tokens),
-                                  static_cast<std::int32_t>(segments))
-        .bytes;
-  } catch (...) {
-    return 0;
-  }
-}
-
-// GitHub #320: the image model's tower is the program above with its own
-// parameters -- the merger 4096 wide into one page that is the whole output,
-// several images as attention segments, and the three DeepStack mergers.
-extern "C" int32_t ignis_image_vision_forward(const struct ignis_image_vision_weights *weights,
-                                              const struct ignis_image_vision_input *input,
-                                              void *embeds, void *const *deepstack,
-                                              void *workspace, uint64_t workspace_bytes,
-                                              void *stream) {
-  const std::string refusal =
-      image_vision_refusal(weights, input, embeds, deepstack, workspace, workspace_bytes);
-  if (!refusal.empty()) {
-    g_image_last_error = "ignis_image_vision_forward: " + refusal;
-    return -1;
-  }
-  try {
-    const auto patches = static_cast<std::int32_t>(input->patches);
-    const std::int32_t tokens = patches / kVisionMergeUnit;
-    const auto segments = static_cast<std::int32_t>(input->segments);
-    const VisionWorkspaceLayout layout = build_workspace_layout(patches, tokens, segments);
-    const ninfer::DeviceSpan backing{workspace, layout.bytes};
-    const VisionWeights w = image_weights(*weights);
-    std::vector<VisionMergerWeights> mergers;
-    for (const ignis_image_vision_merger &m : weights->deepstack) {
-      mergers.push_back(image_merger(m));
-    }
-    void *const none[IGNIS_IMAGE_VISION_DEEPSTACK] = {nullptr, nullptr, nullptr};
-    VisionEncodeCall call;
-    call.patches = input->patch_rows;
-    call.position_ids = input->position_ids;
-    call.cu_seqlens = input->cu_seqlens;
-    call.position_table_indices = input->position_table_indices;
-    call.position_table_weights = input->position_table_weights;
-    call.out_hidden = static_cast<std::int32_t>(IGNIS_IMAGE_VISION_OUT_HIDDEN);
-    call.page_columns = tokens;
-    call.pages.push_back(embeds);
-    call.deepstack_count = static_cast<std::int32_t>(IGNIS_IMAGE_VISION_DEEPSTACK);
-    call.deepstack_mergers = mergers.data();
-    call.deepstack_layers = weights->deepstack_layers;
-    call.deepstack = deepstack != nullptr ? deepstack : none;
-    encode(w, call, layout, backing, patches, tokens, static_cast<cudaStream_t>(stream));
-    return 0;
-  } catch (const std::exception &e) {
-    g_image_last_error = std::string("ignis_image_vision_forward: ") + e.what();
-    return -1;
-  }
-}
-
-extern "C" const char *ignis_image_vision_last_error(void) {
-  return g_image_last_error.c_str();
 }

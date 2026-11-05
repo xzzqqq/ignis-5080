@@ -1,9 +1,0 @@
-{
- "schema": 1,
- "metric": "max over frames of |p - the .jit's p|, a probability",
- "jit_fp32_vs_fp64": 3.912239736003631e-06,
- "plain_fp32_vs_jit": 4.172325134277344e-07,
- "factor": 10.0,
- "floor": 1e-05,
- "bound": 3.912239736003631e-05
-}

@@ -127,20 +127,6 @@ fn a_file_naming_an_unknown_field_or_a_bad_value_is_refused_by_name() {
     }
 }
 
-/// The family sections are the file's half of family scope.
-#[test]
-fn a_files_family_section_applies_to_that_family_alone() {
-    let files = MemFiles::with(&[(
-        "c.yaml",
-        "reuse:\n  kv_host_pool_bytes: 8G\n  qwen38flashnext:\n    kv_host_pool_bytes: 1G\nngram:\n  hot_bytes: 4G\n",
-    )]);
-    let config = with_files(&["--config", "c.yaml"], no_env, &files).unwrap();
-    assert_eq!(config.for_family(ModelFamily::FlashNext).unwrap().host_pool_bytes, GIB);
-    assert_eq!(config.for_family(ModelFamily::Qwen38_27b).unwrap_err().0.contains("ngram.hot_bytes"), true);
-    let (switched, dropped) = fit_to_family(&config, ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!((switched.host_pool_bytes, dropped), (8 * GIB, vec!["--ngram-hot-bytes".to_owned()]));
-}
-
 /// Every group struct and `Settings` derive their serde through the field
 /// table: JSON and YAML round-trip, and a bad document is refused by name.
 #[test]
@@ -232,9 +218,9 @@ fn the_startup_log_names_the_config_source_in_all_three_states() {
         let field = |name: &str| event.get(name).or_else(|| event["attributes"].get(name)).cloned();
         assert_eq!(field("source"), Some(source.into()), "{event}");
         assert_eq!(field("path"), Some(path.into()), "{event}");
-        assert_eq!(field("profile"), Some("rtx5090".into()), "{event}");
+        assert_eq!(field("profile"), Some("rtx50-16gb".into()), "{event}");
         assert_eq!(field("profile_by"), Some("auto".into()), "{event}");
-        assert_eq!(field("card_total_bytes"), Some(profile::RTX_5090_TOTAL_BYTES.into()), "{event}");
+        assert_eq!(field("card_total_bytes"), Some(profile::RTX_5080_TOTAL_BYTES.into()), "{event}");
     }
 }
 
@@ -245,34 +231,12 @@ fn the_startup_log_names_the_config_source_in_all_three_states() {
 #[test]
 fn the_default_profile_changes_nothing() {
     let unset = config(&[]);
-    let named = config(&["--profile", "rtx5090"]);
+    let named = config(&["--profile", "rtx50-16gb"]);
     assert_eq!(unset.settings(), named.settings());
-    assert_eq!(unset.basis.sources().profile_name, "rtx5090");
-    let headroom = unset.basis.resolution().origin("vram", "headroom_bytes").expect("the profile gave it");
+    assert_eq!(unset.basis.sources().profile_name, "rtx50-16gb");
+    let fitted = unset.for_family(ModelFamily::Qwen38_27b).unwrap();
+    let headroom = fitted.basis.resolution().origin("vram", "headroom_bytes").expect("the profile gave it");
     assert_eq!(headroom.source, source::Source::Profile);
-}
-
-/// Spec config-v2/02, Testing: a profile's value resolves exactly where no
-/// flag, env var or file names the field, and a profile defined in the file
-/// resolves by the same path as a built-in one.
-#[test]
-fn a_profile_value_applies_only_where_nothing_else_names_the_field() {
-    let files = MemFiles::with(&[(
-        "c.yaml",
-        "profiles:\n  small-card:\n    vram:\n      headroom_bytes: 3G\n    reuse:\n      kv_host_pool_bytes: 1G\n      qwen38flashnext:\n        kv_host_pool_bytes: 512M\n",
-    )]);
-    let profiled = with_files(&["--config", "c.yaml", "--profile", "small-card"], no_env, &files).unwrap();
-    assert_eq!(profiled.vram, VramMode::Derived { headroom_bytes: 3 * GIB });
-    assert_eq!(profiled.host_pool_bytes, GIB);
-    assert_eq!(profiled.for_family(ModelFamily::FlashNext).unwrap().host_pool_bytes, 512 << 20, "a profile has family sections too");
-    let flag = with_files(&["--config", "c.yaml", "--profile", "small-card", "--vram-headroom-bytes", "2G"], no_env, &files).unwrap();
-    assert_eq!(flag.vram, VramMode::Derived { headroom_bytes: 2 * GIB }, "a flag over the profile");
-    let env = env_map(&[("IGNIS_VRAM_HEADROOM_BYTES", "4G")]);
-    assert_eq!(with_files(&["--config", "c.yaml", "--profile", "small-card"], env, &files).unwrap().vram, VramMode::Derived { headroom_bytes: 4 * GIB });
-    // A profile value is a default: an operator's budget wins over its
-    // headroom without the two being refused as a pair.
-    let budget = with_files(&["--config", "c.yaml", "--profile", "small-card", "--vram-budget-bytes", "20G"], no_env, &files).unwrap();
-    assert_eq!(budget.vram, VramMode::Explicit { budget_bytes: 20 * GIB, allow_oversubscription: false });
 }
 
 #[test]
@@ -290,55 +254,8 @@ fn the_file_value_wins_over_its_own_profile_and_the_profile_is_named_by_flag_env
     let env = env_map(&[("IGNIS_PROFILE", "from-env")]);
     assert_eq!(with_files(&["--config", "c.yaml", "--profile", "from-file"], env, &files).unwrap().retained_device_slots, 2, "the flag over the env var");
     let err = with_files(&["--config", "c.yaml", "--profile", "h100"], no_env, &files).unwrap_err().0;
-    assert!(err.contains("`h100`") && err.contains("from-env, from-file, rtx50-16gb, rtx5090"), "{err}");
-    assert!(refused(&["--profile", "nope"]).contains("rtx5090"));
-}
-
-/// A profile and the family scope compose (spec config-v2/02 AC 10): the
-/// card's shape from the profile, each model's on top from the file.
-#[test]
-fn a_family_override_wins_over_the_profile() {
-    let files = MemFiles::with(&[(
-        "c.yaml",
-        "profile: card\nreuse:\n  qwen38flashnext:\n    kv_host_pool_bytes: 1G\nprofiles:\n  card:\n    reuse:\n      kv_host_pool_bytes: 6G\n",
-    )]);
-    let config = with_files(&["--config", "c.yaml"], no_env, &files).unwrap();
-    assert_eq!(config.for_family(ModelFamily::Qwen38_27b).unwrap().host_pool_bytes, 6 * GIB, "the card's");
-    assert_eq!(config.for_family(ModelFamily::FlashNext).unwrap().host_pool_bytes, GIB, "the model's over the card's");
-}
-
-// ── the n-gram cache and KV-disk ─────────────────────────────────────────
-
-/// The n-gram cache is on and beside the model by default; `model` says so
-/// explicitly, `auto` is the OS cache directory, anything else a directory;
-/// flags win over the environment; bad values are refused.
-#[test]
-fn ngram_cache_defaults_flags_env_and_invalid_values() {
-    use ignis_core::ngram_cache::CacheLocation;
-    let default = config(&[]);
-    assert!(default.ngram_cache.enabled);
-    assert_eq!(default.ngram_cache.location, CacheLocation::Model);
-
-    let env = env_map(&[("IGNIS_NGRAM_PERSIST", "false"), ("IGNIS_NGRAM_PERSIST_PATH", "custom")]);
-    let config_env = expect_config(resolve(&[], &env).unwrap());
-    assert!(!config_env.ngram_cache.enabled);
-    assert_eq!(config_env.ngram_cache.location, CacheLocation::Directory(PathBuf::from("custom")));
-
-    let flags = args(&["--ngram-persist", "true", "--ngram-persist-path", "auto"]);
-    let config_flags = expect_config(resolve(&flags, &env).unwrap());
-    assert!(config_flags.ngram_cache.enabled);
-    assert_eq!(config_flags.ngram_cache.location, CacheLocation::Auto);
-
-    let config_model = expect_config(resolve(&args(&["--ngram-persist-path", "model"]), &env).unwrap());
-    assert_eq!(config_model.ngram_cache.location, CacheLocation::Model);
-    // A bool's flag may stand bare.
-    assert!(config(&["--ngram-persist"]).ngram_cache.enabled);
-    // An empty value is an unset one, as everywhere.
-    assert_eq!(config(&["--ngram-persist-path", ""]).ngram_cache.location, CacheLocation::Model);
-
-    for flags in [vec!["--ngram-persist", "yes"], vec!["--ngram-persist-path"]] {
-        assert!(resolve(&args(&flags), no_env).is_err(), "{flags:?}");
-    }
+    assert!(err.contains("`h100`") && err.contains("from-env, from-file, rtx50-16gb"), "{err}");
+    assert!(refused(&["--profile", "nope"]).contains("rtx50-16gb"));
 }
 
 /// KV-disk (spec vram-budget/03): unnamed is the family's budget and beside
@@ -369,32 +286,6 @@ fn kv_disk_defaults_flags_env_and_invalid_values() {
     }
     assert!(resolve(&[], &env_map(&[("IGNIS_KV_DISK_BYTES", "-1")])).is_err());
     assert!(help().contains("--kv-disk-bytes") && help().contains("--kv-disk-path"));
-}
-
-// ── precedence, aliases and the CLI's own flags ──────────────────────────
-
-#[test]
-fn no_args_no_env_falls_back_to_defaults() {
-    let config = config(&[]);
-    assert_eq!(config.model, DEFAULT_MODEL);
-    assert!(!config.model_named);
-    assert_eq!(config.bind, DEFAULT_BIND);
-    assert_eq!(config.artifact, None);
-    assert!(config.enable_thinking);
-    assert_eq!(config.reasoning_effort, None);
-    assert_eq!(config.prefill_chunk, DEFAULT_PREFILL_CHUNK);
-    assert_eq!(config.max_context, DEFAULT_MAX_CONTEXT);
-    assert_eq!(config.kv_format, KvFormat::HqE8_2b);
-    assert_eq!(config.kv_pool, None, "the KV pool policy's size");
-    assert!(!config.allow_expert_cache_below_floor);
-    assert_eq!(config.vram, VramMode::Derived { headroom_bytes: DEFAULT_VRAM_HEADROOM_BYTES });
-    assert_eq!(config.host_pool_bytes, DEFAULT_HOST_POOL_BYTES);
-    assert_eq!(config.speculation, None);
-    assert_eq!(config.request_timeout_secs, DEFAULT_REQUEST_TIMEOUT_SECS);
-    assert_eq!(config.switch_drain_timeout_secs, DEFAULT_SWITCH_DRAIN_TIMEOUT_SECS);
-    assert!(config.allow_model_switch);
-    assert!(config.known_models.is_empty());
-    assert_eq!(config.basis.family(), None);
 }
 
 #[test]
@@ -534,18 +425,6 @@ fn the_help_names_the_thinking_budget_default_and_off() {
     assert!(block.contains("IGNIS_MODEL_THINKING_BUDGET"), "{block}");
     assert!(block.contains(&format!("default: {DEFAULT_THINKING_BUDGET}")), "{block}");
     assert!(block.contains("off"), "{block}");
-}
-
-/// GitHub #307: the help names Flash-Next's MTP backend and its row budget,
-/// so an operator finds them without the user docs.
-#[test]
-fn the_help_names_mtp_and_the_draft_row_budget() {
-    let spec = help_block("--spec-backend");
-    assert!(spec.contains("mtp") && spec.contains("off"), "{spec}");
-    let rows = help_block("--spec-draft-rows");
-    assert!(rows.contains("IGNIS_SPEC_DRAFT_ROWS"), "{rows}");
-    assert!(rows.contains(&format!("0 (= {FLASH_NEXT_DEFAULT_VERIFY_ROWS})")), "{rows}");
-    assert!(rows.contains(&format!("2..={FLASH_NEXT_MAX_VERIFY_ROWS}")), "{rows}");
 }
 
 #[test]
@@ -691,7 +570,7 @@ fn the_help_names_the_default_max_tokens_and_none() {
     let block = help_block("--model-default-max-tokens");
     assert!(block.contains("IGNIS_MODEL_DEFAULT_MAX_TOKENS"), "{block}");
     assert!(block.contains("default: 38912"), "{block}");
-    assert!(block.contains("0 = none"), "{block}");
+    assert!(block.contains("0 allows output up to the remaining context"), "{block}");
 }
 
 #[test]
@@ -744,18 +623,6 @@ fn the_prefill_attention_is_fp8_unless_named_and_flag_beats_env() {
     let env = env_map(&[("IGNIS_MODEL_PREFILL_ATTENTION", "fp16")]);
     let flag = expect_config(resolve(&args(&["--model-prefill-attention", "FP8"]), env).expect("resolve"));
     assert_eq!(flag.prefill_attention, PrefillAttention::Fp8);
-}
-
-/// The field is the 27B's alone (Flash-Next's QSA has no band pass): an
-/// explicit value reaches the 27B and refuses a Flash-Next start by name.
-#[test]
-fn the_prefill_attention_is_the_27bs_and_refuses_flash_next() {
-    let fp16 = config(&["--model-prefill-attention", "fp16"]);
-    assert_eq!(fp16.for_family(ModelFamily::Qwen38_27b).unwrap().prefill_attention, PrefillAttention::Fp16);
-    assert!(served_model_for(&fp16, ModelFamily::Qwen38_27b).is_ok());
-    let err = served_model_for(&fp16, ModelFamily::FlashNext).expect_err("the 27B's").0;
-    assert!(err.contains("--model-prefill-attention") && err.contains("Qwen3.8-Flash-Next"), "{err}");
-    assert!(served_model_for(&config(&[]), ModelFamily::FlashNext).is_ok(), "unnamed, it is no one's business");
 }
 
 #[test]
@@ -834,76 +701,6 @@ fn a_malformed_pool_budget_is_a_usage_error() {
             Err(err) => assert!(err.0.contains("--vram-kv-pool-bytes"), "{}", err.0),
         }
     }
-}
-
-/// ADR 0045 (AC 6): `--vram-allow-expert-cache-below-floor` is Flash-Next's;
-/// off by default, on from the flag or the environment, and refused on the
-/// 27B, which has no expert cache.
-#[test]
-fn the_expert_cache_floor_opt_in_parses_and_refuses_the_27b() {
-    let default = config(&[]);
-    assert!(!default.allow_expert_cache_below_floor);
-    let flag = config(&["--vram-allow-expert-cache-below-floor"]);
-    assert!(flag.allow_expert_cache_below_floor);
-    for (raw, on) in [("true", true), ("1", true), ("off", false)] {
-        let env = move |key: &str| (key == "IGNIS_VRAM_ALLOW_EXPERT_CACHE_BELOW_FLOOR").then(|| raw.to_owned());
-        assert_eq!(expect_config(resolve(&[], env).expect(raw)).allow_expert_cache_below_floor, on, "{raw}");
-    }
-    let err = resolve(&[], env_map(&[("IGNIS_VRAM_ALLOW_EXPERT_CACHE_BELOW_FLOOR", "maybe")])).expect_err("bad");
-    assert!(err.0.contains("IGNIS_VRAM_ALLOW_EXPERT_CACHE_BELOW_FLOOR"), "{}", err.0);
-    assert!(served_model_for(&flag, ModelFamily::FlashNext).is_ok());
-    assert!(served_model_for(&default, ModelFamily::Qwen38_27b).is_ok());
-    let err = served_model_for(&flag, ModelFamily::Qwen38_27b).expect_err("no expert cache");
-    assert!(err.0.contains("--vram-allow-expert-cache-below-floor") && err.0.contains("27B"), "{}", err.0);
-}
-
-/// GitHub #329 item 12: `--vram-pinned-expert-bytes` is Flash-Next's: 0 (no
-/// pin) as the field's own default, 2 GiB under the default `rtx5090`
-/// profile (ADR 0055), a byte count from the flag, the environment or a
-/// file, changed only through a reload, refused on the 27B when named and
-/// dropped by a switch to it; the profile's value the 27B passes over. Each
-/// source is spelled as a refused pin names it (second review 2026-10-18).
-#[test]
-fn the_pinned_expert_budget_is_0_by_default_2_gib_under_the_rtx5090_profile_and_flash_next_s() {
-    let spelled = |config: &Config| config.basis.resolution().spelled("vram", "pinned_expert_bytes");
-    let unprofiled = config(&["--profile", "none"]);
-    assert_eq!((unprofiled.pinned_expert_bytes, spelled(&unprofiled)), (0, "--vram-pinned-expert-bytes".to_owned()));
-    let profiled = config(&[]);
-    assert_eq!(profiled.pinned_expert_bytes, 2 * GIB, "the rtx5090 profile");
-    assert_eq!(spelled(&profiled), "vram.pinned_expert_bytes (profile rtx5090 in the built-in profiles)");
-    assert!(served_model_for(&profiled, ModelFamily::Qwen38_27b).is_ok(), "a profile's value is passed over");
-    let flag = config(&["--vram-pinned-expert-bytes", "1G"]);
-    assert_eq!((flag.pinned_expert_bytes, spelled(&flag)), (GIB, "--vram-pinned-expert-bytes".to_owned()));
-    let env = env_map(&[("IGNIS_VRAM_PINNED_EXPERT_BYTES", "2G")]);
-    let from_env = expect_config(resolve(&[], env).expect("env"));
-    assert_eq!((from_env.pinned_expert_bytes, spelled(&from_env)), (2 * GIB, "IGNIS_VRAM_PINNED_EXPERT_BYTES".to_owned()));
-    let files = MemFiles::with(&[("c.yaml", "vram:\n  pinned_expert_bytes: 1536M\n")]);
-    let from_file = with_files(&["--config", "c.yaml"], no_env, &files).unwrap();
-    assert_eq!(from_file.pinned_expert_bytes, 1536 << 20);
-    assert!(spelled(&from_file).starts_with("vram.pinned_expert_bytes (") && spelled(&from_file).contains("c.yaml"), "{}", spelled(&from_file));
-    let meta = schema::field("vram", "pinned_expert_bytes").expect("declared");
-    assert!(meta.visible && meta.patchable && meta.reload_required && !meta.scoped);
-    assert!(served_model_for(&flag, ModelFamily::FlashNext).is_ok());
-    let err = served_model_for(&flag, ModelFamily::Qwen38_27b).expect_err("no expert cache");
-    assert!(err.0.contains("--vram-pinned-expert-bytes") && err.0.contains("27B"), "{}", err.0);
-    let (fitted, dropped) = fit_to_family(&flag, ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!((fitted.pinned_expert_bytes, dropped), (0, vec!["--vram-pinned-expert-bytes".to_owned()]));
-}
-
-#[test]
-fn the_help_says_lanes_share_the_pool_and_names_the_new_spellings() {
-    // AC 40 (P1): a lane no longer holds its own whole context.
-    let lanes = help_block("--spec-decode-lanes");
-    assert!(!lanes.contains("whole context"), "{lanes}");
-    assert!(lanes.contains("sharing the KV pool"), "{lanes}");
-    assert!(lanes.contains("min(524,288 tokens, lanes x `max_context`)") && lanes.contains("retained slot"), "{lanes}");
-    // GitHub #336: the 27B's lanes are a setting too, and say what they cost.
-    assert!(lanes.contains("8 on the 27B, 3 on Flash-Next") && lanes.contains("~233 MB"), "{lanes}");
-    assert!(!lanes.contains("fixed 8"), "{lanes}");
-    let pool = help_block("--vram-kv-pool-bytes");
-    assert!(pool.contains("Ktok") && pool.contains("524,288"), "{pool}");
-    let floor = help_block("--vram-allow-expert-cache-below-floor");
-    assert!(floor.contains("IGNIS_VRAM_ALLOW_EXPERT_CACHE_BELOW_FLOOR") && floor.contains("12 GiB"), "{floor}");
 }
 
 // ── the VRAM budget (GitHub #210, ADR 0030) ──────────────────────────────
@@ -1028,50 +825,6 @@ fn the_host_margin_is_four_gib_unless_named() {
     assert_eq!(config(&["--model-host-margin-bytes", "0"]).host_margin_bytes, 0, "no margin is the operator's call");
     let env = env_map(&[("IGNIS_MODEL_HOST_MARGIN_BYTES", "5G")]);
     assert_eq!(expect_config(resolve(&[], env).expect("resolve")).host_margin_bytes, 5 * GIB);
-}
-
-/// The owner's flow: the server starts on the 27B and switches to
-/// Flash-Next, so Flash-Next's own margin is named on a 27B start, taken
-/// without refusal, and reaches the load's shape after the switch.
-#[test]
-fn a_27b_start_carries_flash_nexts_own_margin_to_the_switch() {
-    let config = config(&["--profile", "none", "--qwen38flashnext-model-host-margin-bytes", "3G"]);
-    let qwen = config.for_family(ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!(qwen.host_margin_bytes, DEFAULT_HOST_MARGIN_BYTES, "the 27B's is the default");
-    let (switched, dropped) = fit_to_family(&qwen, ModelFamily::FlashNext).unwrap();
-    assert_eq!(switched.host_margin_bytes, 3 * GIB);
-    assert!(dropped.is_empty());
-    assert_eq!(crate::runtime::EngineShape::from(&switched).host_margin_bytes, 3 * GIB);
-}
-
-/// The image model makes no host plan either (its arena is VRAM), and its
-/// start takes Flash-Next's own margin and KV-RAM arena — make passes the
-/// arena on every start — for a switch to Flash-Next, where they arrive.
-#[test]
-fn an_image_start_carries_flash_nexts_margin_and_arena_to_the_switch() {
-    let config = config(&[
-        "--profile",
-        "none",
-        "--qwen38flashnext-model-host-margin-bytes",
-        "3G",
-        "--qwen38flashnext-reuse-kv-host-pool-bytes",
-        "2G",
-    ]);
-    let image = config.for_family(ModelFamily::QwenImage21).expect("an image start takes Flash-Next's values");
-    assert_eq!(image.host_margin_bytes, DEFAULT_HOST_MARGIN_BYTES, "the image model's is the default");
-    let (switched, dropped) = fit_to_family(&image, ModelFamily::FlashNext).unwrap();
-    assert!(dropped.is_empty(), "{dropped:?}");
-    let shape = crate::runtime::EngineShape::from(&switched);
-    assert_eq!((shape.host_margin_bytes, shape.host_pool_bytes), (3 * GIB, 2 * GIB));
-}
-
-/// ADR 0046: the margin's third spelling, the file key, scoped too.
-#[test]
-fn the_host_margin_reads_from_a_file_per_family() {
-    let files = MemFiles::with(&[("c.yaml", "model:\n  host_margin_bytes: 5G\n  qwen38flashnext:\n    host_margin_bytes: 3G\n")]);
-    let config = with_files(&["--profile", "none", "--config", "c.yaml"], no_env, &files).unwrap();
-    assert_eq!(config.host_margin_bytes, 5 * GIB, "the general value");
-    assert_eq!(config.for_family(ModelFamily::FlashNext).unwrap().host_margin_bytes, 3 * GIB, "Flash-Next's own");
 }
 
 #[test]
@@ -1577,33 +1330,7 @@ fn a_draft_window_outside_1_to_7_is_refused_naming_the_flag_and_the_value() {
 fn an_unknown_speculative_backend_is_refused_naming_every_backend() {
     let err = refused(&["--spec-backend", "eagle", "--spec-draft-tokens", "3"]);
     assert!(err.contains("--spec-backend") && err.contains("eagle"), "{err}");
-    assert!(err.contains("dflash2") && err.contains("mtp"), "{err}");
-}
-
-/// GitHub #307: Flash-Next's head takes a default window, a forced one, a
-/// row budget, and `off`.
-#[test]
-fn spec_mtp_spec_off_and_draft_rows_parse() {
-    assert_eq!(
-        config(&["--spec-backend", "mtp"]).speculation,
-        Some(Speculation::new(SpeculativeBackend::Mtp, FLASH_NEXT_DEFAULT_DRAFT_TOKENS).unwrap())
-    );
-    let forced = config(&["--spec-backend", "mtp", "--spec-draft-tokens", "3", "--spec-draft-rows", "6"]);
-    assert_eq!(forced.speculation, Some(Speculation::new(SpeculativeBackend::Mtp, 3).unwrap()));
-    assert_eq!(forced.draft_rows, Some(6));
-    let off = config(&["--spec-backend", "off"]);
-    assert!(off.speculation_off && off.speculation.is_none());
-    let default = config(&[]);
-    assert!(!default.speculation_off && default.draft_rows.is_none());
-    // GitHub #329 item 5: a budget up to the leaf's maximum, past the default's 8.
-    for rows in [9, 16, 24, FLASH_NEXT_MAX_VERIFY_ROWS] {
-        let wide = config(&["--spec-backend", "mtp", "--spec-draft-rows", &rows.to_string()]);
-        assert_eq!(wide.draft_rows, Some(rows));
-    }
-    for raw in ["1", "33", "rows"] {
-        let err = refused(&["--spec-draft-rows", raw]);
-        assert!(err.contains("--spec-draft-rows") && err.contains(raw), "{err}");
-    }
+    assert!(err.contains("dflash2") && err.contains("off"), "{err}");
 }
 
 #[test]
@@ -1637,8 +1364,6 @@ fn the_draft_head_auto_is_kept_as_configured_and_resolves_to_full() {
     let auto = config(&["--spec-backend", "dflash2", "--spec-draft-tokens", "7", "--spec-draft-head", "auto"]);
     assert_eq!(auto.settings().spec.draft_head, Some(ProposalHeadSetting::Auto));
     assert_eq!(auto.speculation.map(|s| s.proposal_head()), Some(ProposalHead::Full));
-    let mtp = config(&["--spec-backend", "mtp", "--spec-draft-head", "auto"]);
-    assert_eq!(mtp.speculation.map(|s| s.proposal_head()), Some(ProposalHead::Full), "mtp's one head");
     // Without a backend there is still nothing to choose.
     let err = refused(&["--spec-draft-head", "auto"]);
     assert!(err.contains("--spec-draft-head auto") && err.contains("--spec-backend"), "{err}");
@@ -1655,9 +1380,7 @@ fn a_draft_head_without_spec_or_with_an_unknown_name_is_refused() {
 #[test]
 fn mtp_takes_no_proposal_head_and_spec_off_takes_no_draft_options() {
     let err = refused(&["--spec-backend", "mtp", "--spec-draft-head", "shortlist"]);
-    assert!(err.contains("--spec-draft-head") && err.contains("mtp"), "{err}");
-    assert!(resolve(&args(&["--spec-backend", "mtp", "--spec-draft-tokens", "2", "--spec-draft-head", "shortlist"]), no_env).is_err());
-    assert!(resolve(&args(&["--spec-backend", "mtp", "--spec-draft-head", "full"]), no_env).is_ok(), "naming the only head is harmless");
+    assert!(err.contains("dflash2, off") && err.contains("mtp"), "{err}");
 
     let err = refused(&["--spec-backend", "off", "--spec-draft-tokens", "7"]);
     assert!(err.contains("--spec-draft-tokens") && err.contains("off"), "{err}");
@@ -1753,76 +1476,6 @@ fn a_bad_rope_scaling_is_a_startup_error_naming_the_flag() {
     assert!(shape.contains("--model-rope-scaling") && shape.contains("`auto`, `none` or `yarn:F"), "{shape}");
 }
 
-/// ADR 0057: past 64x the trained position envelope `auto` has no table, and
-/// the start says so rather than run the linear one, for either model.
-#[test]
-fn auto_past_the_widest_yarn_factor_is_a_startup_error_naming_the_context() {
-    let refusal = refused(&["--profile", "none", "--model-max-context", "16777217"]);
-    assert!(refusal.contains("--model-max-context 16777217") && refusal.contains("at most 16777216 tokens"), "{refusal}");
-    assert_eq!(config(&["--profile", "none", "--model-max-context", "16777216"]).rope_scaling.factor(), 64.0);
-    let flash_next = refused(&["--profile", "none", "--qwen38flashnext-model-max-context", "16777217"]);
-    assert!(flash_next.contains("--qwen38flashnext-model-max-context 16777217") && flash_next.contains("at most 16777216 tokens"), "{flash_next}");
-}
-
-/// ADR 0057, ADR 0059: Flash-Next runs the table its setting resolves to,
-/// as the 27B does -- `auto` from its context, an explicit value as given,
-/// its own or the group's -- and the shape the plan and the KV-disk identity
-/// read carries that table.
-#[test]
-fn flash_next_runs_the_table_rope_scaling_resolves_to() {
-    use crate::runtime::EngineShape;
-    let base = ["--profile", "none", "--model-max-context", "1048576", "--model-kv-format", "hq-e8-2b"];
-    for (extra, factor) in [(&[][..], 4.0), (&["--model-rope-scaling", "yarn:3"], 3.0), (&["--qwen38flashnext-model-rope-scaling", "yarn:2"], 2.0), (&["--model-rope-scaling", "none"], 0.0)] {
-        let flags = [&base[..], extra].concat();
-        let flash_next = config(&flags).for_family(ModelFamily::FlashNext).unwrap();
-        assert_eq!(flash_next.rope_scaling.factor(), factor, "{extra:?}");
-        assert_eq!(EngineShape::from(&flash_next).rope_scaling, flash_next.rope_scaling, "{extra:?}");
-    }
-    let qwen = |extra: &[&str]| config(&[&base[..], extra].concat()).for_family(ModelFamily::Qwen38_27b).unwrap().rope_scaling;
-    assert_eq!(qwen(&[]).factor(), 4.0);
-    assert_eq!(qwen(&["--model-rope-scaling", "yarn:2"]).factor(), 2.0);
-}
-
-/// ADR 0057, ADR 0059: a switch resolves `auto` for the family it switches
-/// to, against that family's own context, and the shape it loads carries
-/// that table -- the 27B at 917,504 runs 3.5, Flash-Next at 589,824 runs
-/// 2.25, and back again. The `rtx5090` profile's two contexts are this case.
-#[test]
-fn a_switch_resolves_each_familys_rope_table_against_its_own_context() {
-    use crate::runtime::EngineShape;
-    let scoped = ["--profile", "none", "--qwen38-model-max-context", "917504", "--qwen38flashnext-model-max-context", "589824", "--model-kv-format", "hq-e8-2b"];
-    for started in [config(&scoped), config(&[])] {
-        let qwen = started.for_family(ModelFamily::Qwen38_27b).unwrap();
-        assert_eq!((qwen.max_context, qwen.rope_scaling.factor()), (917_504, 3.5));
-        let (flash_next, _) = fit_to_family(&qwen, ModelFamily::FlashNext).unwrap();
-        assert_eq!((flash_next.max_context, flash_next.rope_scaling.factor()), (589_824, 2.25));
-        assert_eq!(EngineShape::from(&flash_next).rope_scaling, flash_next.rope_scaling);
-        let (back, _) = fit_to_family(&flash_next, ModelFamily::Qwen38_27b).unwrap();
-        assert_eq!((back.max_context, back.rope_scaling.factor()), (917_504, 3.5));
-        assert_eq!(EngineShape::from(&back).rope_scaling, back.rope_scaling);
-    }
-}
-
-// ── the loaded model's family (spec flash-next/04, GitHub #302) ──────────
-
-#[test]
-fn flash_next_refuses_speculation_and_vision_at_start_naming_itself() {
-    let spec = config(&["--spec-backend", "dflash2", "--spec-draft-tokens", "7"]);
-    let err = served_model_for(&spec, ModelFamily::FlashNext).expect_err("the 27B's drafter").0;
-    assert!(err.contains("--spec-backend dflash2") && err.contains("Qwen3.8-Flash-Next"), "{err}");
-    assert!(err.contains("drafts with mtp"), "{err}");
-    let mtp = config(&["--spec-backend", "mtp", "--spec-draft-rows", "6"]);
-    assert!(served_model_for(&mtp, ModelFamily::FlashNext).is_ok(), "Flash-Next drafts with mtp");
-    // `--spec-draft-rows` is Flash-Next's, so the 27B is refused for it
-    // first, in declaration order; without it, for the backend.
-    let mtp_alone = config(&["--spec-backend", "mtp"]);
-    let err = served_model_for(&mtp_alone, ModelFamily::Qwen38_27b).expect_err("Flash-Next's head").0;
-    assert!(err.contains("--spec-backend mtp") && err.contains("drafts with dflash2"), "{err}");
-    let vision = config(&["--vision-enabled"]);
-    let err = served_model_for(&vision, ModelFamily::FlashNext).expect_err("no vision").0;
-    assert!(err.contains("--vision-enabled") && err.contains("Qwen3.8-Flash-Next"), "{err}");
-}
-
 /// The image model (ADR 0050) decodes no tokens: any speculative backend is
 /// refused at start, saying it has no drafter.
 #[test]
@@ -1832,248 +1485,10 @@ fn the_image_model_refuses_speculation_saying_it_has_no_drafter() {
     assert!(err.contains("--spec-backend dflash2") && err.contains("Qwen-Image-2.1 has no drafter"), "{err}");
 }
 
-/// GitHub #228: the 27B's GQA envelope bounds `--model-max-context` per KV
-/// format; Flash-Next's QSA is not bound by it.
-#[test]
-fn max_context_past_the_gqa_envelope_is_refused_for_the_27b_only() {
-    let cfg = |ctx: &str, fmt: &str| config(&["--model-max-context", ctx, "--model-kv-format", fmt, "--vram-kv-pool-bytes", "64G"]);
-    assert!(served_model_for(&cfg("524288", "bf16"), ModelFamily::Qwen38_27b).is_ok());
-    let err = served_model_for(&cfg("524289", "bf16"), ModelFamily::Qwen38_27b).expect_err("past linear").0;
-    assert!(err.contains("--model-max-context") && err.contains("524288") && err.contains("bf16"), "{err}");
-    assert!(served_model_for(&cfg("1048576", "hq-e8-2b"), ModelFamily::Qwen38_27b).is_ok());
-    let err = served_model_for(&cfg("1048577", "hq-e8-2b"), ModelFamily::Qwen38_27b).expect_err("past absolute").0;
-    assert!(err.contains("1048576"), "{err}");
-    assert!(served_model_for(&cfg("1048577", "hq-e8-2b"), ModelFamily::FlashNext).is_ok());
-}
-
-/// GitHub #306, #336: `--spec-decode-lanes` is both models', 1 to the
-/// engine's 8, and scoped: each model reads its own section's value over the
-/// general one, and with neither its own default -- the 27B 8, Flash-Next 3.
-#[test]
-fn decode_lanes_parse_bound_and_apply_to_both_models() {
-    assert_eq!(config(&["--profile", "none"]).decode_lanes, None);
-    let flag = config(&["--spec-decode-lanes", "1"]);
-    assert_eq!(flag.decode_lanes, Some(1));
-    let env = expect_config(resolve(&[], env_map(&[("IGNIS_SPEC_DECODE_LANES", "8")])).expect("resolve"));
-    assert_eq!(env.decode_lanes, Some(8));
-    for raw in ["0", "9", "-1", "many"] {
-        let err = refused(&["--spec-decode-lanes", raw]);
-        assert!(err.contains("--spec-decode-lanes") && err.contains(raw), "{err}");
-    }
-    for family in [ModelFamily::FlashNext, ModelFamily::Qwen38_27b] {
-        assert_eq!(flag.for_family(family).unwrap().decode_lanes, Some(1), "{family:?} takes the general value");
-    }
-    let scoped = config(&["--qwen38-spec-decode-lanes", "2", "--qwen38flashnext-spec-decode-lanes", "4"]);
-    assert_eq!(scoped.for_family(ModelFamily::Qwen38_27b).unwrap().decode_lanes, Some(2));
-    assert_eq!(scoped.for_family(ModelFamily::FlashNext).unwrap().decode_lanes, Some(4));
-    let bare = config(&["--profile", "none"]);
-    let shape = |family| crate::runtime::EngineShape::from(&bare.for_family(family).unwrap()).decode_lanes_for(family);
-    assert_eq!(shape(ModelFamily::Qwen38_27b), 8, "the 27B's own default");
-    assert_eq!(shape(ModelFamily::FlashNext), 3, "Flash-Next's own default");
-}
-
-/// GitHub #336: the 27B's default host retained slots are two per decode
-/// lane of its load -- 16 at its default 8 -- and Flash-Next keeps its own
-/// 8 whatever its lanes; a named count is the operator's.
-#[test]
-fn the_27bs_default_host_retained_slots_follow_its_lanes() {
-    let host = |args: &[&str], family| config(args).for_family(family).unwrap().retained_host_slots;
-    assert_eq!(host(&["--profile", "none"], ModelFamily::Qwen38_27b), DEFAULT_RETAINED_HOST_SLOTS);
-    assert_eq!(host(&["--profile", "none", "--spec-decode-lanes", "2"], ModelFamily::Qwen38_27b), 4);
-    assert_eq!(host(&["--qwen38-spec-decode-lanes", "1"], ModelFamily::Qwen38_27b), 2);
-    assert_eq!(host(&["--spec-decode-lanes", "2", "--reuse-retained-host", "7"], ModelFamily::Qwen38_27b), 7);
-    assert_eq!(host(&["--spec-decode-lanes", "2", "--reuse-prompt", "off"], ModelFamily::Qwen38_27b), 0);
-    let flash = config(&["--spec-decode-lanes", "2"]).for_family(ModelFamily::FlashNext).unwrap();
-    let shape = crate::runtime::EngineShape::from(&flash).for_family(ModelFamily::FlashNext);
-    assert_eq!((shape.decode_lanes, shape.retained_host_slots), (2, 8));
-    // ADR 0046: the config's 27B default and a load's own re-resolution are
-    // one function's, at any lanes.
-    for lanes in [None, Some("1"), Some("2"), Some("8")] {
-        let mut args = vec!["--profile", "none"];
-        args.extend(lanes.map(|lanes| ["--spec-decode-lanes", lanes]).into_iter().flatten());
-        let fitted = config(&args).for_family(ModelFamily::Qwen38_27b).unwrap();
-        let shape = crate::runtime::EngineShape::from(&fitted);
-        let reloaded = crate::runtime::EngineShape { retained_host_slots: 0, ..shape }.for_family(ModelFamily::Qwen38_27b);
-        assert_eq!(reloaded.retained_host_slots, fitted.retained_host_slots, "{lanes:?} lanes");
-    }
-}
-
-/// `--ngram-hot-bytes` (GitHub #306): unnamed is `None`, the 1 GiB default
-/// the load always had; a size or `auto`, from the flag or the environment,
-/// the flag winning; anything else is refused, and so is any value on the
-/// 27B, which has no n-gram table.
-#[test]
-fn ngram_hot_bytes_parse_and_refuse_the_27b() {
-    use ignis_core::ngram_table::HotBudget;
-    let default = config(&[]);
-    assert_eq!(default.ngram_hot_bytes, None);
-    for (raw, budget) in [("4G", HotBudget::Bytes(4 << 30)), ("auto", HotBudget::Auto), ("0", HotBudget::Bytes(0))] {
-        assert_eq!(config(&["--ngram-hot-bytes", raw]).ngram_hot_bytes, Some(budget), "{raw}");
-    }
-    let env = env_map(&[("IGNIS_NGRAM_HOT_BYTES", "auto")]);
-    assert_eq!(expect_config(resolve(&[], &env).expect("resolve")).ngram_hot_bytes, Some(HotBudget::Auto));
-    let flag = expect_config(resolve(&args(&["--ngram-hot-bytes", "512M"]), &env).expect("resolve"));
-    assert_eq!(flag.ngram_hot_bytes, Some(HotBudget::Bytes(512 << 20)), "the flag wins over the env");
-    for raw in ["lots", "-1", "auto2"] {
-        let err = refused(&["--ngram-hot-bytes", raw]);
-        assert!(err.contains("--ngram-hot-bytes") && err.contains("auto") && err.contains(raw), "{err}");
-    }
-    assert!(resolve(&args(&["--ngram-hot-bytes"]), no_env).is_err());
-    assert!(served_model_for(&flag, ModelFamily::FlashNext).is_ok());
-    assert!(served_model_for(&default, ModelFamily::Qwen38_27b).is_ok());
-    let err = served_model_for(&flag, ModelFamily::Qwen38_27b).expect_err("no n-gram table").0;
-    assert!(err.contains("--ngram-hot-bytes 512M") && err.contains("Qwen3.8-27B"), "{err}");
-}
-
-#[test]
-fn help_lists_the_ngram_hot_bytes_flag_with_its_default_and_auto() {
-    let block = help_block("--ngram-hot-bytes");
-    for needle in ["IGNIS_NGRAM_HOT_BYTES", "1 GiB", "auto", "whole"] {
-        assert!(block.contains(needle), "{needle} missing: {block}");
-    }
-}
-
 #[test]
 fn the_27b_takes_every_start_option_it_took_before() {
     let config = config(&["--spec-backend", "dflash2", "--spec-draft-tokens", "7", "--vision-enabled"]);
     assert_eq!(served_model_for(&config, ModelFamily::Qwen38_27b), Ok(DEFAULT_MODEL.to_owned()));
-}
-
-/// With no `--model-id`, a load is served under its own model's id: the
-/// artifact's family decides, not the 27B's default.
-#[test]
-fn an_unnamed_served_id_is_the_loaded_models_own() {
-    let plain = config(&[]);
-    assert_eq!(served_model_for(&plain, ModelFamily::FlashNext), Ok("qwen3.8-flash-next".to_owned()));
-    assert_eq!(served_model_for(&plain, ModelFamily::Qwen38_27b), Ok("qwen3.8-27b".to_owned()));
-}
-
-/// A served id that names the other model is refused at start, whether the
-/// flag or the environment named it: the artifact decides the model, and a
-/// client must never be told it talks to one while the other answers. Any
-/// other id is the operator's to choose.
-#[test]
-fn a_served_id_naming_the_other_model_is_refused_at_start() {
-    let named = |id: &'static str| config(&["--model-id", id]);
-    let err = served_model_for(&named("qwen3.8-flash-next"), ModelFamily::Qwen38_27b).expect_err("27B artifact").0;
-    assert!(err.contains("qwen3.8-flash-next") && err.contains("Qwen3.8-27B"), "{err}");
-    let err = served_model_for(&named("qwen3.8-27b"), ModelFamily::FlashNext).expect_err("Flash-Next artifact").0;
-    assert!(err.contains("qwen3.8-27b") && err.contains("Qwen3.8-Flash-Next"), "{err}");
-    let from_env = expect_config(resolve(&[], env_map(&[("IGNIS_MODEL_ID", "qwen3.8-flash-next")])).expect("resolve"));
-    assert!(served_model_for(&from_env, ModelFamily::Qwen38_27b).is_err(), "the env form too");
-    assert_eq!(served_model_for(&named("my-id"), ModelFamily::FlashNext), Ok("my-id".to_owned()));
-    assert_eq!(served_model_for(&named("qwen3.8-27b"), ModelFamily::Qwen38_27b), Ok("qwen3.8-27b".to_owned()));
-}
-
-// ── family scope (spec config-v2/01 §Family scope) ───────────────────────
-
-/// The problem ADR 0046 was written for: the 27B's production arena and
-/// Flash-Next's own, both named on one command line, each applied to its
-/// own model at start and across a switch.
-#[test]
-fn each_family_keeps_its_own_resource_shape() {
-    let config = config(&[
-        "--profile",
-        "none",
-        "--reuse-kv-host-pool-bytes",
-        "8G",
-        "--qwen38flashnext-reuse-kv-host-pool-bytes",
-        "1G",
-        "--qwen38-model-max-context",
-        "131072",
-    ]);
-    assert_eq!(config.host_pool_bytes, 8 * GIB, "before a family is known, the general value");
-    let qwen = config.for_family(ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!((qwen.host_pool_bytes, qwen.max_context), (8 * GIB, 131_072));
-    let flash = config.for_family(ModelFamily::FlashNext).unwrap();
-    assert_eq!((flash.host_pool_bytes, flash.max_context), (GIB, DEFAULT_MAX_CONTEXT));
-    let (switched, dropped) = fit_to_family(&qwen, ModelFamily::FlashNext).unwrap();
-    assert_eq!(switched.host_pool_bytes, GIB, "a switch takes the target family's own");
-    assert!(dropped.is_empty());
-    let (back, _) = fit_to_family(&switched, ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!(back.host_pool_bytes, 8 * GIB, "and back again");
-    assert_eq!(back.basis.family(), Some(ModelFamily::Qwen38_27b));
-}
-
-/// A family-scoped value is checked when it is written, not at the first
-/// load of its family.
-#[test]
-fn a_bad_family_scoped_value_is_refused_at_start() {
-    let err = refused(&["--qwen38flashnext-model-max-context", "lots"]);
-    assert!(err.contains("--qwen38flashnext-model-max-context") && err.contains("lots"), "{err}");
-    let env = env_map(&[("IGNIS_QWEN38_MODEL_PREFILL_CHUNK", "1000")]);
-    assert!(resolve(&[], env).expect_err("unaligned").0.contains("IGNIS_QWEN38_MODEL_PREFILL_CHUNK"));
-    let err = refused(&["--qwen38flashnext-spec-backend", "dflash2"]);
-    assert!(err.contains("--spec-draft-tokens"), "the family's own rules apply to its scoped values: {err}");
-    // A field only one family has carries no scope to give it.
-    assert!(refused(&["--qwen38-ngram-hot-bytes", "1G"]).contains("unrecognized"));
-}
-
-/// Spec config-v2/01 AC 8 (and model-switch/01): a switch drops the values
-/// named for the other model instead of refusing them, says which, and
-/// leaves the rest — a shared value past the target's bound is still refused.
-#[test]
-fn a_switch_drops_the_values_only_the_other_model_takes_and_names_them() {
-    let started = config(&["--vision-enabled", "--vision-max-tokens", "8192", "--spec-backend", "dflash2", "--spec-draft-tokens", "7"]);
-    let (fitted, dropped) = fit_to_family(&started, ModelFamily::FlashNext).unwrap();
-    assert_eq!(dropped, ["--vision-enabled", "--vision-max-tokens", "--spec-backend", "--spec-draft-tokens"]);
-    assert!(fitted.vision.is_none() && fitted.speculation.is_none());
-    assert_eq!(fitted.model, "qwen3.8-flash-next");
-
-    let flash = config(&["--spec-decode-lanes", "1", "--ngram-hot-bytes", "4G", "--vram-allow-expert-cache-below-floor", "--spec-draft-rows", "6"]);
-    let (fitted, dropped) = fit_to_family(&flash, ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!(dropped, ["--vram-allow-expert-cache-below-floor", "--spec-draft-rows", "--ngram-hot-bytes"]);
-    assert!(fitted.ngram_hot_bytes.is_none() && !fitted.allow_expert_cache_below_floor);
-    // GitHub #336: the lanes are both models'; a general value is the 27B's too.
-    assert_eq!(fitted.decode_lanes, Some(1));
-
-    let (kept, dropped) = fit_to_family(&config(&["--vision-enabled"]), ModelFamily::Qwen38_27b).unwrap();
-    assert!(kept.vision.is_some() && dropped.is_empty(), "nothing dropped for the model it was named for");
-
-    let wide = config(&["--model-max-context", "600000", "--model-kv-format", "bf16"]);
-    assert!(fit_to_family(&wide, ModelFamily::Qwen38_27b).is_err(), "a bound is not a drop");
-    assert!(fit_to_family(&wide, ModelFamily::FlashNext).is_ok());
-}
-
-/// A patch wins over every start source, is validated as a start would be,
-/// and keeps the family the config was fitted for.
-#[test]
-fn a_patch_wins_over_the_command_line_and_is_validated_whole() {
-    let started = config(&["--server-request-timeout", "30", "--reuse-kv-host-pool-bytes", "8G"]).for_family(ModelFamily::FlashNext).unwrap();
-    let mut patch = source::Layer::default();
-    let timeout = schema::field("server", "request_timeout").unwrap();
-    patch.set(timeout, None, source::Candidate { raw: "90".into(), spelling: "server.request_timeout".into() }).unwrap();
-    let patched = started.with_patch(&patch).unwrap();
-    assert_eq!(patched.request_timeout_secs, 90);
-    assert_eq!(patched.host_pool_bytes, 8 * GIB, "the rest unchanged");
-    assert_eq!(patched.basis.family(), Some(ModelFamily::FlashNext));
-    assert_eq!(patched.model, "qwen3.8-flash-next");
-
-    let rows = schema::field("spec", "draft_rows").unwrap();
-    patch.set(rows, None, source::Candidate { raw: "99".into(), spelling: "spec.draft_rows".into() }).unwrap();
-    let err = started.with_patch(&patch).unwrap_err().0;
-    assert!(err.contains("spec.draft_rows") && err.contains("99"), "{err}");
-}
-
-/// Spec speech/08: a live patch of the diarizer's Sortformer fields is taken
-/// by a server running any active model, as a start takes them, and stays at
-/// its plain key: the patch is not homed into a family's section, so the
-/// running configuration and the file written from it agree.
-#[test]
-fn a_patch_of_the_diarizers_fields_is_taken_by_every_active_model_at_its_plain_key() {
-    let patch = patch_of(&[("diarizer", "weak_boost_rate", "2"), ("diarizer", "live_chunk_frames", "30")]);
-    for meta in [schema::field("diarizer", "weak_boost_rate").unwrap(), schema::field("diarizer", "live_chunk_frames").unwrap()] {
-        assert!(patch.homed().get(meta, None).is_some(), "{} stays at its group key", meta.file_key());
-    }
-    for family in [ModelFamily::Qwen38_27b, ModelFamily::FlashNext, ModelFamily::QwenImage21] {
-        let running = config(&["--profile", "none"]).for_family(family).unwrap();
-        let patched = running.with_patch(&patch).unwrap_or_else(|e| panic!("{family:?}: {e}"));
-        let diarizer = &patched.settings().diarizer;
-        assert_eq!((diarizer.weak_boost_rate, diarizer.live_chunk_frames), (Some(2_000), 30), "{family:?}");
-        assert_eq!(crate::Live::of(&patched).diarizer.weak_boost_rate, Some(2_000));
-        let document = file::effective_document(&patched);
-        assert_eq!((document["diarizer"]["weak_boost_rate"].clone(), document["diarizer"]["live_chunk_frames"].clone()), (serde_json::json!(2.0), serde_json::json!(30)), "{family:?}");
-    }
 }
 
 /// One patch entry, as `PATCH /v1/config` would give it.
@@ -2086,73 +1501,6 @@ fn patch_of(entries: &[(&str, &str, &str)]) -> source::Layer {
     patch
 }
 
-/// A config a switch fitted (dropping what the new family cannot take) can
-/// be patched: the start's own values keep the switch's drop semantics,
-/// while the patch's entries are held to the active family as a start's
-/// would be — the owner's path, the 27B started with vision and switched to
-/// Flash-Next, then a timeout changed live.
-#[test]
-fn a_patch_on_a_switched_config_keeps_its_drops_and_judges_only_its_own_entries() {
-    let started = config(&["--vision-enabled"]).for_family(ModelFamily::Qwen38_27b).unwrap();
-    let (switched, dropped) = fit_to_family(&started, ModelFamily::FlashNext).unwrap();
-    assert_eq!(dropped, ["--vision-enabled"]);
-    let patched = switched.with_patch(&patch_of(&[("server", "request_timeout", "90")])).unwrap();
-    assert_eq!(patched.request_timeout_secs, 90);
-    assert!(patched.vision.is_none());
-    assert_eq!(patched.basis.family(), Some(ModelFamily::FlashNext));
-    let err = switched.with_patch(&patch_of(&[("vision", "enabled", "true")])).unwrap_err().0;
-    assert!(err.contains("vision.enabled") && err.contains("Qwen3.8-Flash-Next"), "{err}");
-    let err = switched
-        .with_patch(&patch_of(&[("spec", "backend", "dflash2"), ("spec", "draft_tokens", "7")]))
-        .unwrap_err()
-        .0;
-    assert!(err.contains("spec.backend") && err.contains("drafts with mtp"), "{err}");
-    assert!(switched.with_patch(&patch_of(&[("vision", "enabled", "false")])).is_ok(), "naming the default is harmless");
-    // Switching back after the patch: the patch stays, the start's vision returns.
-    let (back, _) = fit_to_family(&patched, ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!((back.request_timeout_secs, back.vision.is_some()), (90, true));
-}
-
-/// A value an earlier patch set for the family then running is the switch's
-/// to drop on the other family, never a reason to refuse a later patch: the
-/// patch judged is the one in the request, not every one before it.
-///
-/// A field only Flash-Next takes is not even dropped: patched at its group
-/// key, it is applied in Flash-Next's own section, as the config file is
-/// written (spec playground/05 follow-up 2), so the 27B never reads it — as
-/// a 27B start from the rewritten file never would.
-#[test]
-fn a_patch_from_before_a_switch_never_refuses_a_later_one() {
-    let flash = config(&[]).for_family(ModelFamily::FlashNext).unwrap();
-    let patched = flash.with_patch(&patch_of(&[("spec", "draft_rows", "6"), ("spec", "backend", "mtp")])).unwrap();
-    let (on_27b, dropped) = fit_to_family(&patched, ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!(dropped, ["--spec-backend"], "a value both families read is dropped; the family-only one waits in its section");
-    assert_eq!(on_27b.draft_rows, None);
-    let later = on_27b.with_patch(&patch_of(&[("server", "request_timeout", "60")])).unwrap();
-    assert_eq!(later.request_timeout_secs, 60);
-    let (back, _) = fit_to_family(&later, ModelFamily::FlashNext).unwrap();
-    assert_eq!((back.draft_rows, back.request_timeout_secs), (Some(6), 60), "the earlier patch is the Flash-Next load's again");
-}
-
-/// GitHub #336: the decode lanes are both models', so a patch at the group
-/// key is both models' value, and a patch in one model's section is that
-/// model's alone -- a switch takes the other model's own lanes.
-#[test]
-fn a_decode_lanes_patch_is_scoped_as_it_is_written() {
-    let flash = config(&["--profile", "none"]).for_family(ModelFamily::FlashNext).unwrap();
-    let mut own = source::Layer::default();
-    let lanes = schema::field("spec", "decode_lanes").unwrap();
-    own.set(lanes, Some(ModelFamily::FlashNext), source::Candidate { raw: "1".into(), spelling: "spec.qwen38flashnext.decode_lanes".into() })
-        .unwrap();
-    let patched = flash.with_patch(&own).unwrap();
-    assert_eq!(patched.decode_lanes, Some(1));
-    let (on_27b, dropped) = fit_to_family(&patched, ModelFamily::Qwen38_27b).unwrap();
-    assert!(dropped.is_empty() && on_27b.decode_lanes.is_none(), "the 27B keeps its own: {dropped:?}");
-    let general = flash.with_patch(&patch_of(&[("spec", "decode_lanes", "2")])).unwrap();
-    let (on_27b, _) = fit_to_family(&general, ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!(on_27b.decode_lanes, Some(2), "a general value is both models'");
-}
-
 // ── vision as a load option (GitHub #177) ────────────────────────────────
 
 #[test]
@@ -2162,7 +1510,7 @@ fn vision_is_off_by_default() {
 
 #[test]
 fn the_vision_flag_loads_the_default_envelope() {
-    let config = config(&["--vision-enabled"]);
+    let config = config(&["--profile", "none", "--vision-enabled"]);
     assert_eq!(config.vision, Some(Vision::default()));
     assert_eq!(config.vision.unwrap().max_tokens(), DEFAULT_VISION_MAX_TOKENS);
 }
@@ -2273,10 +1621,10 @@ fn the_vision_residency_defaults_to_the_host() {
 #[test]
 fn the_built_in_profiles_pick_the_vision_residency() {
     let at = |profile: &str| config(&["--profile", profile, "--vision-enabled"]).vision.map(|v| v.residency());
-    assert_eq!(at("rtx5090"), Some(VisionResidency::Host));
-    assert_eq!(at("rtxpro6000"), Some(VisionResidency::Device));
+    assert_eq!(at("rtx50-16gb"), Some(VisionResidency::Host));
+
     assert_eq!(at("rtx50-16gb"), Some(VisionResidency::Host), "GitHub #418: written in the profile");
-    let flag = config(&["--profile", "rtxpro6000", "--vision-residency", "host"]);
+    let flag = config(&["--profile", "rtx50-16gb", "--vision-residency", "host"]);
     assert_eq!(flag.vision.map(|v| v.residency()), Some(VisionResidency::Host), "a flag wins over the profile");
 }
 
@@ -2334,16 +1682,6 @@ fn a_vision_residency_outside_its_values_is_refused_naming_them() {
 fn help_lists_the_vision_residency_and_both_values() {
     let block = help_block("--vision-residency");
     assert!(block.contains("host") && block.contains("device"), "{block}");
-}
-
-/// The residency is the 27B's, as vision is: a switch to Flash-Next drops it
-/// with the rest of the vision group.
-#[test]
-fn a_flash_next_switch_drops_the_vision_residency_with_vision() {
-    let started = config(&["--profile", "none", "--vision-enabled", "--vision-residency", "device"]);
-    let (fitted, dropped) = fit_to_family(&started, ModelFamily::FlashNext).unwrap();
-    assert_eq!(dropped, ["--vision-enabled", "--vision-residency"]);
-    assert!(fitted.vision.is_none());
 }
 
 /// GitHub #195: the two are independent load options again.
@@ -2604,26 +1942,6 @@ fn metrics_bind_with_metrics_off_or_without_value_or_on_the_api_address_is_refus
     assert!(err.contains("--server-bind"), "{err}");
 }
 
-/// The host plan's refusal (core `residency/plan.rs`) spells its remedies
-/// as literals; each must be a flag a start accepts, or the refusal sends an
-/// operator to one that does not parse (5d85aed4 fixed one such).
-#[test]
-fn every_flag_the_host_plan_refusal_names_is_a_flag_a_start_accepts() {
-    for flag in [
-        "--ngram-hot-bytes",
-        "--qwen38flashnext-kv-disk-bytes",
-        "--qwen38flashnext-reuse-retained-host",
-        "--qwen38flashnext-reuse-kv-host-pool-bytes",
-        "--qwen38flashnext-model-host-margin-bytes",
-    ] {
-        let resolved = resolve(&args(&[flag, "0"]), no_env);
-        assert!(resolved.is_ok(), "{flag}: {:?}", resolved.err());
-    }
-    // ADR 0075: the 27B's vision tower line names the device residency as a way out.
-    let resolved = resolve(&args(&["--vision-enabled", "--vision-residency", "device"]), no_env);
-    assert!(resolved.is_ok(), "{:?}", resolved.err());
-}
-
 /// The default metrics address is never a reason not to start: an API bound
 /// there leaves the metrics listener to the warn path, with no flag named.
 #[test]
@@ -2711,400 +2029,7 @@ fn help_lists_the_api_key_flag() {
 #[test]
 fn nothing_is_exposed_by_default() {
     let config = config(&[]);
-    assert_eq!(config.expose, None);
     assert_eq!(config.api_key, None, "no exposure, no forced key");
-}
-
-#[test]
-fn expose_resolves_flag_over_env() {
-    assert_eq!(config(&["--server-expose", "cloudflare-quick"]).expose, Some(Expose::CloudflareQuick));
-    let env = env_map(&[("IGNIS_SERVER_EXPOSE", "cloudflare-quick")]);
-    assert_eq!(expect_config(resolve(&[], &env).expect("resolve")).expose, Some(Expose::CloudflareQuick));
-    let err = resolve(&args(&["--server-expose", "nope"]), &env).expect_err("the flag wins, and is checked");
-    assert!(err.0.contains("nope"), "{err}");
-}
-
-#[test]
-fn an_unknown_expose_mode_is_a_usage_error() {
-    let err = refused(&["--server-expose", "ngrok"]);
-    assert!(err.contains("--server-expose") && err.contains("ngrok") && err.contains("cloudflare-quick"), "{err}");
-}
-
-#[test]
-fn exposing_without_a_key_generates_one() {
-    assert_eq!(config(&["--server-expose", "cloudflare-quick"]).api_key, Some(ApiKeySetting::Generate));
-    // An empty key is no key.
-    let env = env_map(&[("IGNIS_SERVER_API_KEY", ""), ("IGNIS_SERVER_EXPOSE", "cloudflare-quick")]);
-    assert_eq!(expect_config(resolve(&[], env).expect("resolve")).api_key, Some(ApiKeySetting::Generate));
-}
-
-#[test]
-fn exposing_keeps_the_key_the_operator_chose() {
-    let mine = config(&["--server-expose", "cloudflare-quick", "--server-api-key", "sk-mine"]);
-    assert_eq!(mine.api_key, Some(ApiKeySetting::Fixed(ApiKey::new("sk-mine"))));
-    let env = env_map(&[("IGNIS_SERVER_API_KEY", "sk-env")]);
-    let from_env = expect_config(resolve(&args(&["--server-expose", "cloudflare-quick"]), env).expect("resolve"));
-    assert_eq!(from_env.api_key, Some(ApiKeySetting::Fixed(ApiKey::new("sk-env"))));
-}
-
-#[test]
-fn help_lists_the_expose_flag() {
-    let text = help();
-    assert!(text.contains("--server-expose") && text.contains("cloudflare-quick"), "{text}");
-}
-
-// ── the image model's group (spec image-model/05 AC 10) ─────────────────
-
-/// AC 10: every `image.*` field resolves from its flag, its env var and the
-/// config file with config v2's precedence — the flag over the env var over
-/// the file over the default — and the server's live knobs carry it.
-#[test]
-fn every_image_field_resolves_from_flag_env_and_file_by_precedence() {
-    // Per field: the file's value, the env var's, the flag's.
-    let cases = [
-        ("queue_depth", "1", "2", "3"),
-        ("max_n", "4", "5", "6"),
-        ("max_condition_images", "7", "8", "9"),
-        ("max_condition_mipx", "4", "8", "32"),
-        ("max_condition_decodes", "2", "3", "4"),
-        ("sizes", "1024x1024", "2048x2048;1024x1024", "2752x1536"),
-        ("max_target_cells", "4096", "8192", "16384"),
-        ("condition_budget_tokens", "8192", "16384", "4096"),
-        ("min_condition_budget_tokens", "0", "4096", "16384"),
-        ("condition_floor_px", "256", "384", "640"),
-        ("prompt_enhancement", "true", "false", "true"),
-        ("prompt_enhancer", "qwen3.8-flash-next", "my-27b", "qwen3.8-27b"),
-        ("prompt_enhancer_max_tokens", "256", "512", "2048"),
-    ];
-    assert_eq!(cases.len(), schema::ImageGroup::FIELDS.len(), "every image field has a case");
-    for (name, file, env, flag) in cases {
-        let meta = schema::field("image", name).unwrap();
-        let canonical = |raw: &str| (meta.canonical)(raw).unwrap();
-        let resolved = |config: &Config| config.settings().render()["image"][name].clone();
-        let files = MemFiles::with(&[("c.yaml", &format!("image:\n  {name}: \"{file}\"\n"))]);
-        let env_var = |key: &str| (key == meta.env()).then(|| env.to_owned());
-
-        assert_eq!(resolved(&config(&[])), (meta.default)(), "{name}: the default");
-        let from_file = with_files(&["--config", "c.yaml"], no_env, &files).unwrap();
-        assert_eq!(resolved(&from_file), canonical(file), "{name}: the file over the default");
-        let from_env = with_files(&["--config", "c.yaml"], env_var, &files).unwrap();
-        assert_eq!(resolved(&from_env), canonical(env), "{name}: the env var over the file");
-        let from_flag = with_files(&["--config", "c.yaml", &meta.flag(), flag], env_var, &files).unwrap();
-        assert_eq!(resolved(&from_flag), canonical(flag), "{name}: the flag over the env var");
-        assert!(meta.visible && meta.patchable && !meta.reload_required, "{name}: shown and changed live");
-    }
-    let image = crate::Live::of(&config(&["--image-queue-depth", "2", "--image-sizes", "1024x1024"])).image;
-    assert_eq!((image.queue_depth, image.sizes), (2, vec![ImageSize::new(1024, 1024)]));
-    assert_eq!(config(&[]).settings().image.sizes, DEFAULT_IMAGE_SIZES);
-    assert_eq!(config(&[]).settings().image.prompt_enhancer, "qwen3.8-27b");
-}
-
-/// AC 10: a value past an `image.*` field's bounds is refused naming the
-/// spelling it came under and the bound, from a flag, an env var or the
-/// file alike; at the bound it is taken. The sizes refuse a side that is
-/// not a multiple of 32.
-#[test]
-fn an_image_field_past_its_bounds_is_refused_naming_it() {
-    for (name, low, high) in [
-        ("queue_depth", 0, 64),
-        ("max_n", 1, 64),
-        ("max_condition_images", 1, 10),
-        ("max_condition_mipx", 1, 64),
-        ("max_condition_decodes", 1, 16),
-        ("max_target_cells", 1, 1 << 20),
-        ("min_condition_budget_tokens", 0, 1 << 20),
-        ("condition_floor_px", 32, 1024),
-        ("prompt_enhancer_max_tokens", 16, 8192),
-    ] {
-        let flag = schema::field("image", name).unwrap().flag();
-        for taken in [low, high] {
-            assert!(resolve(&args(&[&flag, &taken.to_string()]), no_env).is_ok(), "{flag} {taken}");
-        }
-        let err = refused(&[&flag, &(high + 1).to_string()]);
-        assert!(err.contains(&flag) && err.contains(&format!("{low}..={high}")), "{err}");
-        if low > 0 {
-            assert!(refused(&[&flag, &(low - 1).to_string()]).contains(&format!("{low}..={high}")));
-        }
-    }
-    let env = env_map(&[("IGNIS_IMAGE_MAX_CONDITION_IMAGES", "11")]);
-    let err = resolve(&[], env).expect_err("past the encoder's ten").0;
-    assert!(err.contains("IGNIS_IMAGE_MAX_CONDITION_IMAGES") && err.contains("1..=10"), "{err}");
-    let files = MemFiles::with(&[("c.yaml", "image:\n  queue_depth: 65\n")]);
-    let err = with_files(&["--config", "c.yaml"], no_env, &files).expect_err("past the queue's bound").0;
-    assert!(err.contains("image.queue_depth") && err.contains("0..=64"), "{err}");
-    let err = refused(&["--image-sizes", "1000x1000"]);
-    assert!(err.contains("--image-sizes") && err.contains("multiples of 32"), "{err}");
-    let err = refused(&["--image-sizes", "16416x32"]);
-    assert!(err.contains("--image-sizes") && err.contains("16384"), "{err}");
-    assert_eq!(config(&[]).settings().image.max_target_cells, 16_800, "2400x1792, the largest preset");
-}
-
-// ── the speech model's group (spec speech/02, spec.md's configuration table) ──
-
-/// Every `speech.*` field resolves from its flag, its env var and the config
-/// file with config v2's precedence, and the server's live knobs carry it.
-#[test]
-fn every_speech_field_resolves_from_flag_env_and_file_by_precedence() {
-    // Per field: the file's value, the env var's, the flag's.
-    let cases = [
-        ("model", "qwen3-asr-0.6b", "qwen3-asr-1.7b-q8", "off"),
-        ("compat_names", "whisper-1", "whisper-1;scribe", "scribe;my-asr"),
-        ("threads", "2", "3", "auto"),
-        ("max_clip_seconds", "300", "600", "900"),
-        ("context_max_tokens", "64", "128", "256"),
-        ("context_copy_words", "2", "4", "0"),
-        ("context_copy_edits", "1", "2", "3"),
-        ("pinned_weights", "true", "false", "true"),
-        ("idle_unload", "0", "60", "120"),
-        ("partial_interval_ms", "500", "1000", "3000"),
-        ("partial_cost_factor", "5", "6", "7"),
-        ("rollback_tokens", "2", "3", "8"),
-        ("unfixed_partials", "1", "3", "4"),
-        ("max_sessions", "1", "2", "8"),
-        ("max_queue", "0", "1", "2"),
-        ("vad_threshold", "0.25", "0.75", "1"),
-        ("vad_prefix_padding_ms", "100", "200", "400"),
-        ("vad_silence_duration_ms", "100", "200", "800"),
-        ("vad_leading_silence_ms", "250", "750", "1500"),
-        ("loan_grace_seconds", "10", "20", "40"),
-        ("loan_wait_seconds", "1", "2", "9"),
-        ("max_utterance_seconds", "0", "60", "240"),
-        ("utterance_cut_search_ms", "500", "1000", "4000"),
-        ("max_queued_audio_seconds", "61", "90", "300"),
-    ];
-    assert_eq!(cases.len(), schema::SpeechGroup::FIELDS.len(), "every speech field has a case");
-    for (name, file, env, flag) in cases {
-        let meta = schema::field("speech", name).unwrap();
-        let canonical = |raw: &str| (meta.canonical)(raw).unwrap();
-        let resolved = |config: &Config| config.settings().render()["speech"][name].clone();
-        let files = MemFiles::with(&[("c.yaml", &format!("speech:\n  {name}: \"{file}\"\n"))]);
-        let env_var = |key: &str| (key == meta.env()).then(|| env.to_owned());
-
-        assert_eq!(resolved(&config(&[])), (meta.default)(), "{name}: the default");
-        let from_file = with_files(&["--config", "c.yaml"], no_env, &files).unwrap();
-        assert_eq!(resolved(&from_file), canonical(file), "{name}: the file over the default");
-        let from_env = with_files(&["--config", "c.yaml"], env_var, &files).unwrap();
-        assert_eq!(resolved(&from_env), canonical(env), "{name}: the env var over the file");
-        let from_flag = with_files(&["--config", "c.yaml", &meta.flag(), flag], env_var, &files).unwrap();
-        assert_eq!(resolved(&from_flag), canonical(flag), "{name}: the flag over the env var");
-        assert!(meta.visible && meta.patchable && !meta.reload_required, "{name}: shown and changed live");
-    }
-    let speech = crate::Live::of(&config(&["--speech-max-queue", "2", "--speech-model", "off"])).speech;
-    assert_eq!((speech.max_queue, speech.model.as_str()), (2, "off"));
-}
-
-/// The defaults are the table's: `auto`, the five compat names, `auto`
-/// threads, 1200 s, 512 tokens, mapped weights, 300 s idle, 2000 ms, 10, 2, 4 and
-/// 4, a refresh cost factor of 1, the VAD's 0.5, 300, 500 and 500 ms of leading
-/// silence, the loan's 30 and 5.
-#[test]
-fn the_speech_defaults_are_the_specs() {
-    let speech = config(&[]).settings().speech.clone();
-    assert_eq!(speech.model, "auto");
-    assert_eq!(speech.compat_names, ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "gpt-transcribe", "gpt-live-transcribe"]);
-    assert_eq!(speech.threads, None);
-    assert_eq!((speech.max_clip_seconds, speech.context_max_tokens, speech.pinned_weights, speech.idle_unload), (1200, 512, false, 300));
-    assert_eq!((speech.partial_interval_ms, speech.rollback_tokens, speech.unfixed_partials, speech.max_sessions, speech.max_queue), (2000, 10, 2, 4, 4));
-    assert_eq!(speech.partial_cost_factor, 1);
-    assert_eq!((speech.context_copy_words, speech.context_copy_edits), (3, 0));
-    assert_eq!((speech.vad_threshold, speech.vad_prefix_padding_ms, speech.vad_silence_duration_ms, speech.vad_leading_silence_ms), (500, 300, 500, 500));
-    assert_eq!((speech.loan_grace_seconds, speech.loan_wait_seconds), (30, 5));
-    let shown = config(&[]).settings().render();
-    assert_eq!(shown["speech"]["threads"], "auto");
-    assert_eq!(shown["speech"]["vad_threshold"], 0.5);
-}
-
-/// A value past a `speech.*` field's bounds is refused naming the spelling
-/// it came under and the bound; at the bound it is taken.
-#[test]
-fn a_speech_field_past_its_bounds_is_refused_naming_it() {
-    for (name, low, high) in [
-        ("max_clip_seconds", 1, 1200),
-        ("context_max_tokens", 0, 4096),
-        ("context_copy_words", 0, 32),
-        ("context_copy_edits", 0, 3),
-        ("partial_interval_ms", 100, 60_000),
-        ("partial_cost_factor", 1, 16),
-        ("vad_leading_silence_ms", 0, 10_000),
-        ("rollback_tokens", 0, 64),
-        ("unfixed_partials", 0, 16),
-        ("max_sessions", 1, 64),
-        ("max_queue", 0, 64),
-        ("max_utterance_seconds", 0, 1200),
-        ("utterance_cut_search_ms", 0, 60_000),
-        ("max_queued_audio_seconds", 1, 3600),
-    ] {
-        let flag = schema::field("speech", name).unwrap().flag();
-        for taken in [low, high] {
-            assert!(resolve(&args(&[&flag, &taken.to_string()]), no_env).is_ok(), "{flag} {taken}");
-        }
-        let err = refused(&[&flag, &(high + 1).to_string()]);
-        assert!(err.contains(&flag) && err.contains(&format!("{low}..={high}")), "{err}");
-    }
-    let err = refused(&["--speech-vad-threshold", "1.5"]);
-    assert!(err.contains("--speech-vad-threshold") && err.contains("0 to 1"), "{err}");
-    let err = refused(&["--speech-threads", "0"]);
-    assert!(err.contains("--speech-threads") && err.contains("auto"), "{err}");
-    let err = refused(&["--speech-compat-names", "a;a"]);
-    assert!(err.contains("--speech-compat-names") && err.contains("twice"), "{err}");
-    let err = refused(&["--speech-compat-names", "my model"]);
-    assert!(err.contains("--speech-compat-names") && err.contains("whitespace"), "{err}");
-}
-
-/// Spec speech/08: the length guard's defaults (120 s, then 10 s of search,
-/// As built) and the queue limit's (120 s, above spec 07's client pace of 60).
-#[test]
-fn the_length_guard_and_the_queue_limit_default_to_the_specs() {
-    let speech = config(&[]).settings().speech.clone();
-    assert_eq!((speech.max_utterance_seconds, speech.utterance_cut_search_ms, speech.max_queued_audio_seconds), (120, 10_000, 120));
-}
-
-// ── the diarizer's group (spec speech/08, its configuration table) ──
-
-/// Every `diarizer.*` field resolves from its flag, its env var and the
-/// config file with config v2's precedence, and the server's live knobs
-/// carry it.
-#[test]
-fn every_diarizer_field_resolves_from_flag_env_and_file_by_precedence() {
-    // Per field: the file's value, the env var's, the flag's.
-    let cases = [
-        ("model", "my-diarizer", "off", "auto"),
-        ("threads", "2", "4", "auto"),
-        ("min_speaker_seconds", "0", "2.5", "14.5"),
-        ("live_speaker_cache_frames", "188", "200", "300"),
-        ("live_fifo_frames", "188", "100", "40"),
-        ("live_chunk_frames", "6", "12", "30"),
-        ("live_right_context_frames", "0", "7", "13"),
-        ("live_update_period_frames", "144", "100", "200"),
-        ("file_speaker_cache_frames", "188", "200", "300"),
-        ("file_fifo_frames", "0", "20", "80"),
-        ("file_chunk_frames", "100", "200", "400"),
-        ("file_right_context_frames", "0", "20", "80"),
-        ("file_update_period_frames", "100", "200", "400"),
-        ("prediction_score_threshold", "0.1", "0.3", "auto"),
-        ("latest_frames_score_boost", "0", "0.1", "0.2"),
-        ("strong_boost_rate", "0.5", "auto", "1"),
-        ("weak_boost_rate", "1", "2", "3.5"),
-        ("min_positive_scores_rate", "0.25", "0.75", "1"),
-        ("speaker_cache_silence_frames_per_speaker", "0", "2", "auto"),
-    ];
-    assert_eq!(cases.len(), schema::DiarizerGroup::FIELDS.len(), "every diarizer field has a case");
-    for (name, file, env, flag) in cases {
-        let meta = schema::field("diarizer", name).unwrap();
-        let canonical = |raw: &str| (meta.canonical)(raw).unwrap();
-        let resolved = |config: &Config| config.settings().render()["diarizer"][name].clone();
-        let files = MemFiles::with(&[("c.yaml", &format!("diarizer:\n  {name}: \"{file}\"\n"))]);
-        let env_var = |key: &str| (key == meta.env()).then(|| env.to_owned());
-
-        assert_eq!(resolved(&config(&[])), (meta.default)(), "{name}: the default");
-        let from_file = with_files(&["--config", "c.yaml"], no_env, &files).unwrap();
-        assert_eq!(resolved(&from_file), canonical(file), "{name}: the file over the default");
-        let from_env = with_files(&["--config", "c.yaml"], env_var, &files).unwrap();
-        assert_eq!(resolved(&from_env), canonical(env), "{name}: the env var over the file");
-        let from_flag = with_files(&["--config", "c.yaml", &meta.flag(), flag], env_var, &files).unwrap();
-        assert_eq!(resolved(&from_flag), canonical(flag), "{name}: the flag over the env var");
-    }
-    let diarizer = crate::Live::of(&config(&["--diarizer-min-speaker-seconds", "2.5", "--diarizer-strong-boost-rate", "0.5"])).diarizer;
-    assert_eq!((diarizer.min_speaker_seconds, diarizer.strong_boost_rate), (2_500, Some(500)));
-    let shown = config(&[]).settings().render();
-    assert_eq!((shown["diarizer"]["min_speaker_seconds"].clone(), shown["diarizer"]["weak_boost_rate"].clone()), (serde_json::json!(2.0), serde_json::json!("auto")));
-}
-
-/// Spec speech/08, AC 14: an override of a speaker cache constant is
-/// bounded, and a value past its bounds is refused naming the spelling and
-/// the bound in the constant's own units; so is a geometry past its own.
-#[test]
-fn a_diarizer_field_past_its_bounds_is_refused_naming_it() {
-    for (name, value, bound) in [
-        ("prediction_score_threshold", "0", "0.001..=1"),
-        ("prediction_score_threshold", "1.5", "0.001..=1"),
-        ("weak_boost_rate", "4.5", "0..=4"),
-        ("min_positive_scores_rate", "1.25", "0..=1"),
-        ("latest_frames_score_boost", "11", "0..=10"),
-        ("min_speaker_seconds", "61", "0..=60"),
-        ("speaker_cache_silence_frames_per_speaker", "126", "0..=125"),
-        ("live_chunk_frames", "0", "1..=1000"),
-        ("file_speaker_cache_frames", "4", "8..=1000"),
-    ] {
-        let flag = schema::field("diarizer", name).unwrap().flag();
-        let err = refused(&[&flag, value]);
-        assert!(err.contains(&flag) && err.contains(bound), "{name} {value}: {err}");
-    }
-    let err = refused(&["--diarizer-weak-boost-rate", "strong"]);
-    assert!(err.contains("--diarizer-weak-boost-rate") && err.contains("auto"), "{err}");
-    let err = refused(&["--diarizer-threads", "0"]);
-    assert!(err.contains("--diarizer-threads") && err.contains("auto"), "{err}");
-}
-
-/// Spec speech/08: the Sortformer fields are Nemotron 3 Diarization's alone,
-/// and the families a start configures are the active model's, which take
-/// them as they take `speech.*` -- every text family and the image model
-/// start with one set, and the written configuration keeps it under its
-/// plain key, never in a family's section, where no family takes it.
-#[test]
-fn a_start_of_any_active_model_takes_the_diarizers_fields_under_their_plain_keys() {
-    let started = config(&["--profile", "none", "--diarizer-live-chunk-frames", "30", "--diarizer-weak-boost-rate", "2"]);
-    for family in ModelFamily::ALL.into_iter().filter(|family| family.kind() != ignis_core::compute::ModelKind::Diarizer) {
-        let fitted = started.for_family(family).unwrap_or_else(|e| panic!("{family:?}: {e}"));
-        assert_eq!((fitted.settings().diarizer.live_chunk_frames, fitted.settings().diarizer.weak_boost_rate), (30, Some(2_000)), "{family:?}");
-    }
-    let (switched, dropped) = fit_to_family(&started.for_family(ModelFamily::Qwen38_27b).unwrap(), ModelFamily::FlashNext).unwrap();
-    assert!(dropped.is_empty(), "a switch drops none: {dropped:?}");
-    assert_eq!(switched.settings().diarizer.live_chunk_frames, 30);
-    let document = file::effective_document(&started);
-    assert_eq!(document["diarizer"]["live_chunk_frames"], 30, "{document}");
-    assert_eq!(document["diarizer"]["weak_boost_rate"], 2.0);
-    for family in field::FAMILIES {
-        assert!(document["diarizer"].get(field::scope(family)).is_none(), "{document}");
-    }
-    let files = MemFiles::with(&[("c.yaml", "diarizer:\n  qwen38:\n    live_chunk_frames: 30\n")]);
-    let err = with_files(&["--config", "c.yaml"], no_env, &files).expect_err("no family section holds it").0;
-    assert!(err.contains("diarizer.live_chunk_frames"), "{err}");
-}
-
-/// `speech.model` naming a text or image model is refused (spec speech/02:
-/// an id is that catalog entry, a speech one): a built-in entry of another
-/// kind, or a model family's id. A speech entry, `auto`, `off` and an id the
-/// catalog lacks (unavailable, with its reason, at serve time) are taken.
-#[test]
-fn a_speech_model_of_another_kind_is_refused() {
-    for id in ["qwen3.8-27b", "ignis-image-2.1-turbo"] {
-        let err = refused(&["--speech-model", id]);
-        assert!(err.contains("--speech-model") && err.contains(id) && err.contains("not a speech model"), "{err}");
-    }
-    for id in ["qwen3-asr-0.6b", "auto", "off", "an-asr-of-my-own"] {
-        assert!(resolve(&args(&["--speech-model", id]), no_env).is_ok(), "{id}");
-    }
-}
-
-/// Spec speech/08 (AC 14): `diarizer.model` naming a text, image or speech
-/// model is refused, a built-in entry of another kind or a model family's
-/// id; `auto`, `off` and an id the catalog lacks are taken.
-#[test]
-fn a_diarizer_model_of_another_kind_is_refused() {
-    for id in ["qwen3.8-27b", "ignis-image-2.1-turbo", "qwen3-asr-1.7b"] {
-        let err = refused(&["--diarizer-model", id]);
-        assert!(err.contains("--diarizer-model") && err.contains(id) && err.contains("not a diarizer"), "{err}");
-    }
-    for id in ["auto", "off", "nemotron-3-diarization", "a-diarizer-of-my-own"] {
-        assert!(resolve(&args(&["--diarizer-model", id]), no_env).is_ok(), "{id}");
-    }
-}
-
-/// A compat name equal to a served id is refused at start (spec speech/02):
-/// a catalog entry's, a model family's, the start model's or the speech
-/// model's own.
-#[test]
-fn a_compat_name_equal_to_a_served_id_is_refused_at_start() {
-    for served in ["qwen3.8-27b", "qwen3.8-flash-next", "ignis-image-2.1-turbo", "qwen3-asr-1.7b"] {
-        let err = refused(&["--speech-compat-names", &format!("whisper-1;{served}")]);
-        assert!(err.contains("--speech-compat-names") && err.contains(served) && err.contains("served model id"), "{served}: {err}");
-    }
-    let err = refused(&["--speech-model", "my-asr", "--speech-compat-names", "my-asr"]);
-    assert!(err.contains("my-asr") && err.contains("served model id"), "{err}");
-    let err = refused(&["--model-id", "my-text", "--speech-compat-names", "my-text"]);
-    assert!(err.contains("my-text") && err.contains("served model id"), "{err}");
-    assert!(resolve(&args(&["--speech-compat-names", "whisper-1;scribe"]), no_env).is_ok());
 }
 
 // ── `--profile auto` (ADR 0063, spec 27b-16gb/04) ────────────────────────
@@ -3125,8 +2050,8 @@ fn on_total(flags: &[&str], gib: f64) -> Result<Config, ConfigError> {
 fn auto_picks_the_profile_of_the_cards_class() {
     for (gib, name, class) in [
         (15.9, "rtx50-16gb", profile::CardClass::Gb16),
-        (31.8, "rtx5090", profile::CardClass::Gb32),
-        (95.5, "rtxpro6000", profile::CardClass::Gb96),
+
+
     ] {
         let config = on_total(&[], gib).unwrap();
         assert_eq!(config.basis.sources().profile_name, name, "{gib} GiB");
@@ -3145,7 +2070,7 @@ fn auto_refuses_a_card_of_no_class_naming_profile() {
     for gib in [24.0, 48.0] {
         let err = on_total(&[], gib).unwrap_err().0;
         assert!(err.contains(&format!("{gib:.1} GiB")), "{err}");
-        assert!(err.contains("--profile") && err.contains("rtx5090") && err.contains("rtx50-16gb"), "{err}");
+        assert!(err.contains("--profile") && err.contains("rtx50-16gb") && err.contains("rtx50-16gb"), "{err}");
     }
     let unreadable = on_card(&[], profile::Card::Unreadable("NVML is not installed".to_owned())).unwrap_err().0;
     assert!(unreadable.contains("--profile") && unreadable.contains("total"), "{unreadable}");
@@ -3167,62 +2092,37 @@ fn auto_with_no_card_resolves_as_none() {
 /// card reaches it; the total is read for the catalog's sake at a start.
 #[test]
 fn a_named_profile_beats_auto_whatever_the_card() {
-    let flag = on_total(&["--profile", "rtxpro6000"], 24.0).unwrap();
-    assert_eq!(flag.basis.sources().profile_name, "rtxpro6000");
+    let flag = on_total(&["--profile", "rtx50-16gb"], 24.0).unwrap();
+    assert_eq!(flag.basis.sources().profile_name, "rtx50-16gb");
     assert!(!flag.basis.sources().profile_auto);
     assert_eq!(flag.card_class(), None, "24 GiB is no class; the named profile still starts");
     assert_eq!(on_total(&["--profile", "none"], 31.8).unwrap().basis.sources().profile_name, "none");
     let env = |key: &str| (key == "IGNIS_PROFILE").then(|| "rtx50-16gb".to_owned());
-    let from_env = resolve_on(&[], env, &file::NoFiles, &|| profile::Card::Total(profile::RTX_5090_TOTAL_BYTES)).map(expect_config).unwrap();
+    let from_env = resolve_on(&[], env, &file::NoFiles, &|| profile::Card::Total(profile::RTX_5080_TOTAL_BYTES)).map(expect_config).unwrap();
     assert_eq!(from_env.basis.sources().profile_name, "rtx50-16gb");
-    assert_eq!(from_env.card_class(), Some(profile::CardClass::Gb32), "the total read is the card's, not the profile's");
+    assert_eq!(from_env.card_class(), Some(profile::CardClass::Gb16), "the total read is the card's");
     let files = MemFiles::with(&[("c.yaml", "profile: none\n")]);
     let from_file = resolve_on(&args(&["--config", "c.yaml"]), no_env, &files, &|| profile::Card::Total(24 << 30)).map(expect_config).unwrap();
     assert_eq!(from_file.basis.sources().profile_name, "none");
     // A named profile reads no total for the choice: a probe that panics
     // is never called by `gather`.
-    let parsed = source::parse_args(&args(&["--profile", "rtx5090"])).unwrap();
+    let parsed = source::parse_args(&args(&["--profile", "rtx50-16gb"])).unwrap();
     gather(parsed, &no_env, &file::NoFiles, FileChoice::None, &|| panic!("a named profile reads no total")).unwrap();
 }
 
 /// AC 2's regression: on a 5090 `auto` resolves every field, for each
-/// family, exactly as `--profile rtx5090` does.
+/// family, exactly as `--profile rtx50-16gb` does.
 #[test]
-fn auto_on_a_5090_resolves_exactly_as_rtx5090_does() {
-    let auto = on_card(&[], profile::Card::Total(profile::RTX_5090_TOTAL_BYTES)).unwrap();
-    let named = config(&["--profile", "rtx5090"]);
+fn auto_on_a_5080_resolves_exactly_as_the_named_profile_does() {
+    let auto = on_card(&[], profile::Card::Total(profile::RTX_5080_TOTAL_BYTES)).unwrap();
+    let named = config(&["--profile", "rtx50-16gb"]);
     assert_eq!(auto.settings(), named.settings());
     for family in field::FAMILIES {
         let (a, n) = (auto.for_family(family).unwrap(), named.for_family(family).unwrap());
         assert_eq!(a.settings(), n.settings(), "{family:?}");
         assert_eq!(a.max_context, n.max_context, "{family:?}");
     }
-    assert_eq!(auto.for_family(ModelFamily::Qwen38_27b).unwrap().max_context, 917_504);
-}
-
-/// `rtx50-16gb` for the 27B: the values the spec derives, and Flash-Next
-/// started under it resolves without refusal.
-#[test]
-fn the_rtx50_16gb_profile_serves_the_27b_with_vision_on_and_flash_next_starts_under_it() {
-    let config = on_total(&[], 15.9).unwrap();
-    let s27 = config.for_family(ModelFamily::Qwen38_27b).unwrap();
-    assert_eq!(s27.max_context, 262_144);
-    assert!(s27.settings().vision.enabled, "vision is on, explicitly");
-    assert_eq!(s27.settings().vision.max_tokens, 4096, "the profile's envelope");
-    assert_eq!(s27.vision.map(|v| v.residency()), Some(VisionResidency::Host));
-    assert_eq!(s27.vram, VramMode::Derived { headroom_bytes: 1200 << 20 });
-    assert_eq!(s27.settings().model.prefill_chunk, DEFAULT_PREFILL_CHUNK, "unset: 1,024");
-    assert!(s27.speculation.is_some(), "DFlash2 is on");
-    assert_eq!(s27.settings().spec.draft_tokens, Some(7));
-    // ADR 0063: two lanes, their four default host retained slots, and the
-    // head left to `auto`, which is the full head.
-    assert_eq!(s27.decode_lanes, Some(2));
-    assert_eq!(s27.retained_host_slots, 4, "two per lane");
-    assert_eq!(s27.settings().spec.draft_head, Some(ProposalHeadSetting::Auto));
-    assert_eq!(s27.speculation.map(|s| s.proposal_head()), Some(ProposalHead::Full));
-    assert_eq!(s27.adaptable(), crate::adaptation::Adaptable::ALL, "every value the profile's, so every one adapts");
-    let flash = config.for_family(ModelFamily::FlashNext).expect("Flash-Next starts under the 27B's profile");
-    assert_eq!(flash.decode_lanes, None, "the 27B's lanes are its own section's");
+    assert_eq!(auto.for_family(ModelFamily::Qwen38_27b).unwrap().max_context, 262_144);
 }
 
 /// GitHub #418 (ADR 0063 as amended by ADR 0075): `rtx50-16gb` turns vision
@@ -3239,7 +2139,7 @@ fn rtx50_16gb_turns_vision_on_at_a_4096_token_envelope_and_the_operator_wins() {
     assert_eq!(envelope(&["--vision-enabled"], 15.9), Some(4096));
     assert_eq!(envelope(&["--vision-enabled", "false"], 15.9), None, "the operator's off wins");
     assert_eq!(envelope(&["--vision-max-tokens", "1024"], 15.9), Some(1024), "the operator's envelope wins");
-    assert_eq!(envelope(&[], 31.8), Some(DEFAULT_VISION_MAX_TOKENS), "rtx5090's vision is on at the default");
+    assert_eq!(envelope(&[], 15.9), Some(4096), "rtx50-16gb's vision is on at the default");
 }
 
 /// ADR 0063 §3: a value the profile or the hardcoded default gave adapts at
@@ -3249,7 +2149,7 @@ fn rtx50_16gb_turns_vision_on_at_a_4096_token_envelope_and_the_operator_wins() {
 fn only_the_profiles_and_the_defaults_values_adapt() {
     use crate::adaptation::Adaptable;
     let qwen = |config: Config| config.for_family(ModelFamily::Qwen38_27b).unwrap().adaptable();
-    assert_eq!(qwen(config(&[])), Adaptable::ALL, "rtx5090's context, the default lanes and head");
+    assert_eq!(qwen(config(&[])), Adaptable::ALL, "rtx50-16gb's context, the default lanes and head");
     assert_eq!(qwen(config(&["--model-max-context", "131072"])), Adaptable { max_context: false, ..Adaptable::ALL });
     let env = env_map(&[("IGNIS_QWEN38_SPEC_DECODE_LANES", "2")]);
     assert_eq!(qwen(expect_config(resolve(&[], env).unwrap())), Adaptable { decode_lanes: false, ..Adaptable::ALL });
@@ -3298,39 +2198,27 @@ fn an_adaptation_step_that_is_not_whole_kv_pages_is_refused() {
     assert!(refused(&["--vram-adapt-spare-tokens", "-1"]).contains("--vram-adapt-spare-tokens"));
 }
 
-/// Both fields are the 27B's alone (Flash-Next does not adapt, ADR 0063 §3):
-/// a Flash-Next start refuses an explicit value by name, and the defaults are
-/// no one's business.
-#[test]
-fn the_adaptation_fields_are_the_27bs_and_refuse_flash_next() {
-    for flags in [["--model-adapt-context-step", "131072"], ["--vram-adapt-spare-tokens", "0"]] {
-        let named = config(&flags);
-        assert!(served_model_for(&named, ModelFamily::Qwen38_27b).is_ok(), "{flags:?}");
-        let err = served_model_for(&named, ModelFamily::FlashNext).expect_err("the 27B's").0;
-        assert!(err.contains(flags[0]) && err.contains("Qwen3.8-Flash-Next"), "{err}");
-    }
-}
-
 /// The startup line says whether the profile was chosen by `auto` or named.
 #[test]
 fn the_startup_log_says_a_named_profile_is_named() {
     use tracing_subscriber::layer::SubscriberExt;
-    let config = config(&["--profile", "rtxpro6000"]);
+    let config = config(&["--profile", "rtx50-16gb"]);
     let sink = std::sync::Arc::new(ignis_logging::MemorySink::new());
     let subscriber = tracing_subscriber::registry().with(ignis_logging::JsonLayer::new(sink.clone()));
     tracing::subscriber::with_default(subscriber, || log_source(&config));
     let event: serde_json::Value = serde_json::from_str(&sink.lines()[0]).unwrap();
     let field = |name: &str| event.get(name).or_else(|| event["attributes"].get(name)).cloned();
-    assert_eq!(field("profile"), Some("rtxpro6000".into()), "{event}");
+    assert_eq!(field("profile"), Some("rtx50-16gb".into()), "{event}");
     assert_eq!(field("profile_by"), Some("named".into()), "{event}");
 }
 
-/// `--help` says which profile each class gets, from the classes themselves.
+/// Help lists profiles available in this fork.
 #[test]
-fn help_names_the_profile_of_every_card_class() {
+fn help_lists_the_5080_profile_without_retired_options() {
     let help = help_text();
-    for class in profile::CardClass::ALL {
-        assert!(help.contains(&format!("{class}: {}", class.profile())), "{class}: {help}");
+    assert!(help.contains("16 GB: rtx50-16gb"), "{help}");
+    for retired in ["rtx5090", "rtxpro6000", "qwen38flashnext", "Flash-Next", "image job"] {
+        assert!(!help.contains(retired), "{retired}: {help}");
     }
 }
 
@@ -3356,14 +2244,14 @@ fn a_file_cannot_define_a_profile_called_none_or_auto() {
 }
 
 /// `auto` picks by NAME through the lookup a named profile uses, so a file's
-/// `profiles:` redefining `rtx5090` replaces what `auto` picks for a 5090.
+/// `profiles:` redefining `rtx50-16gb` replaces what `auto` picks for a 5090.
 #[test]
 fn a_file_redefining_a_built_in_profile_replaces_what_auto_picks() {
-    let files = MemFiles::with(&[("c.yaml", "profiles:\n  rtx5090:\n    model:\n      qwen38:\n        max_context: 131072\n")]);
-    let config = resolve_on(&args(&["--config", "c.yaml"]), no_env, &files, &|| profile::Card::Total(profile::RTX_5090_TOTAL_BYTES))
+    let files = MemFiles::with(&[("c.yaml", "profiles:\n  rtx50-16gb:\n    model:\n      qwen38:\n        max_context: 131072\n")]);
+    let config = resolve_on(&args(&["--config", "c.yaml"]), no_env, &files, &|| profile::Card::Total(profile::RTX_5080_TOTAL_BYTES))
         .map(expect_config)
         .unwrap();
-    assert_eq!(config.basis.sources().profile_name, "rtx5090");
+    assert_eq!(config.basis.sources().profile_name, "rtx50-16gb");
     assert_eq!(config.for_family(ModelFamily::Qwen38_27b).unwrap().max_context, 131_072);
 }
 

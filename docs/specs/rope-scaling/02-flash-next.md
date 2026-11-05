@@ -106,7 +106,7 @@ the 27B's table, op and convention are untouched.
   0/2 chains, `none` 5/5 and 1/2. The control did not degrade there either, and `auto`'s extra
   misses are the deepest facts (948.9K, 970.6K), each answered with another fact's number. MTP
   ran on the scaled table with no error. Neither leg separates the tables: one seed, one filler
-  ([finding](../../findings/2026-10-19-flash-next-yarn-in-the-reference-engines.md)).
+  ([finding](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-19-flash-next-yarn-in-the-reference-engines.md)).
 - **hq-e8-2b under `m`-scaled K** is measured by those legs at both KV formats, not here.
 - **`original_max_position_embeddings` on the topology.** A named constant until a
   checkpoint differs.

@@ -5,7 +5,7 @@
 - Observed: 2026-10-18
 - Last verified: 2026-10-18
 - Scope: serving / the `rtxpro6000` profile's Flash-Next MTP row budget (`spec.draft_rows`, ADR 0056), the verify round's time by width on a card that holds every expert in VRAM
-- Related: https://github.com/gpillon/ignis/issues/329 (item 5), [Flash-Next verify rows past 8](2026-10-18-flash-next-verify-rows-past-8.md), [the rtxpro6000 profile measured](2026-10-18-rtxpro6000-profile-measured.md), [spec flash-next/07](../specs/flash-next/07-mtp-speculation.md), `.scratch/rows-card/`
+- Related: https://github.com/gpillon/ignis/issues/329 (item 5), [Flash-Next verify rows past 8](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-18-flash-next-verify-rows-past-8.md), [the rtxpro6000 profile measured](2026-10-18-rtxpro6000-profile-measured.md), [spec flash-next/07](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/flash-next/07-mtp-speculation.md), `.scratch/rows-card/`
 - Superseded by: none
 
 ## Question

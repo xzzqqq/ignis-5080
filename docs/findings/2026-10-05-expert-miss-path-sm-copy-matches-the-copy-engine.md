@@ -6,7 +6,7 @@
 - Last verified: 2026-10-05
 - Scope: kernel / Flash-Next expert residency, the miss path from the pinned host expert pool to the VRAM expert cache
 - Related: [GitHub #301](https://github.com/gpillon/ignis/issues/301),
-  [spec flash-next/03](../specs/flash-next/03-expert-residency.md),
+  [spec flash-next/03](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/flash-next/03-expert-residency.md),
   [ADR 0044](../adr/0044-experts-in-trellis-with-a-k-per-expert.md),
   [Sequence snapshot transfer cost](2026-09-12-sequence-snapshot-transfer-cost.md)
 - Superseded by: none

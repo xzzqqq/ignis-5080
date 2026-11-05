@@ -67,7 +67,6 @@ use ignis_core::seq::{SeqPool, SeqPoolBudget};
 use ignis_core::step;
 use ignis_core::vision::{Multimodal, vision_item_control};
 use ignis_core::{ExceptionWeights, KvFormat, RopeScaling, Vision};
-use ignis_server::decide::OrderedValue;
 use ignis_server::numbers::point_system;
 
 use support::vision_canary::prefill_prompt;
@@ -229,10 +228,10 @@ fn the_consumed_capture_reads_what_hq_attention_read() {
 
     let mut failures: Vec<String> = Vec::new();
     for (size, bytes) in [("4096", fixture.clone()), ("1024", downscale_png(&fixture, 4))] {
-        // The served render: what `/v1/decide` sends.
+        // Keep the historical calibration prompt unchanged for the codec oracle.
         let instruction = format!(
             "{{\"instruction\":{}}}",
-            OrderedValue::String("click the blue button".to_owned()).to_text()
+            serde_json::to_string("click the blue button").expect("instruction JSON")
         );
         let messages = [
             ChatMessage {

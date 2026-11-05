@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { StaticPictures } from "../image/pictures.tsx";
+import { StaticPictures } from "../store/pictureViews.tsx";
 import { ImageStrip } from "../tools/image/ImageStrip.tsx";
 import type { ImageRun } from "../tools/image/image.ts";
 import { LocalStrip } from "../tools/local/LocalStrip.tsx";

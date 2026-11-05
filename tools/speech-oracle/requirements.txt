@@ -1,6 +1,0 @@
-# The speech oracle's Python (tools/speech-oracle/record.py checks these at start).
-torch==2.14.1+cpu
-transformers==5.20.2
-numpy==2.5.4
-# The yardstick reads the GGUF files with llama.cpp b11840's gguf-py (--gguf-py), not a
-# PyPI package.

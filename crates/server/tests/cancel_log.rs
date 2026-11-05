@@ -292,14 +292,4 @@ async fn a_cancelled_request_says_why_it_was_cancelled() {
         seen = every_cause(Box::new(ReasoningTemplate), LoopGuardMode::Rewind, reply, &log, seen).await;
     }
 
-    // A decision's question past the deadline is answered `not_completed`.
-    let app = Server::new(never_runs(), Box::new(DecidingTemplate)).with_request_timeout(Duration::from_millis(100)).app();
-    let decide = json!({ "state": "Payouts failing for 3 days.", "model": MODEL, "questions": { "urgent": { "type": "noul", "instructions": "Urgent?" } } });
-    let response = app.oneshot(post("/v1/decide", decide)).await.unwrap();
-    let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert!(status == 200 && String::from_utf8_lossy(&body).contains("not_completed"), "{status} {body:?}");
-    assert_eq!(nth_cause(&log, seen).await, "timeout", "a decision's question");
-    let lines = cancelled(&log);
-    assert!(lines[seen..].iter().all(|(_, cause)| cause == "timeout"), "{lines:?}");
 }

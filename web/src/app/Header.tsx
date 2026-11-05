@@ -4,11 +4,9 @@ import flame from "../brand/flame.webp";
 import wordmark from "../brand/wordmark-light.webp";
 import { MonitorPulse } from "../monitor/MonitorPulse.tsx";
 import { useMemoryNotes } from "../tools/local/memory.ts";
-import { clock } from "../transcribe/export.ts";
-import { type ListeningHandle, type ListeningState, useListening } from "../transcribe/listening.ts";
 import { IconSessions, IconSliders } from "../ui/icons.tsx";
 
-export type View = "chat" | "decide" | "monitor" | "server" | "image" | "transcribe";
+export type View = "chat" | "monitor" | "server";
 
 /** The kiln bar: brand, the view switch, model status, and the drawer buttons below `lg`. */
 export function Header({
@@ -20,7 +18,6 @@ export function Header({
   view = "chat",
   onView,
   monitorAvailable = false,
-  listening,
 }: {
   model: ModelState;
   busy: boolean;
@@ -34,19 +31,16 @@ export function Header({
   /** ignis serves metrics, so the Monitor is one of the views on offer. */
   monitorAvailable?: boolean;
   /** The Transcribe view's listening, shown from every view while one is under way (spec speech/07, Q84). */
-  listening?: ListeningHandle;
 }) {
   const chat = view === "chat";
   // The chat, the bench, the Image and the Transcribe views have two side
   // columns that are drawers below `lg`; the Monitor and the Server view have none.
-  const sided = view === "chat" || view === "decide" || view === "image" || view === "transcribe";
-  const decide = view === "decide";
-  const transcribe = view === "transcribe";
+  const sided = view === "chat";
   return (
     <header className="z-20 shrink-0 bg-kiln text-[#eae8e4]">
       <div className="flex items-center gap-1.5 px-3 py-3 sm:gap-4 sm:px-4 md:px-6">
         {sided && (
-          <HeaderButton label={decide ? "Decisions" : transcribe ? "Transcripts" : "Sessions"} onClick={() => onOpen("sessions")}>
+          <HeaderButton label="Sessions" onClick={() => onOpen("sessions")}>
             <IconSessions />
           </HeaderButton>
         )}
@@ -58,7 +52,6 @@ export function Header({
         ) : (
           <span className="hidden font-display text-[15px] font-medium tracking-wide text-[#b9bec4] sm:block">Playground</span>
         )}
-        {onView && listening && <ListeningBadge handle={listening} onOpen={() => onView("transcribe")} />}
         <ModelStatus model={model} busy={busy} />
         {onView && monitorAvailable && chat && <MonitorPulse onOpen={() => onView("monitor")} />}
         <MemoryButton onOpen={onOpenMemory} />
@@ -73,7 +66,7 @@ export function Header({
           </button>
         )}
         {sided && (
-          <HeaderButton label={decide ? "Questions" : transcribe ? "Call" : "Settings"} onClick={() => onOpen("settings")}>
+          <HeaderButton label="Settings" onClick={() => onOpen("settings")}>
             <IconSliders />
           </HeaderButton>
         )}
@@ -93,9 +86,6 @@ function ViewSwitch({ view, onView, monitorAvailable }: { view: View; onView: (v
   // (spec playground/05), so they are there either way.
   const views: [View, string][] = [
     ["chat", "Playground"],
-    ["decide", "Decide"],
-    ["image", "Image"],
-    ["transcribe", "Transcribe"],
     ...(monitorAvailable ? ([["monitor", "Monitor"]] as [View, string][]) : []),
     ["server", "Server"],
   ];
@@ -129,28 +119,6 @@ function ViewSwitch({ view, onView, monitorAvailable }: { view: View; onView: (v
         ))}
       </nav>
     </>
-  );
-}
-
-/** A listening under way in the Transcribe view, from any view: its state and its clock; a press opens the view. */
-function ListeningBadge({ handle, onOpen }: { handle: ListeningHandle; onOpen: () => void }) {
-  // Its own subscription: the clock ticks here, not in the page around it.
-  const listening: ListeningState = useListening(handle);
-  if (listening.phase === "idle") return null;
-  const running = listening.phase === "listening";
-  const said = listening.phase === "paused" ? "Paused" : listening.phase === "finishing" ? "Finishing" : listening.phase === "waiting" ? "Waiting" : "Listening";
-  return (
-    <button
-      type="button"
-      title="Open the Transcribe view"
-      onClick={onOpen}
-      className="flex shrink-0 items-center gap-1.5 px-2 py-1 font-display text-[13px] font-medium text-[#eae8e4] hover:bg-kiln-line"
-    >
-      <span className={`inline-block size-[7px] ${running ? "dictation-dot bg-[#ff5a1f]" : "bg-[#939ba4]"}`} aria-hidden />
-      <span className="hidden sm:inline">{said}</span>
-      <span className="sr-only sm:hidden">{said}</span>
-      <span className="text-[#b9bec4] tabular-nums">{clock(listening.clockMs)}</span>
-    </button>
   );
 }
 

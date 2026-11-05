@@ -346,13 +346,11 @@ pub const CONFIG_KEYS: &[&str] = &[
     "vram.budget_bytes",
     "vram.headroom_bytes",
     "vram.kv_pool_bytes",
-    "vram.pinned_expert_bytes",
     "vram.adapt_spare_tokens",
     "vram.allow_oversubscription",
     "reuse.kv_host_pool_bytes",
     "spec.backend",
     "spec.draft_tokens",
-    "spec.draft_rows",
     "spec.decode_lanes",
     "spec.draft_head",
 ];

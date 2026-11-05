@@ -18,7 +18,6 @@ import {
   type ViaNotifications,
 } from "../store/persist.ts";
 import { actionInk, actionShape, caption, field } from "../ui/classes.ts";
-import { chooseSilence, SILENCE_CHOICES, useSilence } from "../speech/silence.ts";
 import { Segmented } from "../ui/Segmented.tsx";
 import { Slider } from "../ui/Slider.tsx";
 import { Switch } from "../ui/Switch.tsx";
@@ -149,7 +148,6 @@ function GeneralSettings(props: {
 
       <ParallelSetting on={props.parallel} onChange={props.onParallelChange} />
 
-      <SilenceSetting />
 
       <TransportSetting />
 
@@ -278,13 +276,7 @@ export function ToolsSetting({
             onChange={(workspace) => onChange({ ...tools, workspace })}
             description="The model lists, reads, writes, edits and deletes the files of the chat's workspace, and the prompt box attaches text, PDF and audio files, and pictures, to it. Off, the files stay yours."
           />
-          <ToolRow
-            id="images"
-            label="Pictures"
-            on={tools.images}
-            onChange={(images) => onChange({ ...tools, images })}
-            description="The model can make and edit pictures with the image model. Each reply that does unloads the text model for about half a minute: there, and back."
-          />
+
         </div>
       )}
     </fieldset>
@@ -524,27 +516,6 @@ function KeepSessionsSetting() {
       onAsk={() => void settle(ask)}
       onNotify={() => void settle(async () => setVia(await askViaNotifications(storage, notifications)))}
     />
-  );
-}
-
-/** How long a silence ends a dictation by itself (Q80): this browser's, kept like the transport. */
-export function SilenceSetting() {
-  const silence = useSilence();
-  return (
-    <div className="flex flex-col gap-2">
-      <Segmented
-        legend="Dictation stops after"
-        name="dictation-silence"
-        value={String(silence)}
-        options={SILENCE_CHOICES.map((c) => ({ value: String(c.value), label: c.label }))}
-        onChange={(v) => chooseSilence(v === "null" ? null : Number(v))}
-      />
-      <span className="text-xs leading-snug text-ash">
-        {silence === null
-          ? "A dictation ends when you press Done. A held Ctrl+Shift+Space ends when you let go."
-          : "A silence this long ends a dictation as Done does. A held Ctrl+Shift+Space never stops by itself."}
-      </span>
-    </div>
   );
 }
 

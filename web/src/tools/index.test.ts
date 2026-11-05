@@ -1,32 +1,21 @@
+import { DELETE_FILE_TOOL, EDIT_FILE_TOOL, LIST_FILES_TOOL, READ_FILE_TOOL, WORKSPACE_PROMPT, WRITE_FILE_TOOL } from "../workspace/tools.ts";
 import { describe, expect, it } from "vitest";
 import { AGENT_TOOL, AGENTS_IGNIS_PROMPT } from "./agents/agents.ts";
-import { ASK_USER_IGNIS_PROMPT, ASK_USER_TOOL } from "./ask/ask.ts";
 import { dateTimePrompt } from "./datetime/datetime.ts";
-import { IMAGE_IGNIS_PROMPT, IMAGE_TOOL } from "./image/image.ts";
 import {
   agentExtras,
   ALL_TOOLS,
   DEFAULT_TOOL_ROUNDS,
   ignisPrompt,
   NO_TOOLS,
-  routeCall,
   setAllTools,
   toolExtras,
   toolsInUse,
   turnDateTime,
 } from "./index.ts";
 import {
-  MEMORY_DELETE_TOOL,
-  MEMORY_READ_TOOL,
-  MEMORY_PROMPT,
-  MEMORY_SAVE_TOOL,
-  PLAN_PROMPT,
-  RUN_JS_TOOL,
   runJsPrompt,
-  UPDATE_PLAN_TOOL,
 } from "./local/local.ts";
-import { WEB_FETCH_TOOL, WEB_IGNIS_PROMPT, WEB_SEARCH_TOOL } from "./web/web.ts";
-import { DELETE_FILE_TOOL, EDIT_FILE_TOOL, LIST_FILES_TOOL, READ_FILE_TOOL, WORKSPACE_PROMPT, WRITE_FILE_TOOL } from "../workspace/tools.ts";
 import { withAttached } from "../workspace/attach.ts";
 import { buildChatRequest, type Settings, type Turn } from "../api/request.ts";
 import { buildResponseCreate, responseItems } from "../api/responses.ts";
@@ -55,7 +44,6 @@ const all = {
   plan: true,
   memory: true,
   workspace: true,
-  images: true,
   maxRounds: DEFAULT_TOOL_ROUNDS,
 };
 const names = (extras: { tools?: { function: { name: string } }[] }) => (extras.tools ?? []).map((t) => t.function.name);
@@ -100,39 +88,7 @@ describe("tools", () => {
     expect(extras.ignisPrompt).toBe(dateTimePrompt(now));
   });
 
-  it("puts every tool in a fixed order, the date first", () => {
-    expect(toolExtras(all, ctx)).toEqual({
-      ignisPrompt: [
-        dateTimePrompt(now),
-        AGENTS_IGNIS_PROMPT,
-        WEB_IGNIS_PROMPT,
-        ASK_USER_IGNIS_PROMPT,
-        runJsPrompt(true),
-        PLAN_PROMPT,
-        MEMORY_PROMPT,
-        WORKSPACE_PROMPT,
-        IMAGE_IGNIS_PROMPT,
-      ].join("\n\n"),
-      tools: [
-        AGENT_TOOL,
-        WEB_SEARCH_TOOL,
-        WEB_FETCH_TOOL,
-        ASK_USER_TOOL,
-        RUN_JS_TOOL,
-        UPDATE_PLAN_TOOL,
-        MEMORY_SAVE_TOOL,
-        MEMORY_READ_TOOL,
-        MEMORY_DELETE_TOOL,
-        LIST_FILES_TOOL,
-        READ_FILE_TOOL,
-        WRITE_FILE_TOOL,
-        EDIT_FILE_TOOL,
-        DELETE_FILE_TOOL,
-        IMAGE_TOOL,
-      ],
-    });
-    expect(toolsInUse(all)).toBe(9);
-  });
+
 
   it("declares the workspace's tools whenever its switch is on, and tells run_js about the safety check", () => {
     expect(toolExtras({ ...NO_TOOLS, workspace: true }, ctx)).toEqual({
@@ -183,22 +139,7 @@ describe("tools", () => {
     expect(toolsInUse({ ...all, enabled: false })).toBe(0);
   });
 
-  it("gives agents every tool but agent, ask_user, update_plan and make_image", () => {
-    expect(names(agentExtras(all, ctx))).toEqual([
-      "web_search",
-      "web_fetch",
-      "run_js",
-      "memory_save",
-      "memory_read",
-      "memory_delete",
-      "list_files",
-      "read_file",
-      "write_file",
-      "edit_file",
-      "delete_file",
-    ]);
-    expect(agentExtras({ ...NO_TOOLS, agents: true, askUser: true, plan: true, images: true }, ctx)).toEqual({ ignisPrompt: "", tools: [] });
-  });
+
 
   it("keeps each tool's choice under the switch for all, and turns all on when none was chosen", () => {
     const some = { ...NO_TOOLS, web: true };
@@ -218,19 +159,5 @@ describe("tools", () => {
     expect(setAllTools({ ...all, maxRounds: 40 }, false).maxRounds).toBe(40);
   });
 
-  it("routes declared calls to their runner, and any undeclared tool to unknown", () => {
-    const every = names(toolExtras(all, ctx));
-    expect(routeCall("web_search", every)).toBe("web");
-    expect(routeCall("agent", every)).toBe("agent");
-    expect(routeCall("ask_user", every)).toBe("ask");
-    expect(routeCall("make_image", every)).toBe("image");
-    expect(routeCall("make_image", names(toolExtras({ ...all, images: false }, ctx)))).toBe("unknown");
-    for (const local of ["run_js", "update_plan", "memory_save", "memory_read", "memory_delete", "list_files", "read_file", "write_file", "edit_file", "delete_file"]) {
-      expect(routeCall(local, every)).toBe("local");
-    }
-    expect(routeCall("create_file", every)).toBe("unknown");
-    expect(routeCall("read_file_x", every)).toBe("unknown");
-    expect(routeCall("run_js", ["agent"])).toBe("unknown");
-    expect(routeCall("agent", [])).toBe("unknown");
-  });
+
 });

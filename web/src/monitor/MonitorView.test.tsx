@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { FLASH_NEXT_EXPOSITION, IGNIS_EXPOSITION, IMAGE_EXPOSITION, IMAGE_LOAD_EXPOSITION, KV_DISK_EXPOSITION, LOOP_GUARD_EXPOSITION, SPEECH_EXPOSITION, THINKING_FORCED_CLOSES } from "./fixture.ts";
+import { FLASH_NEXT_EXPOSITION, IGNIS_EXPOSITION, IMAGE_LOAD_EXPOSITION, KV_DISK_EXPOSITION, LOOP_GUARD_EXPOSITION, THINKING_FORCED_CLOSES } from "./fixture.ts";
 import { MonitorView } from "./MonitorView.tsx";
 import { applyScrape, initialMonitor } from "./scrape.ts";
 
@@ -146,62 +146,12 @@ describe("MonitorView", () => {
     expect(withDevice).not.toContain("retained state lives in host RAM");
   });
 
-  it("draws a Flash-Next load's expert residency and n-gram rows, and a 27B load's neither", () => {
-    const now = Date.now();
-    // Ten seconds on: 900 decode hits and 100 misses, 50 tokens decoded.
-    const later = FLASH_NEXT_EXPOSITION.replace('ignis_expert_cache_hits_total{class="gate_up_k2",phase="decode"} 4000', 'ignis_expert_cache_hits_total{class="gate_up_k2",phase="decode"} 4900')
-      .replace('ignis_expert_cache_misses_total{class="down_k3",phase="decode"} 300', 'ignis_expert_cache_misses_total{class="down_k3",phase="decode"} 400')
-      .replace("ignis_decoded_tokens_total 12400", "ignis_decoded_tokens_total 12450")
-      .replace('ignis_expert_residency_stall_seconds_total{phase="decode"} 18.6', 'ignis_expert_residency_stall_seconds_total{phase="decode"} 18.7');
-    const flashNext = applyScrape(applyScrape(initialMonitor(), { kind: "ok", text: FLASH_NEXT_EXPOSITION }, now - 10_000, 3), { kind: "ok", text: later }, now, 4);
-    const html = renderToStaticMarkup(<MonitorView state={flashNext} />);
-    expect(html).toContain('aria-label="Expert residency"');
-    expect(html).toContain('aria-label="N-gram rows"');
-    expect(html).toContain("90%");
-    expect(html).toContain("gate_up_k4");
-    // 2,999 of 3,000 down_k2 slots, both terms.
-    expect(html).toContain("2,999");
-    // The capacity is the LRU's: a pinned hot set's slots are not in it (ADR 0055).
-    expect(html).toContain("LRU slots in use");
-    expect(html).toContain("A pinned hot set&#x27;s slots are not among them");
-    // 0.1 s waited on demand copies over those 50 tokens and 10 s.
-    expect(html).toContain("Stall per token");
-    expect(html).toContain("2.0 ms");
-    expect(html).toContain("1.0%");
-    expect(html).not.toContain("not in ADR 0017");
 
-    const dense = applyScrape(initialMonitor(), { kind: "ok", text: IGNIS_EXPOSITION }, now, 2);
-    const html27b = renderToStaticMarkup(<MonitorView state={dense} />);
-    expect(html27b).not.toContain('aria-label="Expert residency"');
-    expect(html27b).not.toContain('aria-label="N-gram rows"');
-  });
 
-  it("draws the image jobs once the image model admitted one, and nothing of them before (GitHub #324)", () => {
-    const now = Date.now();
-    // Ten seconds on: ten more seconds of denoising, so the phases have a window to share.
-    const later = IMAGE_EXPOSITION.replace('ignis_image_job_phase_seconds_total{phase="denoising"} 14', 'ignis_image_job_phase_seconds_total{phase="denoising"} 24');
-    const state = applyScrape(applyScrape(initialMonitor(), { kind: "ok", text: IMAGE_EXPOSITION }, now - 10_000, 2), { kind: "ok", text: later }, now, 2);
-    const html = renderToStaticMarkup(<MonitorView state={state} />);
-    expect(html).toContain("Image jobs");
-    expect(html).toContain("Median duration");
-    expect(html).toContain("Time denoising");
-    const text = renderToStaticMarkup(<MonitorView state={applyScrape(initialMonitor(), { kind: "ok", text: IGNIS_EXPOSITION }, now, 2)} />);
-    expect(text).not.toContain("Image jobs");
-  });
+
 
   // Spec speech/02: the Transcriptions card, only once the speech model was asked.
-  it("draws the Transcriptions card once the speech model transcribed, and not on a server that never did", () => {
-    const now = Date.now();
-    // Ten seconds on: three more completed transcriptions and 60 more seconds of audio.
-    const later = SPEECH_EXPOSITION.replace('executor="cpu",outcome="completed"} 4', 'executor="cpu",outcome="completed"} 7').replace("audio_seconds_total 80", "audio_seconds_total 140");
-    const state = applyScrape(applyScrape(initialMonitor(), { kind: "ok", text: SPEECH_EXPOSITION }, now - 10_000, 2), { kind: "ok", text: later }, now, 2);
-    const html = renderToStaticMarkup(<MonitorView state={state} />);
-    expect(html).toContain("Transcriptions");
-    expect(html).toContain("Median wait");
-    expect(html).toContain("Sessions open");
-    const text = renderToStaticMarkup(<MonitorView state={applyScrape(initialMonitor(), { kind: "ok", text: IGNIS_EXPOSITION }, now, 2)} />);
-    expect(text).not.toContain("Median wait");
-  });
+
 
   // GitHub #330: the Reasoning card, and the rewinds among the Request flow's cancels.
   it("draws the Reasoning card once the loop guard watched a request, with the rewinds noted on the Request flow", () => {

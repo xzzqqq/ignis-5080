@@ -1,32 +1,7 @@
-# ignis -- developer Makefile.
-#
-#   make                 the target list (same as `make help`)
-#   make dev             build ignis-server, then run it (GPU, release, Playground)
-#   make run             run the last build; refuses a missing or stale binary
-#   make mock            the same loop on the CPU mock (no GPU, no kernel leaf)
-#   make dev-ui          server in the background + Playground with hot reload
-#                        (API_KEY=auto: the server generates a key and prints it;
-#                        EXPOSE=cloudflare-quick: a public URL, key required)
-#   make config          the resolved knobs
-#
-# Layout
-#   Makefile             the platform-neutral target graph (this file)
-#   mk/config.mk         the knobs and their defaults (CUDA, PROFILE, UI, ...)
-#   mk/os/<os>.mk        the per-OS hooks: target triple, kernel build, GPU
-#                        checks, background server control. Windows is
-#                        implemented; Linux is scaffolded and every hook it
-#                        cannot run yet fails with a "not implemented" message.
-#   mk/windows/*.ps1     the PowerShell helpers behind the Windows hooks
-#   local.mk             untracked per-machine overrides (see local.mk.example)
-#
-# Precedence: command line > environment > local.mk > mk/config.mk.
-#
-# Recipes run under a POSIX sh: /bin/sh on Linux, Git for Windows' sh.exe on
-# Windows (GNU make takes it from PATH). Keep them to plain sh + the tools
-# listed by `make doctor`.
-#
-# There is deliberately no `fmt` target: the repo is not rustfmt-clean and
-# diffs stay semantic-only.
+# Linux development targets, invoked from the Laptop with scripts/remote.py.
+# run/start use the last build and reject stale sources; build is explicit.
+# Local overrides: command line > environment > local.mk > mk/config.mk.
+# No repo-wide formatter: keep diffs semantic.
 
 MAKEFLAGS += --no-builtin-rules --no-builtin-variables
 .SUFFIXES:
@@ -38,15 +13,11 @@ MAKEFLAGS += --no-builtin-rules --no-builtin-variables
 -include local.mk
 include mk/config.mk
 
-ifeq ($(OS),Windows_NT)
-  HOST_OS := windows
-else
-  HOST_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+HOST_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+ifneq ($(HOST_OS),linux)
+  $(error Make targets run on remote Linux through scripts/remote.py; use cargo for Laptop CPU checks)
 endif
-ifeq ($(wildcard mk/os/$(HOST_OS).mk),)
-  $(error unsupported host OS '$(HOST_OS)': add mk/os/$(HOST_OS).mk (start from mk/os/linux.mk))
-endif
-include mk/os/$(HOST_OS).mk
+include mk/os/linux.mk
 
 # ---------------------------------------------------------------------------
 # Derived values
@@ -66,8 +37,7 @@ else
   BACKEND := cpu
 endif
 
-# `--target` is always explicit: .cargo/config.toml pins the MSVC triple for
-# Windows, and the flag is what lets the same graph target Linux later.
+# CUDA artifacts always target the remote Linux host.
 CARGO_TARGET := --target $(TARGET_TRIPLE)
 SERVER_CARGO_FLAGS := -p ignis-server $(CARGO_TARGET) --profile $(PROFILE) $(if $(filter 1,$(CUDA)),--features cuda)
 # `cuda`, never `ignis-server/cuda`: cargo reads the latter as a feature of
@@ -88,65 +58,40 @@ BUILT_BACKEND = $(strip $(if $(wildcard $(SERVER_STAMP)),$(file < $(SERVER_STAMP
 SERVER_URL := http://$(BIND)
 # The server's own default when METRICS_BIND is empty (DEFAULT_METRICS_BIND).
 METRICS_URL := http://$(or $(METRICS_BIND),127.0.0.1:9464)
-# KV-disk as a start will get it (spec vram-budget/03): the budget the server
-# takes, and the directory its per-process directories go in, resolved the
-# way --kv-disk-path is.
-KV_DISK_BUDGET = $(or $(KV_DISK_BYTES),$(if $(filter flash-next,$(MODEL_FAMILY)),4G,0))
-KV_DISK_LOCATION = $(strip $(if $(filter auto,$(KV_DISK_PATH)),$(if $(filter windows,$(HOST_OS)),$(subst \,/,$(LOCALAPPDATA))/ignis/cache/kv-disk,$(or $(XDG_CACHE_HOME),$(HOME)/.cache)/ignis/kv-disk),$(if $(filter-out model,$(KV_DISK_PATH)),$(KV_DISK_PATH),$(patsubst %/,%,$(dir $(ARTIFACT))))))
+KV_DISK_BUDGET = $(or $(KV_DISK_BYTES),0)
+KV_DISK_LOCATION = $(if $(filter auto,$(KV_DISK_PATH)),$(or $(XDG_CACHE_HOME),$(HOME)/.cache)/ignis/kv-disk,$(if $(filter-out model,$(KV_DISK_PATH)),$(KV_DISK_PATH),$(patsubst %/,%,$(dir $(ARTIFACT)))))
 SERVER_PID := $(RUNTIME_DIR)/ignis-server.pid
 SERVER_LOG := $(RUNTIME_DIR)/ignis-server.log
-# LANES goes to the started model's own section (GitHub #336): both models take
-# the decode lanes, so a general value would follow a switch to the other one
-# -- Flash-Next's 3 becoming the 27B's.
-LANES_SCOPE = $(if $(filter flash-next,$(MODEL_FAMILY)),qwen38flashnext,qwen38)
+LANES_SCOPE := qwen38
 
 GPU_ENGINE_FLAGS = $(if $(ARTIFACT),--model-artifact $(ARTIFACT)) \
   $(if $(KV_FORMAT),--model-kv-format $(KV_FORMAT)) \
   $(if $(MAX_CONTEXT),--model-max-context $(MAX_CONTEXT)) \
   $(if $(PREFILL_CHUNK),--model-prefill-chunk $(PREFILL_CHUNK))   $(if $(DECODE_SHARE),--model-decode-share $(DECODE_SHARE))   $(if $(LANES),--$(LANES_SCOPE)-spec-decode-lanes $(LANES)) \
   $(if $(KV_POOL_BYTES),--vram-kv-pool-bytes $(KV_POOL_BYTES))   $(if $(VRAM_HEADROOM),--vram-headroom-bytes $(VRAM_HEADROOM))   $(if $(VRAM_BUDGET),--vram-budget-bytes $(VRAM_BUDGET))   $(if $(filter 1,$(ALLOW_VRAM_OVERSUBSCRIPTION)),--vram-allow-oversubscription) \
-  $(if $(filter 1,$(ALLOW_EXPERT_CACHE_BELOW_FLOOR)),--vram-allow-expert-cache-below-floor) \
-  $(if $(PINNED_EXPERT_BYTES),--vram-pinned-expert-bytes $(PINNED_EXPERT_BYTES)) \
-  $(if $(KV_HOST_POOL_BYTES),--reuse-kv-host-pool-bytes $(KV_HOST_POOL_BYTES))   $(if $(NGRAM_HOT_BYTES),--ngram-hot-bytes $(NGRAM_HOT_BYTES)) \
-  $(if $(IMAGE_27B_KV_HOST_POOL_BYTES),--qwen38-reuse-kv-host-pool-bytes $(IMAGE_27B_KV_HOST_POOL_BYTES))   $(if $(FN_KV_HOST_POOL_BYTES),--qwen38flashnext-reuse-kv-host-pool-bytes $(FN_KV_HOST_POOL_BYTES))   $(if $(HOST_MARGIN_BYTES),--model-host-margin-bytes $(HOST_MARGIN_BYTES)) \
+  $(if $(KV_HOST_POOL_BYTES),--reuse-kv-host-pool-bytes $(KV_HOST_POOL_BYTES)) \
   $(if $(KV_DISK_BYTES),--kv-disk-bytes $(KV_DISK_BYTES))   $(if $(KV_DISK_PATH),--kv-disk-path $(KV_DISK_PATH)) \
   $(if $(RETAINED_DEVICE),--reuse-retained-device $(RETAINED_DEVICE)) \
   $(if $(RETAINED_HOST),--reuse-retained-host $(RETAINED_HOST)) \
   $(if $(filter 1,$(VISION)),--vision-enabled $(if $(VISION_MAX_TOKENS),--vision-max-tokens $(VISION_MAX_TOKENS))) \
   $(if $(ROPE_SCALING),--model-rope-scaling $(ROPE_SCALING)) \
   $(if $(REQUEST_TIMEOUT),--server-request-timeout $(REQUEST_TIMEOUT))   $(if $(STREAM_TIMEOUT),--server-stream-timeout $(STREAM_TIMEOUT)) \
-  $(if $(SPEC),--spec-backend $(SPEC) $(if $(filter-out off,$(SPEC)),$(if $(DRAFT_TOKENS),--spec-draft-tokens $(DRAFT_TOKENS)) $(if $(DRAFT_HEAD),--spec-draft-head $(DRAFT_HEAD))))   $(if $(DRAFT_ROWS),--spec-draft-rows $(DRAFT_ROWS))
+  $(if $(SPEC),--spec-backend $(SPEC) $(if $(filter-out off,$(SPEC)),$(if $(DRAFT_TOKENS),--spec-draft-tokens $(DRAFT_TOKENS)) $(if $(DRAFT_HEAD),--spec-draft-head $(DRAFT_HEAD))))
 SERVER_FLAGS = --server-bind $(BIND) \
   $(if $(filter 1,$(CUDA)),$(GPU_ENGINE_FLAGS)) \
   $(if $(SERVED_MODEL),--model-id $(SERVED_MODEL)) \
   $(if $(filter 1,$(UI)),--server-ui,--server-ui false) \
   $(if $(filter 0,$(METRICS)),--server-metrics false,$(if $(METRICS_BIND),--server-metrics-bind $(METRICS_BIND))) \
   $(if $(API_KEY),--server-api-key $(API_KEY)) \
-  $(if $(EXPOSE),--server-expose $(EXPOSE)) \
   $(if $(SYSTEM_MESSAGE_POLICY),--server-system-message-policy $(SYSTEM_MESSAGE_POLICY)) \
   $(if $(DEVELOPER_MESSAGE_POLICY),--server-developer-message-policy $(DEVELOPER_MESSAGE_POLICY)) \
   $(if $(DEFAULT_MAX_TOKENS),--model-default-max-tokens $(DEFAULT_MAX_TOKENS)) \
   $(if $(IDLE_UNLOAD),--model-idle-unload $(IDLE_UNLOAD)) \
   $(if $(LOOP_GUARD),--model-loop-guard $(LOOP_GUARD)) \
   $(ARGS)
-# The KV pool `make config` reports (ADR 0045). The 27B is resident: its pool
-# takes the rest of the VRAM budget. Flash-Next on a card that cannot hold
-# every expert is offloaded: 524,288 tokens, capped at every lane's context and
-# never below one context plus a page per retained slot. Sh arithmetic,
-# evaluated in the recipe; the server's plan (ignis.runtime.flash_next_plan) is
-# the authority, and a card that holds every expert gets the rest instead.
-COMMA := ,
-FN_CONTEXT_TOKENS = ((($(or $(MAX_CONTEXT),40960)+63)/64*64))
-FN_LANE_TOKENS = ($(or $(LANES),3)*$(FN_CONTEXT_TOKENS))
-FN_DEFAULT_TOKENS = ($(FN_LANE_TOKENS)<524288?$(FN_LANE_TOKENS):524288)
-FN_FLOOR_TOKENS = ($(FN_CONTEXT_TOKENS)+64*($(or $(RETAINED_HOST),8)+$(or $(RETAINED_DEVICE),0)))
-KV_POOL_PLAN = $(if $(KV_POOL_BYTES),$(if $(filter flash-next,$(MODEL_FAMILY)),offloaded,resident) $(KV_POOL_BYTES) (named$(COMMA) $$(sh mk/kv-pool-tokens.sh '$(KV_POOL_BYTES)' $(MODEL_FAMILY) $(or $(KV_FORMAT),hq-e8-2b)) tokens),$(if $(filter flash-next,$(MODEL_FAMILY)),offloaded $$(( $(FN_DEFAULT_TOKENS)>$(FN_FLOOR_TOKENS)?$(FN_DEFAULT_TOKENS):$(FN_FLOOR_TOKENS) )) tokens,resident (the rest of the VRAM budget)))
+KV_POOL_PLAN = $(or $(KV_POOL_BYTES),the rest of the VRAM budget)
 SERVER_ENV = $(if $(LOG_LEVEL),IGNIS_LOG_LEVEL=$(LOG_LEVEL)) $(if $(LOG_FORMAT),IGNIS_LOG_FORMAT=$(LOG_FORMAT))
-# The served id: Flash-Next's own, the image model's own, the id MODEL names (mk/config.mk), the
-# abliterated variant's catalog id with UNCENSORED=1 (ADR 0047: one family, two
-# artifacts, told apart by the served id), or none for the 27B (the server's
-# default).
-SERVED_MODEL := $(if $(filter flash-next,$(MODEL_FAMILY)),qwen3.8-flash-next,$(if $(filter image,$(MODEL_FAMILY)),ignis-image-2.1-turbo,$(or $(filter-out 27b,$(MODEL)),$(if $(filter 1,$(UNCENSORED)),qwen3.8-27b-abliterated))))
+SERVED_MODEL := $(MODEL)
 SMOKE_MODEL := $(or $(SERVED_MODEL),qwen3.8-27b)
 # A generated key (API_KEY=auto) is unknown to make: pass the printed one.
 SMOKE_AUTH := $(if $(filter-out auto,$(API_KEY)),-H 'Authorization: Bearer $(API_KEY)')
@@ -210,20 +155,17 @@ config: ## Print the resolved knobs and paths
 	@echo "CUDA            $(CUDA)  (backend=$(BACKEND))"
 	@echo "PROFILE         $(PROFILE)  (dir=$(PROFILE_DIR))"
 	@echo "UI              $(UI)"
-	@echo "METRICS         $(METRICS)  $(if $(filter 0,$(METRICS)),(off),(Prometheus: $(METRICS_URL)/metrics; Playground: /ui/metrics$(if $(or $(API_KEY),$(EXPOSE)), behind the API key)))"
+	@echo "METRICS         $(METRICS)  $(if $(filter 0,$(METRICS)),(off),(Prometheus: $(METRICS_URL)/metrics; Playground: /ui/metrics$(if $(API_KEY), behind the API key)))"
 	@echo "ARTIFACT        $(ARTIFACT)"
-	@echo "UNCENSORED      $(if $(filter 1,$(UNCENSORED)),1  (default ARTIFACT is the huihui-abliterated image, served as qwen3.8-27b-abliterated),off)"
-	@echo "engine (CUDA=1) context=$(or $(MAX_CONTEXT),default) kv=$(or $(KV_FORMAT),default) chunk=$(or $(PREFILL_CHUNK),$(if $(filter image,$(MODEL_FAMILY)),default,server default (auto, the card class's profile: 2048 on the 5090 and the 96 GB card))) pool=$(KV_POOL_PLAN) host_pool=$(or $(KV_HOST_POOL_BYTES),default) (flash-next $(or $(FN_KV_HOST_POOL_BYTES),default)) timeout=$(or $(REQUEST_TIMEOUT),default) stream_timeout=$(or $(STREAM_TIMEOUT),default) spec=$(or $(SPEC),$(if $(filter flash-next,$(MODEL_FAMILY)),off (SPEC=mtp turns the MTP head on),server default (auto, the card class's profile: dflash2)))$(if $(filter-out off,$(SPEC)),/$(DRAFT_TOKENS)$(if $(DRAFT_HEAD),/$(DRAFT_HEAD)))$(if $(DRAFT_ROWS), rows=$(DRAFT_ROWS)) rope=$(or $(ROPE_SCALING),auto)"
-	@echo "PLAN            $(if $(filter image,$(MODEL_FAMILY)),(image model: no context, lanes, prefill chunk, speculation, KV pool or vision; the server plans its own VRAM),$(if $(filter flash-next,$(MODEL_FAMILY)),lanes=$(LANES) context/lane=$(or $(MAX_CONTEXT),default) kv=$(or $(KV_FORMAT),default) prefill_chunk=$(or $(PREFILL_CHUNK),default) decode_share=$(if $(DECODE_SHARE),$(DECODE_SHARE)%,25% (default)) retained_host=$(or $(RETAINED_HOST),8 (Flash-Next default)) kv_ram_arena=$(or $(FN_KV_HOST_POOL_BYTES),default) host_margin=$(or $(HOST_MARGIN_BYTES),4G (default)) kv_pool=$(KV_POOL_PLAN) expert_cache_floor=$(if $(filter 1,$(ALLOW_EXPERT_CACHE_BELOW_FLOOR)),12G (below it allowed with a warning),12G (refused below)) ngram_hot=$(or $(NGRAM_HOT_BYTES),1G (default; auto = what the host plan leaves)),(Flash-Next only: the plan is the server's for the 27B)))"
+	@echo "engine (CUDA=1) context=$(or $(MAX_CONTEXT),profile default) kv=$(KV_FORMAT) chunk=$(or $(PREFILL_CHUNK),profile default) lanes=$(or $(LANES),profile default) spec=$(SPEC)/$(DRAFT_TOKENS) host_pool=$(KV_HOST_POOL_BYTES)"
 	@echo "KV-DISK (CUDA=1) $(if $(filter 0,$(KV_DISK_BUDGET)),off$(if $(KV_DISK_BYTES),, (the 27B's default; KV_DISK_BYTES=4G turns it on)),budget=$(KV_DISK_BUDGET) (cut at start to the volume's free space less 10 GiB) dir=$(KV_DISK_LOCATION)/ignis-kv-disk/<pid>-<nonce>)"
-	@echo "VISION (CUDA=1) $(if $(filter 1,$(VISION)),on  max_tokens=$(or $(VISION_MAX_TOKENS),(server default)),off  (image parts are refused with vision_disabled))"
+	@echo "VISION (CUDA=1) $(if $(filter 1,$(VISION)),on  max_tokens=$(or $(VISION_MAX_TOKENS),(server default)),profile default (on for rtx50-16gb))"
 	@echo "VRAM (CUDA=1)   $(if $(VRAM_BUDGET),budget=$(VRAM_BUDGET)$(if $(filter 1,$(ALLOW_VRAM_OVERSUBSCRIPTION)), (oversubscription allowed)),headroom=$(or $(VRAM_HEADROOM),(server default: 1536M))) retained_device=$(or $(RETAINED_DEVICE),(server default: 0)) retained_host=$(or $(RETAINED_HOST),(server default: two per lane))"
-	@echo "MODEL           $(MODEL_FAMILY)  $(if $(filter image,$(MODEL_FAMILY)),(the image model served as $(SERVED_MODEL); generation and edit routes, no text engine knobs),$(if $(filter flash-next,$(MODEL_FAMILY)),(Qwen3.8-Flash-Next as $(SERVED_MODEL); lanes=$(LANES); its prefetch width 16, 10 in prefill is not a server flag yet),$(if $(SERVED_MODEL),(Qwen3.8-27B served as $(SERVED_MODEL)),(Qwen3.8-27B under the server's default id))$(if $(LANES), lanes=$(LANES))))"
+	@echo "MODEL           Qwen3.8-27B as $(SERVED_MODEL)"
 	@echo "BIND            $(BIND)"
 	@echo "LOG_LEVEL       $(or $(LOG_LEVEL),(server default))"
 	@echo "LOG_FORMAT      $(or $(LOG_FORMAT),(server default))"
-	@echo "API_KEY         $(if $(API_KEY),$(if $(filter auto,$(API_KEY)),auto (generated and printed at start),set),$(if $(EXPOSE),(none: auto, required by EXPOSE),(none: /v1 is open)))"
-	@echo "EXPOSE          $(or $(EXPOSE),(none: reachable at BIND only))"
+	@echo "API_KEY         $(if $(API_KEY),$(if $(filter auto,$(API_KEY)),auto (generated at start),set),(none: /v1 is open))"
 	@echo "MAX_TOKENS      default=$(or $(DEFAULT_MAX_TOKENS),(server default: 38912)) (a request that sends no max_tokens; 0 = up to the context)"
 	@echo "IDLE_UNLOAD     $(or $(IDLE_UNLOAD),(server default: 300)) (seconds unused before the model is unloaded; 0 = never)"
 	@echo "LOOP_GUARD      $(or $(LOOP_GUARD),(server default: rewind)) (rewind, log or off; a bench or a gate passes off)"
@@ -354,18 +296,12 @@ logs: ## Follow the background server log
 	tail -n 100 -f "$(SERVER_LOG)"
 
 .PHONY: smoke
-smoke: ## One /v1/models + one short chat completion (MODEL=image: one 1024x1024 image) against BIND
+smoke: ## One /v1/models + one short chat completion against BIND
 	curl -fsS $(SMOKE_AUTH) "$(SERVER_URL)/v1/models"
 	@echo ""
-ifeq ($(MODEL_FAMILY),image)
-	curl -fsS $(SMOKE_AUTH) "$(SERVER_URL)/v1/images/generations" -H 'Content-Type: application/json' \
-	  -d '{"model":"$(SMOKE_MODEL)","prompt":"a red circle on white","size":"1024x1024","n":1,"seed":1}' \
-	  -o /dev/null -w 'one 1024x1024 image: HTTP %{http_code}, %{size_download} bytes\n'
-else
 	curl -fsS $(SMOKE_AUTH) "$(SERVER_URL)/v1/chat/completions" -H 'Content-Type: application/json' \
 	  -d '{"model":"$(SMOKE_MODEL)","messages":[{"role":"user","content":"Say hi in five words."}],"max_tokens":32}'
 	@echo ""
-endif
 
 .PHONY: metrics
 metrics: ## Scrape the metrics listener (on by default; METRICS=0 starts a server without it; no key)
@@ -397,7 +333,7 @@ $(SERVER_BIN): $(SERVER_INPUTS)
 
 .PHONY: _require-artifact
 _require-artifact:
-	@[ -f "$(ARTIFACT)" ] || { echo "error: artifact not found: $(ARTIFACT)"; echo "  fix: ARTIFACT=<path.ninfer>, or CUDA=0 for the CPU mock"; $(if $(filter 1,$(UNCENSORED)),echo "  fetch: ignis-server model download qwen3.8-27b-abliterated --download-path $(patsubst %/,%,$(dir $(ARTIFACT)))";) exit 1; }
+	@[ -f "$(ARTIFACT)" ] || { echo "error: artifact not found: $(ARTIFACT)"; exit 1; }
 
 # ---------------------------------------------------------------------------
 ##@ Web (Playground)
@@ -474,42 +410,12 @@ else
 endif
 
 # ---------------------------------------------------------------------------
-##@ Docs (the user guide's site, ADR 0066)
+##@ Documentation
 # ---------------------------------------------------------------------------
 
-# docs/site builds the pages under docs/user; it has its own node_modules.
-DOCS_DEPS := docs/site/node_modules/.package-lock.json
-
-.PHONY: docs-install
-docs-install: $(DOCS_DEPS) ## npm ci for the guide's site, only when its package-lock.json changed
-
-# Astro runs as `node astro.mjs`, never through npm, for the reason Vite does
-# (the `vite` helper above): Ctrl+C must stop it, not ask a batch-job question.
-.PHONY: docs-dev
-docs-dev: $(DOCS_DEPS) ## The guide's site with hot reload (http://localhost:4321/ignis/)
-	cd docs/site && exec node node_modules/astro/bin/astro.mjs dev
-
-.PHONY: docs-build
-docs-build: $(DOCS_DEPS) ## Build the guide's site into docs/site/dist; a dead link fails it
-	$(NPM) --prefix docs/site run build
-
-.PHONY: docs-test
-docs-test: $(DOCS_DEPS) ## The site's tests: links, sidebar, changelog (vitest)
-	$(NPM) --prefix docs/site run test
-
-# Against the dev mock unless PLAYGROUND_URL names a running Playground
-# (http://127.0.0.1:8000/ui/); SCENES=chat-reply,monitor retakes only those.
-.PHONY: docs-screenshots
-docs-screenshots: $(DOCS_DEPS) $(WEB_DEPS) ## Retake the Playground's screenshots in docs/user/images/playground/ (installed Chrome)
-	node docs/site/scripts/screenshots.mjs
-
 .PHONY: docs-reference
-docs-reference: ## Regenerate docs/user/reference/ from the code: fields, profiles, catalog, metrics, routes, CLI
+docs-reference: ## Regenerate docs/user/reference/ from the code
 	IGNIS_BLESS_USER_DOCS=1 $(CARGO) test -p ignis-server --test user_docs_reference $(CARGO_TARGET)
-
-$(DOCS_DEPS): docs/site/package.json docs/site/package-lock.json
-	$(NPM) --prefix docs/site ci
-	@touch "$@"
 
 # ---------------------------------------------------------------------------
 ##@ Test & quality
@@ -536,7 +442,7 @@ clippy: ## cargo clippy, every target of every crate
 	$(CARGO) clippy --workspace --all-targets $(CARGO_TARGET) $(WORKSPACE_FEATURES)
 
 .PHONY: test-all
-test-all: test typecheck-web test-web docs-test docs-build ## Everything CPU-side: cargo test + web typecheck + vitest + the guide's build
+test-all: test typecheck-web test-web ## CPU workspace, web types and web tests
 
 .PHONY: ci
 ci: version-check swagger-ui-check check test-all ## What a CI job would run (no GPU)
@@ -610,7 +516,7 @@ gpu-guard: ## Refuse when the GPU is held (ninfer, another ignis, a GPU test)
 	@$(GPU_GUARD)
 
 .PHONY: gpu-profile
-gpu-profile: ## The explicit GPU test profile (GPU_PROFILE_ARGS=-SkipKernelBuild ...)
+gpu-profile: ## The explicit GPU test profile (GPU_PROFILE_ARGS=--out .scratch/gpu-profile-new)
 	$(GPU_PROFILE)
 
 .PHONY: kernel-test

@@ -24,10 +24,9 @@ pub const DEFAULT_PROFILE: &str = AUTO_PROFILE;
 /// the built-in profile of the card's [`CardClass`], read from NVML's total
 /// memory at the start. Not a name [`lookup`] resolves: `gather` chooses
 /// the real profile first and names that one, so `GET /v1/config`, `make
-/// config` and the Playground show `rtx5090`, never `auto`. It picks the
+/// config` and the UI show `rtx50-16gb`, never `auto`. It picks the
 /// class's profile by NAME, through the same [`lookup`] a named profile goes
-/// through: a config file's `profiles:` that redefines `rtx50-16gb`,
-/// `rtx5090` or `rtxpro6000` replaces what `auto` picks for that class.
+/// through: a config file's `profiles:` can redefine `rtx50-16gb`.
 pub const AUTO_PROFILE: &str = "auto";
 
 /// What the start could read of the card `--profile auto` chooses by. Injected
@@ -59,8 +58,9 @@ impl Card {
     }
 }
 
-/// The total memory of an RTX 5090 as NVML reports it (32,607 MiB): what the
-/// CPU test helpers inject so that every test resolves `rtx5090` as before.
+/// The RTX 5080 total reported by NVML, injected by CPU config tests.
+pub const RTX_5080_TOTAL_BYTES: u64 = 16_303 << 20;
+#[cfg(test)]
 pub const RTX_5090_TOTAL_BYTES: u64 = 32_607 << 20;
 
 /// The profile `--profile auto` chooses for `card`: its class's built-in
@@ -102,7 +102,9 @@ fn class_bounds() -> String {
 /// The sentence `--help` gives `--profile auto`: each class's profile by its
 /// own name, built from [`CardClass::ALL`] and [`CardClass::profile`].
 pub fn classes_text() -> String {
-    CardClass::ALL.into_iter().map(|class| format!("{class}: {}", class.profile())).collect::<Vec<_>>().join(", ")
+    let profiles = built_in();
+    CardClass::ALL.into_iter().filter(|class| profiles.contains_key(class.profile()))
+        .map(|class| format!("{class}: {}", class.profile())).collect::<Vec<_>>().join(", ")
 }
 
 fn built_in_names() -> String {
@@ -116,129 +118,32 @@ fn built_in_names() -> String {
 /// checks for both first): `read_document` refuses it.
 pub const NONE_PROFILE: &str = "none";
 
-/// The built-in profiles, as a config file's `profiles:` section.
-///
-/// `rtx5090` is the owner's own card, measured end to end on it (2026-10-10):
-/// the 27B's leg pushes context and turns vision on, found by raising
-/// `model.max_context` under `--vision-enabled` until the VRAM plan refused,
-/// then trading `vram.headroom_bytes` down from the 1536 MiB hardcoded
-/// default against `spec.backend dflash2` staying on — the owner's own
-/// choice over a `vram.headroom_bytes` trade that would have reached ~864K
-/// tokens with speculation off instead. Re-measured the same way on
-/// 2026-10-21 (GitHub #335), once the prompt planes were gone and the token
-/// embedding had moved to host memory: 917,504 holds, 950,272 is refused by
-/// 59 MB (finding 2026-10-21-prefill-attention-without-prompt-planes). The
-/// 27B prefills 2,048 tokens a chunk (GitHub #341): with vision on the
-/// encoder sizes the workspace arena, so the plan is the same byte for byte
-/// as at 1,024, and against 1,024 it measured +1.9% / +2.2% cold prefill at
-/// 46K / 105K, the same at 8K / 14K, a lower 4K KLD and decode unchanged; a
-/// decoding lane's longest pause while a prompt prefills grows ~65% (finding
-/// 2026-10-21-the-27b-prefill-chunk-at-2048). Flash-Next's leg holds its decode
-/// lanes at their own default (3), in its own section since the 27B takes the
-/// field too and keeps its 8 (GitHub #336), and raises `model.max_context` to
-/// 512K + 32K + 32K tokens, the floor the owner asked for on both the expert
-/// cache (>= 15 GiB; it measured ~16.6 GiB) and the context. Past the
-/// checkpoint's trained 262,144 positions the 27B's text rotary table needs
-/// YaRN, which its leg does not spell out: `model.rope_scaling` defaults to
-/// `auto`, the factor `max_context / 262,144` (3.5 at 917,504). Flash-Next
-/// resolves the same way over its 589,824: 2.25 (ADR 0057, ADR 0059).
-/// `vram.headroom_bytes`'s 1536 MiB hardcoded
-/// default (finding 2026-10-09-vram-headroom-wddm-paging) still holds for
-/// Flash-Next, which never needed to trade it down. Flash-Next also pins its
-/// calibration-hottest 2 GiB of experts in the expert cache
-/// (`vram.pinned_expert_bytes`, the owner's call, ADR 0055): measured on the
-/// card (finding 2026-10-18-pinned-hot-set-measured-on-the-5090), that gives
-/// back 2.149 GB of the host pool's RAM for 0.1-0.2% of one-lane and
-/// 0.2-1.1% of three-lane decode (two sessions), greedy text unchanged; `4G`
-/// would give back 4.296 GB for 4.3% and 5.9%. The field is
-/// Flash-Next-only: the 27B passes it over.
-///
-/// `rtxpro6000` is the RTX PRO 6000 Blackwell series (Workstation, Max-Q,
-/// Server Edition: 96 GB each, sm_120, the 5090's architecture). Derived
-/// first (2026-10-17), then measured on a Server Edition under Linux; the
-/// numbers are in the finding 2026-10-18-rtxpro6000-profile-measured. The
-/// measurement kept the derived choices and added one. Both families run at
-/// 1,048,576 tokens of context, the 27B's whole hq-e8-2b attention envelope
-/// (the plan holds it; no request that long was run): `auto` rope scaling
-/// makes both models' tables YaRN at 4 over the 262,144 trained positions
-/// (ADR 0057, ADR 0059). The 27B leaves its headroom at the hardcoded
-/// default, since nothing has to be traded for vision any more, and drafts
-/// with DFlash2 at 7 tokens, which beat 4 in every cell measured but one,
-/// and prefills 2,048 tokens a chunk, as on the 5090 (GitHub #341).
-/// Flash-Next runs 8 decode lanes, where its aggregate peaks: its expert
-/// cache holds nearly every expert, so a lane costs its state and its share
-/// of the KV pool. It drafts with its MTP head, 3 tokens a lane, which the
-/// 5090 leaves off because decode there is bound by the experts it copies
-/// over PCIe (finding 2026-10-07-flash-next-mtp-speculation-is-pcie-bound);
-/// here MTP pays at one to four active lanes and with simulated agents at
-/// four and eight. The row budget stays the default 8, where every wider
-/// one lost on this card (finding 2026-10-18-verify-rows-on-the-rtx-pro-6000),
-/// so 3 drafts at one or two lanes, 1 at three or four, none from five on. Its
-/// n-gram hot rows are `auto`, the measured addition: the whole table in RAM
-/// keeps the disk out of every decode round, and `auto` takes it wherever
-/// the host plan leaves room, never refusing a start the 1 GiB default would
-/// make. The VRAM plan sizes the rest, the KV pool among it.
-///
-/// `rtx50-16gb` is the 16 GB class (ADR 0063, ADR 0064): the RTX 5060 Ti 16 GB,
-/// 5070 Ti and 5080, the RTX 50 cards `--profile auto` finds below 20 GiB.
-/// Derived, not measured: no 16 GB card exists in the project. It serves the 27B
-/// (the 16 GB catalog entry) at the 262,144 positions it was trained on, with
-/// DFlash2 at 7 tokens, as the other profiles, and vision on, explicit
-/// (ADR 0063 as amended by ADR 0075): at a 4,096-token envelope, an item bound
-/// of about 2,048 x 2,048 pixels, and residency `host`, written out so the
-/// profile table shows it. The tower sits in pinned host RAM and the pool is
-/// host-mapped, so a load with no image in flight keeps the text-only KV pool
-/// (7,956 pages at 1,024 and at 4,096, measured on the 5090 on a 16 GB budget).
-/// `vram.qwen38.headroom_bytes` is the 5090's 1200M
-/// until a real card says otherwise, and `prefill_chunk` stays at its 1,024: the
-/// prefill scratch is sized by the chunk, and 2,048 would cost ~0.4 GB of
-/// KV pool. The profile names no model: a start with no artifact resolves the
-/// default id `qwen3.8-27b` through the catalog's class-aware alias to the 16 GB
-/// entry. The 27B decodes two lanes, where eight would leave no room for its
-/// context, and leaves the drafter's head to `auto`, the full head (ADR 0063).
-/// Every one of these is a default the load adapts when the free memory it
-/// finds cannot hold it: the head, then the context down to 65,536, then one
-/// lane (ADR 0063 §3). No other card ships a profile; a config file's
-/// `profiles:` defines one for any other card.
+/// The RTX 5080 baseline settings. The historical name is retained so the
+/// frozen coding-agent benchmark command still resolves the same values.
 const BUILT_IN: &str = r#"{
-    "rtx5090": {
-        "vram": {
-            "headroom_bytes": "1536M",
-            "pinned_expert_bytes": "2G",
-            "qwen38": { "headroom_bytes": "1200M" }
-        },
-        "model": {
-            "qwen38": { "max_context": 917504, "prefill_chunk": 2048 },
-            "qwen38flashnext": { "max_context": 589824 }
-        },
-        "vision": { "enabled": true, "residency": "host" },
-        "spec": {
-            "qwen38": { "backend": "dflash2", "draft_tokens": 7 },
-            "qwen38flashnext": { "decode_lanes": 3 }
-        }
-    },
-    "rtxpro6000": {
-        "model": {
-            "qwen38": { "max_context": 1048576, "prefill_chunk": 2048 },
-            "qwen38flashnext": { "max_context": 1048576 }
-        },
-        "vision": { "enabled": true, "residency": "device" },
-        "spec": {
-            "qwen38": { "backend": "dflash2", "draft_tokens": 7 },
-            "qwen38flashnext": { "backend": "mtp", "draft_tokens": 3, "decode_lanes": 8 }
-        },
-        "ngram": { "hot_bytes": "auto" }
-    },
     "rtx50-16gb": {
         "vram": {
-            "qwen38": { "headroom_bytes": "1200M" }
+            "qwen38": {
+                "headroom_bytes": "1200M"
+            }
         },
         "model": {
-            "qwen38": { "max_context": 262144 }
+            "qwen38": {
+                "max_context": 262144
+            }
         },
-        "vision": { "enabled": true, "max_tokens": 4096, "residency": "host" },
+        "vision": {
+            "enabled": true,
+            "max_tokens": 4096,
+            "residency": "host"
+        },
         "spec": {
-            "qwen38": { "backend": "dflash2", "draft_tokens": 7, "decode_lanes": 2, "draft_head": "auto" }
+            "qwen38": {
+                "backend": "dflash2",
+                "draft_tokens": 7,
+                "decode_lanes": 2,
+                "draft_head": "auto"
+            }
         }
     }
 }"#;
@@ -340,190 +245,19 @@ mod tests {
     use crate::config::schema::field;
 
     #[test]
-    fn the_default_profile_carries_the_rtx5090s_measured_numbers() {
+    fn the_only_built_in_profile_preserves_the_5080_baseline() {
+        use super::super::source::{resolve_settings, Fit, Sources};
         use ignis_core::compute::ModelFamily;
-
         let profiles = built_in();
-        let rtx5090 = &profiles["rtx5090"];
-        let headroom = field("vram", "headroom_bytes").unwrap();
-        // Flash-Next never traded headroom down: the hardcoded default still
-        // holds for it, and as the group's general (unscoped) value.
-        assert_eq!((headroom.default)(), serde_json::Value::String("1536M".into()));
-        assert_eq!(rtx5090.get(headroom, None).unwrap().raw, "1536M");
-        assert!(rtx5090.get(headroom, Some(ModelFamily::FlashNext)).is_none(), "no override; it resolves to the general value");
-        // The 27B traded it down to fit vision plus its own context.
-        assert_eq!(rtx5090.get(headroom, Some(ModelFamily::Qwen38_27b)).unwrap().raw, "1200M");
-
-        let max_context = field("model", "max_context").unwrap();
-        assert_eq!(rtx5090.get(max_context, Some(ModelFamily::Qwen38_27b)).unwrap().raw, "917504");
-        assert_eq!(rtx5090.get(max_context, Some(ModelFamily::FlashNext)).unwrap().raw, "589824");
-
-        let rope = field("model", "rope_scaling").unwrap();
-        assert!(rtx5090.get(rope, None).is_none(), "unset: `auto` follows the 27B's own context");
-
-        let vision = field("vision", "enabled").unwrap();
-        assert_eq!(rtx5090.get(vision, None).unwrap().raw, "true");
-        let residency = field("vision", "residency").unwrap();
-        assert_eq!(rtx5090.get(residency, None).unwrap().raw, "host", "ADR 0075: the 5090 stages the tower");
-
-        let backend = field("spec", "backend").unwrap();
-        assert_eq!(rtx5090.get(backend, Some(ModelFamily::Qwen38_27b)).unwrap().raw, "dflash2");
-        assert!(rtx5090.get(backend, Some(ModelFamily::FlashNext)).is_none(), "Flash-Next keeps speculation off here");
-
-        // GitHub #336: both models take the lanes, so the profile scopes
-        // Flash-Next's 3 to its own section; the 27B keeps its own 8.
-        let lanes = field("spec", "decode_lanes").unwrap();
-        assert_eq!(rtx5090.get(lanes, Some(ModelFamily::FlashNext)).unwrap().raw, "3");
-        assert!(rtx5090.get(lanes, None).is_none() && rtx5090.get(lanes, Some(ModelFamily::Qwen38_27b)).is_none());
-
-        // Flash-Next pins its calibration-hottest 2 GiB of experts (the
-        // owner's call, ADR 0055): the field's own default stays 0, and the
-        // field is Flash-Next-only, so the 27B passes it over.
-        let pinned = field("vram", "pinned_expert_bytes").unwrap();
-        assert_eq!((pinned.default)(), serde_json::Value::from(0));
-        assert_eq!(rtx5090.get(pinned, None).unwrap().raw, "2G");
-        assert!(profiles["rtxpro6000"].get(pinned, None).is_none(), "a device-only load keeps no expert in RAM");
-    }
-
-    /// The 27B started under `rtx5090` takes the profile's Flash-Next-only
-    /// pin as a default it passes over, and Flash-Next takes 2 GiB.
-    #[test]
-    fn under_the_rtx5090_profile_only_flash_next_pins_experts() {
-        use super::super::source::{resolve_settings, Fit, Sources};
-        use ignis_core::compute::ModelFamily;
-
-        let sources = Sources { profile: built_in()["rtx5090"].clone(), ..Sources::default() };
-        let qwen = resolve_settings(&sources, Some(ModelFamily::Qwen38_27b), Fit::Start).unwrap();
-        assert_eq!(qwen.settings.vram.pinned_expert_bytes, 0);
-        assert!(qwen.dropped.is_empty(), "passed over, not dropped: {:?}", qwen.dropped);
-        let flash = resolve_settings(&sources, Some(ModelFamily::FlashNext), Fit::Start).unwrap();
-        assert_eq!(flash.settings.vram.pinned_expert_bytes, 2 << 30);
-    }
-
-    /// GitHub #336: the decode lanes are both models' field, so a profile
-    /// value written for one model is scoped to it -- the 27B started under
-    /// either built-in profile keeps its own 8, not Flash-Next's 3.
-    #[test]
-    fn under_the_built_in_profiles_each_model_keeps_its_own_decode_lanes() {
-        use super::super::source::{resolve_settings, Fit, Sources};
-        use ignis_core::compute::ModelFamily;
-
-        for (profile, flash_next_lanes) in [("rtx5090", 3), ("rtxpro6000", 8)] {
-            let sources = Sources { profile: built_in()[profile].clone(), ..Sources::default() };
-            let qwen = resolve_settings(&sources, Some(ModelFamily::Qwen38_27b), Fit::Start).unwrap();
-            assert_eq!(qwen.settings.spec.decode_lanes, None, "{profile}: the 27B's default");
-            let flash = resolve_settings(&sources, Some(ModelFamily::FlashNext), Fit::Start).unwrap();
-            assert_eq!(flash.settings.spec.decode_lanes, Some(flash_next_lanes), "{profile}");
-            let general = resolve_settings(&sources, None, Fit::Start).unwrap();
-            assert_eq!(general.settings.spec.decode_lanes, None, "{profile}: nothing general");
-        }
-    }
-
-    /// GitHub #341: the 27B prefills 2,048 tokens a chunk under both built-in
-    /// profiles, free there because vision's encoder sizes the arena;
-    /// Flash-Next and a start without a profile keep the hardcoded width.
-    #[test]
-    fn under_the_built_in_profiles_the_27b_prefills_2048_tokens_a_chunk() {
-        use super::super::source::{resolve_settings, Fit, Sources};
-        use crate::config::DEFAULT_PREFILL_CHUNK;
-        use ignis_core::compute::ModelFamily;
-
-        let sources = Sources { profile: built_in()["rtx5090"].clone(), ..Sources::default() };
-        let qwen = resolve_settings(&sources, Some(ModelFamily::Qwen38_27b), Fit::Start).unwrap();
-        assert_eq!(qwen.settings.model.prefill_chunk, 2048);
-        let flash = resolve_settings(&sources, Some(ModelFamily::FlashNext), Fit::Start).unwrap();
-        assert_eq!(flash.settings.model.prefill_chunk, DEFAULT_PREFILL_CHUNK);
-        let bare = resolve_settings(&Sources::default(), Some(ModelFamily::Qwen38_27b), Fit::Start).unwrap();
-        assert_eq!(bare.settings.model.prefill_chunk, DEFAULT_PREFILL_CHUNK);
-        let pro = Sources { profile: built_in()["rtxpro6000"].clone(), ..Sources::default() };
-        assert_eq!(resolve_settings(&pro, Some(ModelFamily::Qwen38_27b), Fit::Start).unwrap().settings.model.prefill_chunk, 2048);
-    }
-
-    /// `auto` rope scaling under each profile, as a load of each model
-    /// resolves it: each model's factor is its own context over the trained
-    /// position envelope (ADR 0057), Flash-Next's too (ADR 0059).
-    #[test]
-    fn the_profiles_rope_table_follows_each_models_context() {
-        use ignis_core::compute::ModelFamily;
-
-        let table = |profile: &str, family| {
-            let args = ["--profile".to_owned(), profile.to_owned()];
-            let crate::config::ConfigOutcome::Config(config) = crate::config::resolve(&args, |_| None).unwrap() else {
-                panic!("a config")
-            };
-            let fitted = config.for_family(family).unwrap();
-            assert!(fitted.settings().model.rope_scaling.is_auto());
-            fitted.rope_scaling
-        };
-        assert_eq!(table("rtx5090", ModelFamily::Qwen38_27b).factor(), 3.5, "917,504 / 262,144");
-        assert_eq!(table("rtx5090", ModelFamily::FlashNext).factor(), 2.25, "589,824 / 262,144");
-        assert_eq!(table("rtxpro6000", ModelFamily::Qwen38_27b).factor(), 4.0);
-        assert_eq!(table("rtxpro6000", ModelFamily::FlashNext).factor(), 4.0);
-    }
-
-    /// The RTX PRO 6000 Blackwell series (Workstation, Max-Q, Server Edition:
-    /// 96 GB each, sm_120), measured on a Server Edition (2026-10-18).
-    #[test]
-    fn the_rtxpro6000_profile_gives_both_models_their_whole_context_and_flash_next_every_lane() {
-        use ignis_core::compute::ModelFamily;
-
-        let profiles = built_in();
-        let pro = &profiles["rtxpro6000"];
-        let max_context = field("model", "max_context").unwrap();
-        // The 27B's whole hq-e8-2b envelope, YaRN at 4 under `auto`; so is
-        // Flash-Next's (ADR 0057, ADR 0059).
-        assert_eq!(pro.get(max_context, Some(ModelFamily::Qwen38_27b)).unwrap().raw, "1048576");
-        assert_eq!(pro.get(max_context, Some(ModelFamily::FlashNext)).unwrap().raw, "1048576");
-        let rope = field("model", "rope_scaling").unwrap();
-        assert!(pro.get(rope, None).is_none(), "unset: `auto` makes the 27B's 1,048,576 tokens YaRN at 4");
-
-        let lanes = field("spec", "decode_lanes").unwrap();
-        assert_eq!(pro.get(lanes, Some(ModelFamily::FlashNext)).unwrap().raw, "8", "every lane: on 96 GB a lane costs its state");
-        assert!(pro.get(lanes, None).is_none(), "Flash-Next's own: the 27B's are its default");
-
-        // The 5090's choices the card's memory does not change.
-        let vision = field("vision", "enabled").unwrap();
-        assert_eq!(pro.get(vision, None).unwrap().raw, "true");
-        let residency = field("vision", "residency").unwrap();
-        assert_eq!(pro.get(residency, None).unwrap().raw, "device", "ADR 0075: 96 GB keeps the tower resident");
-        let backend = field("spec", "backend").unwrap();
-        assert_eq!(pro.get(backend, Some(ModelFamily::Qwen38_27b)).unwrap().raw, "dflash2");
-        let draft = field("spec", "draft_tokens").unwrap();
-        assert_eq!(pro.get(draft, Some(ModelFamily::Qwen38_27b)).unwrap().raw, "7");
-
-        // Flash-Next drafts with its MTP head, 3 tokens a lane, cut by the
-        // default row budget's 8 rows (GitHub #329 item 5: measured on this
-        // card, every wider budget loses to 8): on 96 GB no expert crosses
-        // PCIe, the cost that made MTP lose on the 5090.
-        assert_eq!(pro.get(backend, Some(ModelFamily::FlashNext)).unwrap().raw, "mtp");
-        assert_eq!(pro.get(draft, Some(ModelFamily::FlashNext)).unwrap().raw, "3");
-        let rows = field("spec", "draft_rows").unwrap();
-        assert!(pro.get(rows, None).is_none(), "unset: the default row budget, 8 of 32");
-
-        // No headroom traded down: the hardcoded default, for both families.
-        let headroom = field("vram", "headroom_bytes").unwrap();
-        assert!(pro.get(headroom, None).is_none());
-        assert!(pro.get(headroom, Some(ModelFamily::Qwen38_27b)).is_none());
-
-        // The whole n-gram table when the host plan leaves room for it, so no
-        // decode round reads the disk; Flash-Next-only, the 27B passes it over.
-        let hot = field("ngram", "hot_bytes").unwrap();
-        assert_eq!(pro.get(hot, None).unwrap().raw, "auto");
-        assert!(profiles["rtx5090"].get(hot, None).is_none(), "the 5090 keeps the 1 GiB default");
-    }
-
-    /// The 27B started under `rtxpro6000` takes the profile's Flash-Next-only
-    /// n-gram budget as a default it passes over, not a value to refuse.
-    #[test]
-    fn the_27b_starts_under_the_rtxpro6000_profile() {
-        use super::super::source::{resolve_settings, Fit, Sources};
-        use ignis_core::compute::ModelFamily;
-
-        let sources = Sources { profile: built_in()["rtxpro6000"].clone(), ..Sources::default() };
-        let qwen = resolve_settings(&sources, Some(ModelFamily::Qwen38_27b), Fit::Start).unwrap();
-        assert_eq!(qwen.settings.ngram.hot_bytes, None);
-        let flash = resolve_settings(&sources, Some(ModelFamily::FlashNext), Fit::Start).unwrap();
-        assert_eq!(flash.settings.ngram.hot_bytes.map(|b| b.to_string()).as_deref(), Some("auto"));
+        assert_eq!(profiles.keys().map(String::as_str).collect::<Vec<_>>(), ["rtx50-16gb"]);
+        let sources = Sources { profile: profiles["rtx50-16gb"].clone(), ..Sources::default() };
+        let s = resolve_settings(&sources, Some(ModelFamily::Qwen38_27b), Fit::Start).unwrap().settings;
+        assert_eq!(s.model.max_context, 262144);
+        assert_eq!(s.spec.decode_lanes, Some(2));
+        assert_eq!(s.spec.draft_tokens, Some(7));
+        assert_eq!(s.vram.headroom_bytes, 1200 << 20);
+        assert!(s.vision.enabled);
+        assert_eq!(s.vision.max_tokens, 4096);
     }
 
     /// Spec 27b-16gb/04: the class boundaries by NVML's total, at the totals
@@ -566,10 +300,10 @@ mod tests {
         let headroom = field("vram", "headroom_bytes").unwrap();
         let mut mine = Layer::default();
         mine.set(headroom, None, super::super::source::Candidate { raw: "2G".into(), spelling: "x".into() }).unwrap();
-        let from_file = BTreeMap::from([("rtx5090".to_owned(), mine.clone()), ("a4000".to_owned(), mine.clone())]);
-        assert_eq!(lookup("rtx5090", &from_file).unwrap(), mine);
-        assert_eq!(lookup("rtx5090", &BTreeMap::new()).unwrap(), built_in()["rtx5090"]);
+        let from_file = BTreeMap::from([("rtx50-16gb".to_owned(), mine.clone()), ("a4000".to_owned(), mine.clone())]);
+        assert_eq!(lookup("rtx50-16gb", &from_file).unwrap(), mine);
+        assert_eq!(lookup("rtx50-16gb", &BTreeMap::new()).unwrap(), built_in()["rtx50-16gb"]);
         let err = lookup("h100", &from_file).unwrap_err().0;
-        assert!(err.contains("`h100`") && err.contains("a4000, rtx50-16gb, rtx5090"), "{err}");
+        assert!(err.contains("`h100`") && err.contains("a4000, rtx50-16gb"), "{err}");
     }
 }

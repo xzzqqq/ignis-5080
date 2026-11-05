@@ -5,13 +5,13 @@
 - Observed: 2026-09-27
 - Last verified: 2026-09-27
 - Scope: attention over a long text state at `/v1/decide`'s `locate` scaffold and along a teacher-forced quote — all 384 GQA heads, full-prompt rows, real cluster logs (set R) and synthetic logs (set L2); **exploratory**, on sets already read
-- Related: [locate at length](2026-09-27-locate-at-length.md) (the misses this explains); [spec 20](../specs/decide/20-locate-at-length.md); [attention names the line, not the words](2026-09-27-attention-names-the-line-not-the-words.md); [`tools/locate-sets/research.py`](../../tools/locate-sets/research.py), [`research_report.py`](../../tools/locate-sets/research_report.py), [`instances.py`](../../tools/locate-sets/instances.py)
+- Related: [locate at length](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-09-27-locate-at-length.md) (the misses this explains); [spec 20](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/20-locate-at-length.md); [attention names the line, not the words](2026-09-27-attention-names-the-line-not-the-words.md); [`tools/locate-sets/research.py`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/tools/locate-sets/research.py), [`research_report.py`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/tools/locate-sets/research_report.py), [`instances.py`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/tools/locate-sets/instances.py)
 - Superseded by: none
 
 ## Question
 
 On real logs the served vote finds the right kind of line and not the
-instance ([locate at length](2026-09-27-locate-at-length.md): 28/50 against
+instance ([locate at length](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-09-27-locate-at-length.md): 28/50 against
 generation's 46/50). Why? Three things were not known: what the vote's
 heads look at when they miss, what the other 352 heads do at length, and
 how much of the row leaves the state at length. The owner added a fourth:

@@ -76,19 +76,10 @@ name = "span_logits"
 required-features = ["cuda"]
 # Spec flash-next/07 phase A's engine side: the tapped trunk states the MTP
 # prototype reads, and the decode round's cost per row.
-[[example]]
-name = "flash_next_mtp_phase_a"
-required-features = ["cuda", "residual-tap"]
 # Spec flash-next/07 phase B: the tapped trunk states over the calibration
 # corpus that the MTP head's expert Hessians are computed from.
-[[example]]
-name = "flash_next_mtp_calibration"
-required-features = ["cuda", "residual-tap"]
 # Spec flash-next/07's measurement: tok/s at one to three lanes, speculation
 # off against the MTP head, and the verify round's column cost.
-[[example]]
-name = "flash_next_mtp_bench"
-required-features = ["cuda"]
 # GitHub #329 item 16: admission throughput of a device-only residency.
 [[example]]
 name = "residency_admit_bench"

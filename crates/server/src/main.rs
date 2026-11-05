@@ -188,10 +188,8 @@ async fn main() {
         download_token,
         download_catalog,
         // Read by the load, through `start_options`.
-        ngram_cache: _,
         // GitHub #306: read through `EngineShape`, like the other load-shape
         // knobs.
-        ngram_hot_bytes: _,
         // Spec vram-budget/03: the budget through `EngineShape`, the
         // location handed to the loader through `start_options`.
         kv_disk_bytes: _,
@@ -207,9 +205,7 @@ async fn main() {
         kv_format: _,
         kv_pool: _,
         vram: _,
-        allow_expert_cache_below_floor: _,
         // Read through `EngineShape`, like the other load-shape knobs.
-        pinned_expert_bytes: _,
         host_pool_bytes,
         // Read through `EngineShape`, like the other load-shape knobs.
         host_margin_bytes: _,
@@ -221,7 +217,6 @@ async fn main() {
         instruction_policy,
         speculation: _,
         speculation_off: _,
-        draft_rows: _,
         decode_lanes: _,
         // Read by the load, through `start_options`.
         vision: _,
@@ -243,7 +238,6 @@ async fn main() {
         metrics,
         metrics_bind_named,
         api_key,
-        expose,
         // What the options were resolved from: the load fits them again.
         basis: _,
     } = config;
@@ -295,18 +289,6 @@ async fn main() {
             exit_after_flush(&logging_handle, 1);
         }
     };
-    // Spec speech/02: the speech names against that catalog, an operator's
-    // file among it; the config's own check had the built-in entries only.
-    if let Err(why) = ignis_server::speech::check_names(&catalog, &start_options.settings().speech) {
-        tracing::error!(name: "ignis.config.speech_invalid", error = %why, "refusing to start");
-        exit_after_flush(&logging_handle, 1);
-    }
-    // Spec speech/08: `diarizer.model` against it too.
-    if let Err(why) = ignis_server::speech::check_diarizer_name(&catalog, &start_options.settings().diarizer) {
-        tracing::error!(name: "ignis.config.diarizer_invalid", error = %why, "refusing to start");
-        exit_after_flush(&logging_handle, 1);
-    }
-
     // ADR 0064 (spec 27b-16gb/04 §6): with no artifact named, the model is
     // the catalog's, fitted to the card's class before it is looked for or
     // fetched — on a card below its own entry's class the entry that answers
@@ -439,10 +421,7 @@ async fn main() {
         .with_timeout_reply(timeout_reply)
         .with_instruction_policy(instruction_policy)
         .with_idle_unload(std::time::Duration::from_secs(u64::from(idle_unload_secs)))
-        .with_socket_idle_close(std::time::Duration::from_secs(u64::from(socket_idle_close_secs)))
-        .with_image(running.settings().image.clone())
-        .with_speech_group(running.settings().speech.clone())
-        .with_diarizer_group(running.settings().diarizer.clone());
+        .with_socket_idle_close(std::time::Duration::from_secs(u64::from(socket_idle_close_secs)));
     // Spec config-v2/02: the running configuration, shown and changed over
     // `GET`/`PATCH /v1/config` and written back to the config file in use;
     // the model loader shares it, so a later switch loads with a live change
@@ -469,17 +448,6 @@ async fn main() {
         known_models = %tables.known.keys().cloned().collect::<Vec<_>>().join(","),
         "a request naming one of these models, other than the loaded one, switches the server to it"
     );
-    // ADR 0067, spec speech/02: the speech model beside the active one. Its
-    // files are looked for in the same catalog and directory; its executor is
-    // `ignis-speech` on the CPU (spec speech/01), unavailable with its reason
-    // on a CPU without AVX2.
-    // The diarizer (spec speech/08) is the catalog's too, computed on a pool
-    // of its own with the same executor's ISA: loaded by the first session
-    // that asks for speakers, unloaded with the speech model.
-    let speech_cpu = Arc::new(ignis_server::speech::cpu::CpuExecutor::new());
-    let speech_models = ignis_server::speech::SpeechModels { catalog: Arc::clone(&catalog), dir: model_download_path.clone() };
-    let speech = ignis_server::speech::Speech::new(speech_cpu.clone(), Some(speech_models.clone()))
-        .with_diarizer(Arc::new(ignis_server::speech::diarizing::CatalogDiarizer::new(speech_models, speech_cpu)));
     // Spec model-download/02 §Known models: a catalog entry whose artifact is
     // under `--download-path` when a request names it is switchable too, so
     // a `model download` into this directory needs no restart.
@@ -497,21 +465,7 @@ async fn main() {
                 .with_card_class(card_class),
         )
         .with_config(config_state)
-        .with_downloads(downloads)
-        .with_speech(Arc::new(speech));
-
-    // Spec image-model/05 §Prompt enhancement: an enhancer no switch reaches
-    // leaves every enhanced request on its prompt as sent. A `PATCH` naming
-    // one is refused; the start is not, and says so once.
-    let enhancer = server.live().image.prompt_enhancer.clone();
-    if let Some(reason) = ignis_server::images::enhance::unknown_enhancer(&server, &enhancer, &Default::default()) {
-        tracing::warn!(
-            name: "ignis.config.prompt_enhancer_unknown",
-            enhancer = %enhancer,
-            %reason,
-            "prompt enhancement uses each prompt as sent until image.prompt_enhancer names a text model this server can switch to"
-        );
-    }
+        .with_downloads(downloads);
 
     // GitHub #209: joining or gathering developer messages trades prefix
     // reuse for fewer system blocks; the operator is told once, at start.
@@ -526,7 +480,6 @@ async fn main() {
     // GitHub #260, #263, #275, #278: how `/v1/decide` will answer a point,
     // a box and a locate on this load, said once before the first request
     // (and again by every model switch).
-    ignis_server::decide::log_load_heads(&server.active());
 
     // A default the loaded template cannot honour is a refused start (a
     // model swap must not silently change behaviour), matching how the
@@ -610,42 +563,6 @@ async fn main() {
         None => "off".to_owned(),
     };
 
-    // `--server-expose` (ADR 0028): opened on the bound port, before serving, so a
-    // tunnel that cannot open refuses the start instead of leaving a server
-    // the operator believes is reachable.
-    let exposure = match expose {
-        None => None,
-        Some(mode) => {
-            match ignis_server::expose::start(mode, starting.local_addr()).await {
-                Ok(exposure) => {
-                    // A plain stdout line like the generated key's, so the
-                    // Makefile helpers can repeat it (mk/windows/common.ps1).
-                    println!("ignis-server: public URL: {}", exposure.url());
-                    if ui {
-                        println!("ignis-server: Playground: {}/ui/", exposure.url());
-                    }
-                    tracing::info!(
-                        name: "ignis.expose.opened",
-                        mode = mode.as_str(),
-                        url = %exposure.url(),
-                        location = %exposure.location(),
-                        "exposed beyond the bind address"
-                    );
-                    Some(exposure)
-                }
-                Err(err) => {
-                    tracing::error!(
-                        name: "ignis.expose.failed",
-                        mode = mode.as_str(),
-                        error = %err,
-                        "refusing to start"
-                    );
-                    exit_after_flush(&logging_handle, 1);
-                }
-            }
-        }
-    };
-
     // The start's answers end here: the listener, still bound, is the
     // server's from its first accept. From here a signal stops the serve,
     // not the process: taken before `started` is logged, so a signal can no
@@ -663,7 +580,6 @@ async fn main() {
         // GitHub #216: the pinned host arena is locked in RAM from start
         // (ADR 0030), and until now no line anywhere said how large it is.
         kv_host_pool_bytes = host_pool_bytes,
-        exposed = exposure.as_ref().map_or("no", |_| "yes"),
         "OpenAI API at /v1"
     );
     // The serve drains HTTP, then joins the model thread before returning
@@ -671,24 +587,6 @@ async fn main() {
     // switch or a load still running is not waited for: it is returned, and
     // the process ends under it below.
     let serve_result = server.serve_on_until(listener, metrics_listener, stopped).await;
-
-    // The tunnel outlives the drain above, so in-flight remote requests
-    // finish through it; only then is it unregistered. Not with a load
-    // abandoned: unregistering takes up to ~32 s (the vendored crate's 30 s
-    // grace, which it does not let a caller shorten), past a pod's grace
-    // period, and the process ends at once below. The tunnel is in-process
-    // and dies with it; the edge drops the connection, and a quick tunnel's
-    // URL is never reused. Kept, not dropped, until then: a drop starts the
-    // unregistering on detached tasks, whose lines would follow `stopped`.
-    let _tunnel = match exposure {
-        Some(exposure) if !matches!(serve_result, Ok(Served::LoadAbandoned { .. })) => {
-            if let Err(err) = exposure.shutdown().await {
-                tracing::warn!(name: "ignis.expose.close_failed", error = %err, "tunnel did not close cleanly");
-            }
-            None
-        }
-        kept => kept,
-    };
 
     // `ignis.process.stopped` MUST be the last event emitted (spec §28) —
     // whichever branch below runs, nothing after it logs anything. The

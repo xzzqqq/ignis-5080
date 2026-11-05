@@ -1,10 +1,7 @@
-import { readModel, type SpeechStatus } from "../api/model.ts";
-import { transcribe } from "../api/transcriptions.ts";
 import type { ImageId, ImageStore } from "../store/imageStore.ts";
 import { newKey } from "../store/docs.ts";
 import { pageStore } from "../store/index.ts";
 import { makeThumb } from "../store/pictures.ts";
-import { unavailable } from "../speech/availability.ts";
 import { pdfText } from "./attach.ts";
 import {
   type Author,
@@ -128,9 +125,7 @@ export type Deriving = {
   /** A PDF's text, page by page. */
   pdfText: (data: ArrayBuffer) => Promise<string>;
   /** The speech model's availability as the models listing says it now: undefined when the server says nothing. */
-  speech: () => Promise<SpeechStatus | undefined>;
   /** An audio file's transcript; rejects with the server's reason. */
-  transcribe: (audio: Blob, name: string, signal?: AbortSignal) => Promise<string>;
 };
 
 /** The text a read gives of a version, none for a kind that has no text (a picture, any other file), or why it cannot be had now. */
@@ -401,17 +396,7 @@ export function createWorkspaces(
         return { ok: false, error: `${file.name} could not be read as a PDF: ${err instanceof Error ? err.message : String(err)}` };
       }
     } else {
-      const speech = await derive.speech().catch(() => undefined);
-      if (speech?.available !== true) {
-        const why = unavailable({ secure: true, speech, blocked: false })?.sentence ?? "The server reports no speech model.";
-        return { ok: false, error: `No speech model can transcribe ${file.name} now. ${why}` };
-      }
-      try {
-        text = await derive.transcribe(bytes, file.name.slice(file.name.lastIndexOf("/") + 1), signal);
-      } catch (err) {
-        if (signal.aborted) throw err;
-        return { ok: false, error: `The transcription of ${file.name} failed: ${err instanceof Error ? err.message : String(err)}` };
-      }
+      return { ok: false, error: `${file.name}: audio transcription is not supported by this fork.` };
     }
     if (signal.aborted) throw new Error("stopped");
     await keepDerived(file, version.n, text);
@@ -717,6 +702,6 @@ let page: Workspaces | null = null;
 
 /** The page's one workspace module, on the page's store: one queue of writes and one set of listeners for every chat. */
 export function pageWorkspaces(): Workspaces {
-  page ??= createWorkspaces(pageStore(), { derive: { pdfText, speech: async () => (await readModel()).speech, transcribe } });
+  page ??= createWorkspaces(pageStore(), { derive: { pdfText } });
   return page;
 }

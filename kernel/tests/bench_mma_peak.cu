@@ -24,7 +24,7 @@
 //
 //   ignis_mma_peak_bench [--iters N] [--reps N] [--warmup-ms N]
 
-#include "image/image_mma.cuh"
+#include "fp8_gemm/image_mma.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>

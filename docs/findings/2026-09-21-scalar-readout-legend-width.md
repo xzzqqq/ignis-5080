@@ -8,7 +8,7 @@
 - Related: [ADR 0034](../adr/0034-the-leaf-answers-without-generating.md),
   [typed option logit readout](2026-09-19-typed-option-logit-readout.md),
   [constrained digit readout](2026-09-19-constrained-digit-readout-points.md),
-  [number width and decide e2e](2026-09-20-number-width-and-decide-e2e.md),
+  [number width and decide e2e](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-09-20-number-width-and-decide-e2e.md),
   [GitHub #252](https://github.com/gpillon/ignis/issues/252)
 - Superseded by: none
 
@@ -17,7 +17,7 @@
 > its own object —
 > [a number that closes its own object](2026-09-21-a-number-that-closes-its-own-object.md)
 > — and the readout measured here was never merged
-> ([spec 08](../specs/decide/08-scalar-readout.md), marked NOT IMPLEMENTED).
+> ([spec 08](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/08-scalar-readout.md), marked NOT IMPLEMENTED).
 > The status stays `current` because what is below is a result about grids
 > and legend width, and it is the reason the primitive that shipped generates
 > rather than reads. A finding is superseded when later evidence replaces its

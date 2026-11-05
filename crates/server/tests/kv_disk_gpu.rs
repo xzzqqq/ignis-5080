@@ -15,11 +15,11 @@
 //!   second. C runs alone, then A and B come back and finish; nothing is
 //!   dropped or re-queued. C's tokens are its lone run's.
 //!
-//! Both models cut their pool to one context with `--vram-kv-pool-bytes`'s token
+//! The model cuts its pool to one context with `--vram-kv-pool-bytes`'s token
 //! form (#309 P1). A load whose pool still holds both requests cannot force
 //! the overflow, and the test says so rather than passing.
 //!
-//! Machine-local artifacts (`IGNIS_ARTIFACT_27B`, `IGNIS_FLASH_NEXT_DIR`).
+//! Machine-local artifacts (`IGNIS_ARTIFACT_27B`).
 //! Explicit GPU profile (ADR 0006): a missing artifact or GPU is a skip
 //! outside it, a failure under it. The files go under this checkout's
 //! `.scratch/kv-disk-gpu/` (or `IGNIS_KV_DISK_TEST_DIR`), which the test
@@ -30,28 +30,22 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use ignis_artifact::packer::ARTIFACT_FILE_NAME;
 use ignis_artifact::{FrontendSet, Reader};
 use ignis_core::ngram_cache::CacheLocation;
 use ignis_core::scheduler::DiskSource;
 use ignis_core::types::{DecodeParams, FinishReason, RequestClass, RequestId, RequestInput, SchedEvent};
 use ignis_core::{gpu_profile, ConcreteScheduler, Scheduler};
-use ignis_server::runtime::{cuda_scheduler_with_thinking_close, flash_next_scheduler_with_ngram_cache, EngineShape};
+use ignis_server::runtime::{cuda_scheduler_with_thinking_close, EngineShape};
 
-const ARTIFACT_27B: &str = r"F:\ai\q38\ninfer-models\qwen3_8_27b_nvfp4full-v2.ninfer";
+const ARTIFACT_27B: &str = r"models/qwen3_8_27b_trellis_sc30-v2.ninfer";
 const MODEL_27B: &str = "qwen3.8-27b";
-const FLASH_NEXT_DIR: &str = "F:/ai/models/Qwen3.8-Flash-Next-ignis";
-const MODEL_FLASH_NEXT: &str = "qwen3.8-flash-next";
-/// Flash-Next's EOS (generation_config.json).
-const EOS_FLASH_NEXT: u32 = 248_044;
 const PAGE_TOKENS: u32 = 64;
 
 /// Which model a leg loads.
 #[derive(Debug, Clone, Copy)]
 enum Family {
     Qwen27b,
-    FlashNext,
-}
+    }
 
 /// A distinct, deterministic prompt of `n` tokens.
 fn prompt(seed: u32, n: u32) -> Vec<u32> {
@@ -123,24 +117,7 @@ fn load(family: Family, shape: EngineShape, blobs: &BlobDir) -> Option<(Concrete
             cuda_scheduler_with_thinking_close(&path, MODEL_27B.into(), eos, shape, None, &blobs.location())
                 .map(|(s, r)| (s, r, MODEL_27B.to_owned()))
         }
-        Family::FlashNext => {
-            let dir = std::env::var_os("IGNIS_FLASH_NEXT_DIR").map_or_else(|| PathBuf::from(FLASH_NEXT_DIR), PathBuf::from);
-            let path = dir.join(ARTIFACT_FILE_NAME);
-            if !path.exists() && gpu_profile::skip_or_fail(&format!("no Flash-Next artifact at {}", path.display())) {
-                return None;
-            }
-            flash_next_scheduler_with_ngram_cache(
-                &path,
-                MODEL_FLASH_NEXT.into(),
-                EOS_FLASH_NEXT,
-                shape,
-                None,
-                Default::default(),
-                &blobs.location(),
-            )
-            .map(|(s, r)| (s, r, MODEL_FLASH_NEXT.to_owned()))
-        }
-    };
+        };
     match loaded {
         Ok(loaded) => Some(loaded),
         Err(e) => {
@@ -229,8 +206,7 @@ fn shape(family: Family, max_context: u32, host_pool_bytes: u64) -> EngineShape 
     let base = EngineShape { kv_pool: Some(ignis_core::KvPoolSize::Tokens(u64::from(max_context))), ..base };
     match family {
         Family::Qwen27b => base,
-        Family::FlashNext => EngineShape { decode_lanes: 2, prefill_chunk: 2048, ..base },
-    }
+        }
 }
 
 /// What leg 1 measured of a live blob, which sizes leg 2's arena: the file
@@ -332,7 +308,6 @@ fn the_chain_demotes_kv_ram_to_the_disk(family: Family, spilled: &Spilled) {
     // demoted -- both are asserted below, so a wrong size fails loudly.
     let arena = spilled.blob_bytes(AB_PROMPT + AB_BEFORE_C + PAGE_TOKENS) * 3 / 2;
     let leg_shape = match family {
-        Family::FlashNext => EngineShape { decode_lanes: 3, ..shape(family, CONTEXT, arena) },
         Family::Qwen27b => shape(family, CONTEXT, arena),
     };
     let blobs = BlobDir::new(&format!("leg2-{family:?}"));
@@ -379,12 +354,6 @@ fn both_legs(family: Family) {
 #[ignore = "GPU profile only: the real 27B artifact"]
 fn qwen27b_a_forced_overflow_moves_through_the_disk_bit_exact_and_kv_ram_demotes_to_it() {
     both_legs(Family::Qwen27b);
-}
-
-#[test]
-#[ignore = "GPU profile only: the real Flash-Next artifact"]
-fn flash_next_a_forced_overflow_moves_through_the_disk_bit_exact_and_kv_ram_demotes_to_it() {
-    both_legs(Family::FlashNext);
 }
 
 /// AC 41: the 27B at its defaults has no tier -- no directory, nothing on

@@ -42,7 +42,7 @@ export type PromptImage = {
 export type ChatPicture = { name: string; url: string; full?: Blob; id?: ImageId };
 
 /** What can be done with a picture of the conversation: mark it into the prompt box, or open it in the Image view. */
-export type PictureAction = "mark" | "image";
+export type PictureAction = "mark";
 
 /** The longest side an attached image keeps: enough detail for the vision tower, small on the wire. */
 export const MAX_EDGE = 1568;

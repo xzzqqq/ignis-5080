@@ -38,7 +38,6 @@ use std::sync::Arc;
 
 use ignis_core::checkpoint::{RetainedKind, RetainedStateOperation, ReuseSource};
 use ignis_core::scheduler::{DiskOp, DiskSource};
-use ignis_core::flash_next_counters::FlashNextCounterSource;
 use ignis_core::thinking_budget::BudgetOutcome;
 use ignis_core::{
     FinishReason, LaneId, Occupancy, RequestClass, RequestId, RetainedSkip, SpecCounters,
@@ -300,9 +299,6 @@ pub struct Telemetry {
     /// The Prometheus projection this consumer keeps up to date, when
     /// `--server-metrics` installed one (GitHub #89, ADR 0017).
     metrics: Option<Arc<Metrics>>,
-    /// Where the load's own counters are read, a Flash-Next load's (GitHub
-    /// #301, #302): host memory, read at every tick into `metrics`.
-    counter_source: Option<Arc<FlashNextCounterSource>>,
     /// The latest cancelled (or stopped, [`Telemetry::on_stopped`])
     /// requests, kept only while `metrics` is set: a request can finish in
     /// the same step its cancel is sent, and then its `Done` reaches this
@@ -343,7 +339,6 @@ impl Telemetry {
             kv_evictions: 0,
             requests: HashMap::new(),
             metrics: None,
-            counter_source: None,
             recently_cancelled: VecDeque::new(),
             lane_held_ms: None,
         }
@@ -358,7 +353,6 @@ impl Telemetry {
     /// and interval events — never from their rendered output.
     pub fn with_metrics(&mut self, metrics: Arc<Metrics>) {
         self.metrics = Some(metrics);
-        self.project_counter_source();
     }
 
     /// A request was submitted: anchor its `ms` timeline and record its
@@ -874,37 +868,6 @@ impl Telemetry {
         }
     }
 
-    /// Called once per scheduler step / driver tick: returns the counters it
-    /// computed (GitHub #69: the async telemetry consumer republishes them
-    /// into the wait-free `ArcSwap` snapshot every tick, without
-    /// recomputing), and emits the `ignis.scheduler.interval` DEBUG event
-    /// only when the authoritative counters differ from the last one logged
-    /// (ADR 0025). A decode run holds them constant for thousands of steps;
-    /// one event per step would crowd every other DEBUG event out of the
-    /// logging queue's drop-oldest buffer. `prefilling` is a placeholder zero
-    /// (see the module doc), so it is not an attribute.
-    ///
-    /// `occupancy` is what the scheduler held when the step that sent this
-    /// tick ended (GitHub #216, ADR 0030). It joins the change detection
-    /// rather than riding a line whose cadence some other counter sets: an
-    /// integer percentage takes at most 101 values, so a pool filling
-    /// steadily logs a line per point and not a line per step.
-    /// Read the load's own counters from `source` from now on (GitHub #301,
-    /// #302), at once and then at every tick; `None` for a load without
-    /// them.
-    pub fn with_counter_source(&mut self, source: Option<Arc<FlashNextCounterSource>>) {
-        self.counter_source = source;
-        self.project_counter_source();
-    }
-
-    /// The counter source's latest reading into the projection, when there
-    /// is one to keep up to date.
-    fn project_counter_source(&self) {
-        if let Some(metrics) = &self.metrics {
-            metrics.set_flash_next(self.counter_source.as_ref().map(|source| source.read()).as_ref());
-        }
-    }
-
     pub fn emit_interval(&mut self, occupancy: Occupancy) -> IntervalCounters {
         self.tick = self.tick.saturating_add(1);
         self.occupancy = occupancy;
@@ -913,7 +876,6 @@ impl Telemetry {
             metrics.set_scheduler_requests(counters.waiting, counters.running);
             metrics.set_occupancy(occupancy);
         }
-        self.project_counter_source();
         let logged =
             (counters.waiting, counters.running, counters.kv_used_pct, counters.kv_evictions);
         if self.last_logged != Some(logged) {
@@ -1288,43 +1250,6 @@ mod tests {
         let mut telemetry = telemetry();
         let counters = telemetry.emit_interval(occupied(0, 0));
         assert_eq!(counters.kv_used_pct, 0);
-    }
-
-    #[test]
-    fn a_counter_source_reaches_the_projection_at_once_at_every_tick_and_leaves_with_none() {
-        // GitHub #301, #302: the consumer reads host memory the device and
-        // the n-gram table write; nothing is asked of the model thread.
-        use ignis_core::flash_next_counters::FlashNextCounterSource;
-        use ignis_core::ngram_table::NgramCounts;
-        use ignis_core::residency::{ResidencyCounters, ResidencyMirror};
-
-        let metrics = Arc::new(Metrics::new());
-        let mut telemetry = telemetry();
-        telemetry.with_metrics(Arc::clone(&metrics));
-        let without = metrics.render();
-        let mirror = Arc::new(ResidencyMirror::new());
-        let ngram = Arc::new(NgramCounts::default());
-        let capacity = [8, 0, 0, 0, 0, 0, 0, 0];
-        let source = FlashNextCounterSource::new(Arc::clone(&mirror), capacity, Arc::clone(&ngram));
-        telemetry.with_counter_source(Some(Arc::new(source)));
-        // The capacity before the first step.
-        let installed = metrics.render();
-        assert!(installed.contains("\nignis_expert_cache_slots{class=\"gate_up_k2\",state=\"capacity\"} 8\n"), "{installed}");
-
-        let mut residency = ResidencyCounters::default();
-        residency.misses[0][0] = 6;
-        residency.stall_nanos = [2_500_000, 0];
-        mirror.store(&residency, &[6, 0, 0, 0, 0, 0, 0, 0]);
-        ngram.record(5, 1, 1, 4096);
-        telemetry.emit_interval(Occupancy::default());
-        let ticked = metrics.render();
-        assert!(ticked.contains("\nignis_expert_cache_misses_total{class=\"gate_up_k2\",phase=\"decode\"} 6\n"), "{ticked}");
-        assert!(ticked.contains("\nignis_expert_cache_slots{class=\"gate_up_k2\",state=\"in_use\"} 6\n"), "{ticked}");
-        assert!(ticked.contains("\nignis_expert_residency_stall_seconds_total{phase=\"decode\"} 0.0025\n"), "{ticked}");
-        assert!(ticked.contains("\nignis_ngram_rows_total{source=\"file\"} 1\n"), "{ticked}");
-
-        telemetry.with_counter_source(None);
-        assert_eq!(metrics.render(), without, "a load without counters renders none of a dead model's");
     }
 
     #[test]
@@ -2186,16 +2111,12 @@ mod tests {
             budget_bytes: 0,
             kv_pool_pages: 0,
             kv_page_bytes: 0,
-            residency_bytes: 0,
-            expert_cache_bytes: 0,
-            condition_budget_bytes: 0,
             kv_ram_arena_bytes: 0,
             retained_slots: 0,
             retained_host_slots: 0,
             retained_host_bytes: 0,
             kv_disk_bytes: Some(16 << 30),
-            flash_next: None,
-        });
+            });
         let mut telemetry = telemetry();
         telemetry.with_metrics(Arc::clone(&metrics));
         let events = capture_events(|| {

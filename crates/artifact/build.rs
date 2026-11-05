@@ -1,35 +1,5 @@
-//! Build script for the `ignis-artifact` crate.
-//!
-//! Pure-Rust by default: the `CpuDevice` mock is the ADR 0006 stand-in while
-//! the RTX 5090 is held by the reference runner, so the default build links
-//! nothing. When the `cuda` feature is enabled this links the kernel leaf's
-//! static libraries (its own C ABI surface, which carries the flat C device
-//! surface `kernel/src/device.cu`, plus the vendored reference substrate of
-//! ADR 0010) and the CUDA runtime, building the leaf first. Never the
-//! driver's own libraries (GitHub #329, below).
-//!
-//! The leaf is built on *every* run of this script, and this script re-runs
-//! whenever any kernel source below changes. Both halves matter: until
-//! GitHub #94 the build was skipped whenever `kernel/build/*.lib` merely
-//! *existed*, and the only `rerun-if-changed` named the `kernel` directory
-//! itself -- which cargo does not track recursively. Together those meant an
-//! edited `.cu` was silently linked from the previous archive, and a binary
-//! could carry a kernel many commits old while every test around it passed.
-//! That is what invalidated the first G2 gate run (GitHub #93): the server
-//! under measurement still prefilled a span one token at a time, the
-//! pre-#84 behaviour, and looked ~175x slower than the reference.
-//!
-//! `kernel/build.ps1` is cmake + ninja, so a build with nothing to do costs
-//! a few seconds and a real change is compiled. The `cuda` feature already
-//! requires that toolchain (MSVC, Ninja, nvcc) -- there is no longer a path
-//! where a stale archive stands in for it.
-//!
-//! Two hosts, one contract (GitHub #167): Windows runs `kernel/build.ps1`
-//! through powershell and links `ignis_*.lib` plus the runtime's import lib
-//! under `$CUDA_PATH/lib/x64`; Linux runs `kernel/build.sh` through bash and
-//! links `libignis_*.a` plus the runtime under `$CUDA_HOME/lib64`. Only
-//! the spellings differ -- the script that runs, the archives it must
-//! produce, and the staleness rule above are the same on both.
+//! Build and link the CUDA leaf on Linux. CPU builds need no CUDA toolchain.
+//! Every source change reruns the build; an existing archive never bypasses it.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -44,7 +14,7 @@ const KERNEL_SOURCE_ROOTS: &[&str] = &["src", "include", "tests", "vendor/src", 
 /// Files directly under `kernel/` that decide how the leaf is built. Both
 /// host scripts are watched on both hosts: which one runs depends on the
 /// target, but an edit to either is an edit to how this leaf is built.
-const KERNEL_BUILD_FILES: &[&str] = &["CMakeLists.txt", "build.ps1", "build.sh"];
+const KERNEL_BUILD_FILES: &[&str] = &["CMakeLists.txt", "build.sh"];
 
 /// Emit a `rerun-if-changed` for every file under `dir`, recursively. A
 /// missing or unreadable directory is silently skipped: the whitelist above
@@ -91,30 +61,18 @@ fn main() {
         println!("cargo:rerun-if-changed={}", kernel_dir.join(file).display());
     }
 
-    let windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
-
-    // `bash kernel/build.sh` rather than executing the script directly: the
-    // executable bit does not survive every checkout, and a worktree created
-    // on Windows never carries it.
-    let mut command = if windows {
-        let script = kernel_dir.join("build.ps1");
-        let mut c = Command::new("powershell");
-        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.to_str().unwrap()]);
-        c
-    } else {
-        let mut c = Command::new("bash");
-        c.arg(kernel_dir.join("build.sh"));
-        c
-    };
-    let script_name = if windows { "kernel/build.ps1" } else { "kernel/build.sh" };
+    assert_eq!(env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("linux"),
+               "CUDA builds run on remote Linux; use a CPU build on the Laptop");
+    let mut command = Command::new("bash");
+    command.arg(kernel_dir.join("build.sh"));
+    let script_name = "kernel/build.sh";
     let out = command.output().unwrap_or_else(|e| panic!("failed to run {script_name}: {e}"));
     if !out.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&out.stdout));
         eprintln!("{}", String::from_utf8_lossy(&out.stderr));
         panic!(
             "kernel leaf build failed ({}) — check the toolchain \
-             (NINFER_WINDOWS_BUILD_NOTES.md on Windows; cmake + ninja + nvcc \
-             under CUDA_HOME on Linux) and re-run",
+             (cmake + ninja + nvcc under CUDA_HOME) and re-run",
             out.status
         );
     }
@@ -122,7 +80,7 @@ fn main() {
     // fail much later, as an opaque linker error.
     for name in libraries {
         let lib =
-            build_dir.join(if windows { format!("{name}.lib") } else { format!("lib{name}.a") });
+            build_dir.join(format!("lib{name}.a"));
         if !lib.exists() {
             eprintln!("{}", String::from_utf8_lossy(&out.stdout));
             panic!("kernel leaf build reported success but {} is missing", lib.display());
@@ -140,9 +98,7 @@ fn main() {
     // again is the ordinary fix, and the second copy contributes nothing when
     // the first already resolved everything. The MSVC linker re-scans on its
     // own and needs no such help.
-    if !windows {
-        println!("cargo:rustc-link-lib=static={}", libraries[0]);
-    }
+    println!("cargo:rustc-link-lib=static={}", libraries[0]);
 
     // Only the CUDA runtime is linked, never the driver's own libraries
     // (libcuda.so.1 / nvcuda.dll, libnvidia-ml.so.1 / nvml.dll), which ship
@@ -152,18 +108,6 @@ fn main() {
     // (GitHub #329). The leaf reaches the driver API through the runtime
     // (kernel/src/cuda_driver_shim.cu) and opens NVML when it first reads it
     // (kernel/src/device.cu).
-    if windows {
-        // CUDA runtime (dynamic): the static library imports cudart symbols;
-        // the import lib is resolved at link time, the DLL (cudart64_*.dll) at
-        // runtime from the CUDA toolkit's bin/x64 directory.
-        let cuda = env::var("CUDA_PATH")
-            .unwrap_or_else(|_| r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1".into());
-        let cuda_lib = PathBuf::from(&cuda).join("lib").join("x64");
-        if cuda_lib.exists() {
-            println!("cargo:rustc-link-search={}", cuda_lib.display());
-            println!("cargo:rustc-link-lib=dylib=cudart");
-        }
-    } else {
         let cuda = env::var("CUDA_HOME")
             .or_else(|_| env::var("CUDA_PATH"))
             .unwrap_or_else(|_| "/usr/local/cuda".into());
@@ -180,7 +124,6 @@ fn main() {
         // already pulls the CRT that carries all of it; the GNU toolchain
         // links libstdc++ only when asked.
         println!("cargo:rustc-link-lib=dylib=stdc++");
-    }
 
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");

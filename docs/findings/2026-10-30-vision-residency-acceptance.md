@@ -5,7 +5,7 @@
 - Observed: 2026-10-30
 - Last verified: 2026-10-30
 - Scope: serving / the 27B's vision load under `vision.residency` `host` and `device`: the VRAM plan under `rtx50-16gb` and `rtx5090`, the media encode, `/v1/decide`, decode, on the RTX 5090 (PCIe Gen 3 x16 host, Windows/WDDM)
-- Related: [ADR 0075](../adr/0075-the-vision-tower-is-staged-and-the-embedding-pool-host-mapped-unless-the-load-asks-for-the-device.md), [the prototype's finding](2026-10-30-vision-tower-staged-and-pool-host-mapped.md), [rope auto follows the adapted context](../user/configuration/context-and-speculation.md), https://github.com/gpillon/ignis/issues/413, https://github.com/gpillon/ignis/issues/417
+- Related: [ADR 0075](../adr/0075-the-vision-tower-is-staged-and-the-embedding-pool-host-mapped-unless-the-load-asks-for-the-device.md), [the prototype's finding](2026-10-30-vision-tower-staged-and-pool-host-mapped.md), [rope auto follows the adapted context](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/user/configuration/context-and-speculation.md), https://github.com/gpillon/ignis/issues/413, https://github.com/gpillon/ignis/issues/417
 - Superseded by: none
 
 ## Question

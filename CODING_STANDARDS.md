@@ -67,8 +67,8 @@ The download route tests waited for `on_disk` complete, then asserted
 The checks are `make ci`, whose `check` step compiles the code behind the
 `cuda` feature unless it runs with `CUDA=0`; `cargo test` never does. The rest
 of what a change needs, a kernel change's GPU legs among it, is
-`docs/agents/testing.md`'s "Done means". Resolving a conflict reformats
-nothing.
+`docs/agents/testing.md`. Keep conflict resolution limited to the affected
+lines.
 
 ## Skill output and prototypes
 
@@ -96,9 +96,13 @@ The smell baseline does not apply to:
   generated, which `make docs-reference` writes from the code; the review
   reads the code that produces them.
 
-Tooling already enforces the kernel's vendored tree against its manifest and
-the generated pages against the code (both in `cargo test`), the guide's
-links (`make docs-build`), and the commit messages' conventions
-(`.githooks/commit-msg`). The guardrails are `make ci`, run by hand before a
-merge, and the release workflow's `cargo test` on Linux and Windows on every
-code push to `main`.
+`cargo test` checks vendored kernels against their manifest and generated
+reference pages against their source. `.githooks/commit-msg` checks commit
+messages. Run `make ci` before merging; the CPU workflow also runs
+`cargo test` on Linux.
+
+## Commits
+
+End commit messages with their issue number, for example `(#347)`. Describe
+the change in merge messages. Do not add a `Co-Authored-By` trailer.
+Release messages use `ignis X.Y.Z` without an issue number.

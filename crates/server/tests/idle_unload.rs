@@ -343,16 +343,12 @@ async fn while_unloaded_the_metrics_show_nothing_reserved() {
         budget_bytes: 30 << 30,
         kv_pool_pages: 1024,
         kv_page_bytes: 1 << 20,
-        residency_bytes: 0,
-        expert_cache_bytes: 0,
-        condition_budget_bytes: 0,
         kv_ram_arena_bytes: 4 << 30,
         retained_slots: 4,
         retained_host_slots: 2,
         retained_host_bytes: 1 << 30,
         kv_disk_bytes: Some(8 << 30),
-        flash_next: None,
-    };
+        };
     let server = idle_server(&loader, loader.model("mock-a"), IDLE, &[]).with_metrics().with_load_reservations(reserved);
     let metrics = server.metrics_app().expect("metrics are on");
     let scrape = || async { send(&metrics, Method::GET, "/metrics", None).await.1.as_str().expect("text").to_owned() };
@@ -620,27 +616,6 @@ async fn an_unauthenticated_request_while_unloaded_gets_401_and_loads_nothing() 
     let (status, completion) = send_keyed(&app, Method::POST, "/v1/chat/completions", Some(chat(None)), Some("sk-test")).await;
     assert_eq!(status, StatusCode::OK, "{completion}");
     assert_eq!(loader.loads(), ["mock-a"]);
-}
-
-/// A decision whose body does not parse, while unloaded, is refused `422` as
-/// before and loads nothing: only a request that can be served may cost a
-/// load. `/v1/systemone` is the same handler under its other name.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_malformed_decision_while_unloaded_gets_422_and_loads_nothing() {
-    let loader = MockLoader::new();
-    let server = idle_server(&loader, loader.model("mock-a"), IDLE, &[]);
-    let app = server.app();
-    let _clock = server.spawn_idle_clock(TICK).expect("a clock");
-    unloaded(&server, &loader).await;
-    server.update_live(|live| live.idle_unload = Duration::ZERO);
-
-    for uri in ["/v1/decide", "/v1/systemone"] {
-        let (status, refused) = send(&app, Method::POST, uri, Some(json!({ "questions": 7 }))).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{uri}: {refused}");
-    }
-    tokio::time::sleep(TICK * 4).await;
-    assert_eq!(*server.status(), ModelStatus::Unloaded);
-    assert!(loader.loads().is_empty(), "{:?}", loader.loads());
 }
 
 /// AC 9: a request naming another known model while unloaded loads that

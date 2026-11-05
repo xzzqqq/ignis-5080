@@ -52,7 +52,7 @@ use ignis_core::{KvFormat, PrefillAttention, RopeScaling, Speculation, Speculati
 
 use near_tie::{assert_equivalent, first_divergence};
 
-const TRELLIS: &str = "F:/ai/models/Qwen3.8-27B-trellis-3bpw-ignis/qwen3_8_27b_trellis_sc30-v2.ninfer";
+
 const MAX_CONTEXT: u32 = 128;
 /// The window `rtx50-16gb` drafts at.
 const WINDOW: u32 = 7;
@@ -245,11 +245,11 @@ fn print_agreement(label: &str, reference: &[Vec<i32>], other: &[Vec<i32>]) {
 #[test]
 #[ignore = "GPU profile only: scripts/gpu-profile.ps1"]
 fn two_trellis_lanes_in_one_round_give_each_lanes_own_text() {
-    let path = Path::new(TRELLIS);
-    if !path.exists() && gpu_profile::skip_or_fail(&format!("artifact absent: {TRELLIS}")) {
+    let path = Path::new(trellis_artifact());
+    if !path.exists() && gpu_profile::skip_or_fail(&format!("artifact absent: {}", trellis_artifact())) {
         return;
     }
-    let reader = Reader::open(path).unwrap_or_else(|e| panic!("open {TRELLIS}: {e}"));
+    let reader = Reader::open(path).unwrap_or_else(|e| panic!("open {}: {e}", trellis_artifact()));
     assert_eq!(body_27b(&reader), Body27b::Trellis);
     let (prompts, stop_ids) = chat_prompts(&reader);
     assert!(prompts.iter().all(|p| p.len() + TOTAL <= MAX_CONTEXT as usize), "a prompt outgrows the context");
@@ -337,4 +337,9 @@ fn two_trellis_lanes_in_one_round_give_each_lanes_own_text() {
         let eager = spec_on(&model, &pool, &prompts, &stop_ids, false);
         assert_eq!(eager, graph_two, "the width-2 verify graph's replay diverged from the eager rounds");
     }
+}
+
+fn trellis_artifact() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var("IGNIS_MODEL_ARTIFACT").unwrap_or_else(|_| "models/qwen3_8_27b_trellis_sc30-v2.ninfer".into())).as_str()
 }

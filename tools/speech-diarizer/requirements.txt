@@ -1,8 +1,0 @@
-# The diarizer's oracle's Python (tools/speech-diarizer/record.py checks these at start). The
-# checkpoint is read from a local snapshot of nvidia/Nemotron-3-Diarization at f667ed73 (--model).
-torch==2.14.1+cpu
-numpy==2.5.4
-transformers==5.20.2
-safetensors==0.8.0
-soundfile==0.14.0
-librosa==1.0.0

@@ -50,7 +50,7 @@ use ignis_core::trellis::{self, TrellisWeight};
 
 use bf16::{bf16_to_f64, f32_to_bf16};
 
-const TRELLIS: &str = "F:/ai/models/Qwen3.8-27B-trellis-3bpw-ignis/qwen3_8_27b_trellis_sc30-v2.ninfer";
+
 const HIDDEN: usize = 5120;
 const MAX_CONTEXT_TOKENS: u32 = 128;
 /// The bound on a token's layer output, relative L2 against the f64 oracle
@@ -386,10 +386,10 @@ fn check_layer(
 #[test]
 #[ignore = "GPU profile only: scripts/gpu-profile.ps1"]
 fn the_trellis_bodys_layers_match_the_f64_oracle_over_their_own_weights() {
-    if !Path::new(TRELLIS).exists() && gpu_profile::skip_or_fail(&format!("artifact absent: {TRELLIS}")) {
+    if !Path::new(trellis_artifact()).exists() && gpu_profile::skip_or_fail(&format!("artifact absent: {}", trellis_artifact())) {
         return;
     }
-    let reader = Reader::open(Path::new(TRELLIS)).unwrap_or_else(|e| panic!("open {TRELLIS}: {e}"));
+    let reader = Reader::open(Path::new(trellis_artifact())).unwrap_or_else(|e| panic!("open {}: {e}", trellis_artifact()));
     let (plan, handles) = bind_text_scope_27b(&reader).unwrap_or_else(|e| panic!("bind the trellis text scope: {e}"));
     let mut device = match CudaDevice::create(0) {
         Ok(device) => device,
@@ -439,3 +439,8 @@ fn the_trellis_bodys_layers_match_the_f64_oracle_over_their_own_weights() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+
+fn trellis_artifact() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var("IGNIS_MODEL_ARTIFACT").unwrap_or_else(|_| "models/qwen3_8_27b_trellis_sc30-v2.ninfer".into())).as_str()
+}

@@ -18,18 +18,15 @@
 
 #![cfg(feature = "cuda")]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use ignis_artifact::packer::ARTIFACT_FILE_NAME;
 use ignis_artifact::{bind_text_scope_27b, materialize, CudaDevice, Reader};
-use ignis_core::flash_next::EngineOptions;
 use ignis_core::gpu_profile;
 use ignis_core::{Compute, DecodeJob, DecodeOutcome, DecodeParams, FinishReason, PrefillJob, TokenId};
-use ignis_runtime::{CudaLeaf, CudaLeafConfig, FlashNextLeaf, Model, RuntimeCompute};
+use ignis_runtime::{CudaLeaf, CudaLeafConfig, Model, RuntimeCompute};
 
 const ARTIFACT_27B: &str = r"F:\ai\q38\ninfer-models\qwen3_8_27b_nvfp4full-v2.ninfer";
-const FLASH_NEXT_DIR: &str = "F:/ai/models/Qwen3.8-Flash-Next-ignis";
 /// The stop id the `Compute` adapter is built with (its EOS), and the close.
 const STOP: TokenId = 9_001;
 const CLOSE: TokenId = 9_002;
@@ -155,28 +152,4 @@ fn the_27b_leaf_redirects_a_stop_drawn_inside_the_reasoning() {
     let leaf = CudaLeaf::new(device, reader, artifact, handles, CudaLeafConfig::default());
     let model = Arc::new(Model::load(Arc::new(leaf)).unwrap_or_else(|e| panic!("model load: {e:?}")));
     the_redirect_holds(&RuntimeCompute::new(model, STOP), "27B");
-}
-
-#[test]
-#[ignore = "GPU profile only: the real Flash-Next artifact"]
-fn the_flash_next_leaf_redirects_a_stop_drawn_inside_the_reasoning() {
-    let dir = std::env::var_os("IGNIS_FLASH_NEXT_DIR").map_or_else(|| PathBuf::from(FLASH_NEXT_DIR), PathBuf::from);
-    let path = dir.join(ARTIFACT_FILE_NAME);
-    if !path.exists() {
-        gpu_profile::skip_or_fail(&format!("no Flash-Next artifact at {}", path.display()));
-        return;
-    }
-    let options = EngineOptions {
-        max_context_tokens: 4096,
-        ..EngineOptions::default()
-    };
-    let leaf = match FlashNextLeaf::open(&path, options) {
-        Ok(leaf) => leaf,
-        Err(e) => {
-            gpu_profile::skip_or_fail(&format!("open the Flash-Next leaf: {e}"));
-            return;
-        }
-    };
-    let model = Arc::new(Model::load(Arc::new(leaf)).unwrap_or_else(|e| panic!("model load: {e:?}")));
-    the_redirect_holds(&RuntimeCompute::new(model, STOP), "Flash-Next");
 }

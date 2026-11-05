@@ -6,7 +6,7 @@
 - Last verified: 2026-10-06 (on the converter's traces)
 - Scope: core / Flash-Next expert residency, the CPU policy model and its pool split, prefetch and prefill admission
 - Related: [GitHub #301](https://github.com/gpillon/ignis/issues/301),
-  [spec flash-next/03](../specs/flash-next/03-expert-residency.md) (its
+  [spec flash-next/03](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/flash-next/03-expert-residency.md) (its
   "Departures" section),
   [An SM-driven copy matches the copy engine](2026-10-05-expert-miss-path-sm-copy-matches-the-copy-engine.md)
 - Superseded by: none
@@ -90,7 +90,7 @@ against 2.46 ms, 24.5 against 24.6 MB/token) and was dropped.
 Since then the default budget follows a step's rows: 1,172,500 B at one row
 and 726,250 B more per further row, with no floor. On the same replay that
 rule scores 95.9% at one lane and 95.8% at three
-([Flash-Next decode round](2026-10-06-flash-next-decode-round.md), "The
+([Flash-Next decode round](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-06-flash-next-decode-round.md), "The
 budget follows the rows"). The conclusions above stand.
 
 **Scan resistance.** Per chunk: decode 256 tokens to settle, 256 measured,

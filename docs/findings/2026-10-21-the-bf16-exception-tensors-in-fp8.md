@@ -5,7 +5,7 @@
 - Observed: 2026-10-21
 - Last verified: 2026-10-21
 - Scope: kernel / the FP8 arms of `attn_input_proj` and `linear_add` (W8A8 grouped GEMM with a residual epilogue, the FP8 linear's GEMV and tensor-core routes), the row quantizer; artifact / FP8 conversion at load (binder, materializer); serving / the 27B's VRAM plan, cold prefill, decode, a decoding lane's pauses, load time, 4K KLD on the RTX 5090 (PCIe Gen 3)
-- Related: GitHub #341 (spec [prefill-5090/01](../specs/prefill-5090/01-the-prefill-fixed-part.md), lever 1), [ADR 0065](../adr/0065-the-bf16-exception-tensors-can-be-held-in-fp8.md), [the prefill chunk at 2,048](2026-10-21-the-27b-prefill-chunk-at-2048.md) (the same session's method, the baseline width), [image model kernels](2026-10-13-image-model-kernels-on-the-5090.md) (the W8A8 GEMM), `.scratch/341/`
+- Related: GitHub #341 (spec [prefill-5090/01](../specs/prefill-5090/01-the-prefill-fixed-part.md), lever 1), [ADR 0065](../adr/0065-the-bf16-exception-tensors-can-be-held-in-fp8.md), [the prefill chunk at 2,048](2026-10-21-the-27b-prefill-chunk-at-2048.md) (the same session's method, the baseline width), [image model kernels](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-13-image-model-kernels-on-the-5090.md) (the W8A8 GEMM), `.scratch/341/`
 - Superseded by: none
 
 ## Question

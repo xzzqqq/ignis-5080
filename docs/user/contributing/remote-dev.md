@@ -138,8 +138,8 @@ CUDA 修改重启后会重新加载模型，不是在保留显存状态下热替
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Rust CPU 测试优先在 Laptop 执行。仓库的 Cargo 配置固定 Windows target，其他平台
-必须覆盖它；先通过 `rustc -vV` 读取 `host`，再用其值运行：
+Rust CPU 测试优先在 Laptop 执行。Cargo 默认使用 host target。
+如需显式指定，可用 `rustc -vV` 查看 `host`，然后运行：
 
 ```sh
 cargo test --workspace --target <host>
@@ -152,9 +152,14 @@ GPU 工作前先查看 `make gpu-status` 并通过 `make gpu-guard`，协调全�
 包括其他项目和 worktree。状态检查不是锁；上游 guard 的显存阈值也不证明 5080
 有足够余量。不能因检查通过就并行启动第二项 GPU 工作。
 
-Linux 已支持 CUDA build/check、GPU status/guard 和后台服务控制；`make gpu-profile`
-仍未实现（见 `mk/os/linux.mk`）。不能把 Windows profile 的 skip 或未运行写成
-Linux/5080 验收通过。构建目录长期保留供增量构建使用，不在同步或测试后自动清理。
+Linux 支持 CUDA build/check、GPU status/guard、后台服务控制和 GPU profile：
+
+```sh
+python3 scripts/remote.py exec -- python3 scripts/gpu_profile.py --artifact models/qwen3_8_27b_trellis_sc30-v2.ninfer --out .scratch/gpu-check
+```
+
+使用尚不存在的输出目录。Profile 独占一张 RTX 5080，任何阶段失败或跳过都会导致
+整次检查失败。构建目录保留用于增量构建。
 
 ## 推送前的凭据检查
 

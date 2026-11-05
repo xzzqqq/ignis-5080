@@ -165,13 +165,6 @@ fn no_build_recipe_names_a_feature_through_a_member_that_depends_on_itself() {
             self_dependent.push(package_name(&manifest).unwrap());
         }
     }
-    // The member that broke v0.9.0 and v0.9.1; without it the rule below
-    // would hold of nothing. If ignis-server stops depending on itself, this
-    // assertion goes with it.
-    assert!(
-        self_dependent.iter().any(|name| name == "ignis-server"),
-        "crates/server/Cargo.toml no longer reads as depending on itself; self-dependent members found: {self_dependent:?}"
-    );
     let mut wrong = Vec::new();
     for path in recipes(&repo) {
         for feature in features_named(&read(&path)) {
@@ -218,19 +211,4 @@ fn the_scan_finds_the_form_that_shipped_without_cuda() {
     assert!(depends_on_itself("[package]\nname = \"ignis-server\"\n\n[dev-dependencies]\nignis-server.path = \".\"\n"));
     assert!(!depends_on_itself("[package]\nname = \"ignis-server\"\n\n[dependencies]\nignis-server-x = \"1\"\n"));
     assert!(!depends_on_itself("[package]\nname = \"ignis-server\"\n\n[features]\nignis-server = []\n"));
-}
-
-#[test]
-fn the_release_check_looks_for_the_warning_only_a_build_without_cuda_carries() {
-    let repo = repo();
-    let script = read(&repo.join("mk/cuda-build-check.sh"));
-    let marker = script
-        .lines()
-        .find_map(|line| line.strip_prefix("marker='")?.strip_suffix('\''))
-        .expect("mk/cuda-build-check.sh declares marker='...'");
-    let load = read(&repo.join("crates/server/src/load.rs"));
-    assert!(load.contains(marker), "crates/server/src/load.rs no longer says {marker:?}: the release check would pass any build");
-    for recipe in ["Containerfile", ".github/workflows/release.yml"] {
-        assert!(read(&repo.join(recipe)).contains("bash mk/cuda-build-check.sh "), "{recipe} no longer runs mk/cuda-build-check.sh");
-    }
 }

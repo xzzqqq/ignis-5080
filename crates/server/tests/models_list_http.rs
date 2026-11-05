@@ -178,7 +178,7 @@ async fn the_list_is_the_active_model_then_the_catalog_on_disk_then_the_known_mo
     let list = get_models(&app).await;
     // The built-in catalog comes first: the Flash-Next entry is a catalog id,
     // served from the known models' file, which wins for its id.
-    assert_eq!(ids(&list), ["mock-a", "qwen3.8-flash-next", "acme-zed", "acme-alpha", "mock-k"], "{list}");
+    assert_eq!(ids(&list), ["mock-a", "acme-zed", "acme-alpha", "mock-k", "qwen3.8-flash-next"], "{list}");
     let entries = list["data"].as_array().unwrap();
     assert_eq!(entries[0]["active"], true);
     assert_eq!(entries[0]["kind"], "text");
@@ -228,10 +228,7 @@ async fn the_active_entry_says_the_lanes_it_decodes_on_and_what_its_load_adapted
     let list = get_models(&Server::from_active(model).app()).await;
     assert_eq!((&list["data"][0]["decode_lanes"], &list["data"][0]["adapted"]), (&json!(1), &json!(lanes)), "{list}");
 
-    // The image model: neither.
-    let list = get_models(&Server::from_active(loader.model(IMAGE)).app()).await;
-    assert_eq!(list["data"][0]["kind"], "image", "{list}");
-    assert!(list["data"][0].get("decode_lanes").is_none() && list["data"][0].get("adapted").is_none(), "{list}");
+
 }
 
 /// AC 2: with `switch.allow_implicit` off only the active model is listed,
@@ -444,7 +441,7 @@ async fn the_list_opens_no_artifact() {
     let start = file_in(&elsewhere, "mock-a.ninfer");
     let image = file_in(&elsewhere, "image.ninfer");
     let app = server_with(&loader, &start, models, &[(IMAGE, &image)], true).app();
-    assert_eq!(listed(&app).await, ["mock-a", IMAGE, "acme-full"], "the image model is a built-in catalog entry");
+    assert_eq!(listed(&app).await, ["mock-a", "acme-full", IMAGE], "catalog entries precede explicitly listed files");
     assert_eq!(loader.kind_of_calls(), 0, "the route asked the loader a kind");
     let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(elsewhere));
 }

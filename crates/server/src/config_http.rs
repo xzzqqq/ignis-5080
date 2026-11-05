@@ -674,42 +674,6 @@ fn check_thinking(server: &Server, next: &Config, patch: &Layer) -> Result<(), S
     Ok(())
 }
 
-/// Spec image-model/05 §Prompt enhancement: an `image.prompt_enhancer` a
-/// patch names must be a text model a rewrite can run on — the loaded one, or
-/// one an explicit switch by id may name, the patch's own
-/// `switch.known_models` among them — where the server knows its text models
-/// ([`crate::images::enhance::unknown_enhancer`]). Only for what `patch`
-/// changes: an enhancer the running configuration already names is not
-/// judged again (the start warned of it).
-fn check_enhancer(server: &Server, next: &Config, patch: &Layer) -> Result<(), String> {
-    if !patch.named().any(|(meta, _)| meta.group == "image" && meta.name == "prompt_enhancer") {
-        return Ok(());
-    }
-    match crate::images::enhance::unknown_enhancer(server, &next.settings().image.prompt_enhancer, &next.known_models) {
-        Some(why) => Err(why),
-        None => Ok(()),
-    }
-}
-
-/// `speech.model` and `speech.compat_names` against the catalog this server
-/// runs with, an operator's file among it, when the patch names either: what
-/// the start checks where it reads the catalog (`speech::check_names`); the
-/// config's own check has the built-in entries already. `diarizer.model` the
-/// same way (`speech::check_diarizer_name`).
-fn check_speech(server: &Server, next: &Config, patch: &Layer) -> Result<(), String> {
-    let Some(catalog) = server.speech.catalog() else {
-        return Ok(());
-    };
-    if patch.named().any(|(meta, _)| meta.group == "speech" && (meta.name == "model" || meta.name == "compat_names")) {
-        crate::speech::check_names(catalog, &next.settings().speech)?;
-    }
-    // `diarizer.model` (spec speech/08): the same kind check, for the diarizer.
-    if patch.named().any(|(meta, _)| meta.group == "diarizer" && meta.name == "model") {
-        crate::speech::check_diarizer_name(catalog, &next.settings().diarizer)?;
-    }
-    Ok(())
-}
-
 /// `PATCH /v1/config` — change the running configuration.
 #[utoipa::path(
     patch,
@@ -746,12 +710,6 @@ pub(crate) async fn patch_config(State(server): State<Arc<Server>>, Json(body): 
         Ok(next) => next,
         Err(error) => return refused("config_invalid", error.0),
     };
-    if let Err(error) = check_enhancer(&server, &next, &patch) {
-        return refused("config_invalid", error);
-    }
-    if let Err(error) = check_speech(&server, &next, &patch) {
-        return refused("config_invalid", error);
-    }
     let shadowed = shadowed_at_restart(&patch, &running);
     if !needs_reload(&running, &next) {
         if let Err(error) = check_thinking(&server, &next, &patch) {
@@ -883,53 +841,6 @@ mod tests {
         assert_eq!(document, json!({ "throwaway": { "shown": true, "qwen38": { "shown": true } } }));
     }
 
-    /// GitHub #329 item 15: turning speculation off by `PATCH` is one step
-    /// whichever layer set the draft count — the config file, or a patch
-    /// before it. The count a patch inherits is dropped with the backend (and
-    /// from the file, so a restart resolves the same); one the same patch
-    /// names beside `off` is still refused, and so is one a flag sets.
-    #[test]
-    fn a_patch_turning_speculation_off_drops_the_draft_count_it_does_not_name() {
-        let files = MemFiles::with(&[(
-            "c.yaml",
-            "spec:
-  qwen38flashnext:
-    backend: mtp
-    draft_tokens: 3
-",
-        )]);
-        let running = on_file(&files, &["--config", "c.yaml"], &[]).for_family(ModelFamily::FlashNext).unwrap();
-        assert!(running.speculation.is_some());
-        let off = json!({ "spec": { "qwen38flashnext": { "backend": "off" } } });
-
-        // Set by the file.
-        let patch = read_patch(&off).unwrap();
-        let next = running.with_patch(&patch).unwrap();
-        assert!(next.speculation.is_none() && next.speculation_off);
-        assert!(patch.removals().any(|(meta, family, _)| meta.name == "draft_tokens" && family == Some(ModelFamily::FlashNext)));
-
-        // Set by an earlier patch, on a start with no file value.
-        let bare = config(&[]).for_family(ModelFamily::FlashNext).unwrap();
-        let on = read_patch(&json!({ "spec": { "qwen38flashnext": { "backend": "mtp", "draft_tokens": 3 } } })).unwrap();
-        let live = bare.with_patch(&on).unwrap();
-        assert!(live.speculation.is_some());
-        assert!(live.with_patch(&read_patch(&off).unwrap()).unwrap().speculation.is_none());
-
-        // Named beside `off` in the same patch: still a refusal.
-        let both = json!({ "spec": { "qwen38flashnext": { "backend": "off", "draft_tokens": 3 } } });
-        let err = running.with_patch(&read_patch(&both).unwrap()).unwrap_err().0;
-        assert!(err.contains("draft_tokens") && err.contains("off"), "{err}");
-
-        // A flag's count is not the patch's to drop.
-        let flagged = config(&["--spec-backend", "mtp", "--spec-draft-tokens", "3"]).for_family(ModelFamily::FlashNext).unwrap();
-        let err = flagged.with_patch(&read_patch(&off).unwrap()).unwrap_err().0;
-        assert!(err.contains("--spec-draft-tokens 3") && err.contains("off"), "{err}");
-        // At the group key, the group's count goes with it.
-        let group_on = read_patch(&json!({ "spec": { "backend": "mtp", "draft_tokens": 3 } })).unwrap();
-        let group_off = read_patch(&json!({ "spec": { "backend": "off" } })).unwrap();
-        assert!(bare.with_patch(&group_on).unwrap().with_patch(&group_off).unwrap().speculation.is_none());
-    }
-
     #[test]
     fn a_patch_refuses_profiles_unknown_fields_and_anything_not_patchable_whole() {
         assert_eq!(read_patch(&json!({ "profile": "x" })).unwrap_err().0, "config_invalid");
@@ -939,39 +850,6 @@ mod tests {
             read_patch(&json!({ "server": { "request_timeout": 60, "api_key": "k", "bind": "x" } })).unwrap_err();
         assert_eq!(code, "config_field_not_patchable");
         assert!(message.contains("`server.api_key`") && message.contains("`server.bind`") && !message.contains("request_timeout"), "{message}");
-    }
-
-    /// Spec playground/05 AC 21: a `null` is held to what a value there
-    /// would be — a field not patchable, or a family section with no place
-    /// for it, refuses the patch — and a body of only removals is a patch.
-    #[test]
-    fn a_removal_is_refused_where_a_value_would_be() {
-        let (code, message) = read_patch(&json!({ "server": { "request_timeout": null, "api_key": null } })).unwrap_err();
-        assert_eq!(code, "config_field_not_patchable");
-        assert!(message.contains("`server.api_key`") && !message.contains("request_timeout"), "{message}");
-        let (code, message) = read_patch(&json!({ "spec": { "qwen38": { "draft_rows": null } } })).unwrap_err();
-        assert_eq!(code, "config_invalid");
-        assert!(message.contains("spec.qwen38.draft_rows") && message.contains("does not take"), "{message}");
-        let removals = read_patch(&json!({ "reuse": { "prompt": null } })).unwrap();
-        assert_eq!(removals.removals().count(), 1);
-    }
-
-    /// Spec playground/05 AC 19-20: a patch reloads only when a field that
-    /// needs a reload resolves differently for the family running — not for
-    /// a value scoped to the other family, nor for a group value the running
-    /// family overrides in its own section.
-    #[test]
-    fn a_patch_reloads_only_for_what_the_running_family_runs_with() {
-        let running = config(&["--profile", "none"]).for_family(ModelFamily::Qwen38_27b).unwrap();
-        let reloads = |running: &Config, body: Value| needs_reload(running, &running.with_patch(&read_patch(&body).unwrap()).unwrap());
-        assert!(!reloads(&running, json!({ "server": { "request_timeout": 60 }, "switch": { "drain_timeout": 0 } })), "live fields");
-        assert!(!reloads(&running, json!({ "reuse": { "qwen38flashnext": { "kv_host_pool_bytes": "1G" } } })), "the other family's value");
-        assert!(!reloads(&running, json!({ "reuse": { "kv_host_pool_bytes": "2G" } })), "the value already running");
-        assert!(reloads(&running, json!({ "reuse": { "qwen38": { "kv_host_pool_bytes": "1G" } } })), "the running family's own");
-        assert!(reloads(&running, json!({ "reuse": { "kv_host_pool_bytes": "1G" } })), "a group value the running family reads");
-        assert!(reloads(&running, json!({ "server": { "request_timeout": 60 }, "reuse": { "qwen38flashnext": { "prompt": false }, "prompt": false } })));
-        let own = running.with_patch(&read_patch(&json!({ "reuse": { "qwen38": { "kv_host_pool_bytes": "4G" } } })).unwrap()).unwrap();
-        assert!(!reloads(&own, json!({ "reuse": { "kv_host_pool_bytes": "1G" } })), "a group value the running family overrides");
     }
 
     /// ADR 0057: the reload check keys on the table the load runs, not on
@@ -1002,27 +880,6 @@ mod tests {
         assert!(reloads(&flash_next, rope("none")));
     }
 
-    /// ADR 0057, ADR 0059: patching Flash-Next's own context while it runs
-    /// re-resolves its `auto` table against the new context, and reloads; the
-    /// 27B's context, patched meanwhile, moves nothing Flash-Next runs.
-    #[test]
-    fn a_patch_of_flash_nexts_context_re_resolves_its_rope_table_and_reloads() {
-        let running = config(&["--profile", "none", "--qwen38flashnext-model-max-context", "589824"])
-            .for_family(ModelFamily::FlashNext)
-            .unwrap();
-        assert_eq!(running.rope_scaling.factor(), 2.25);
-        let patch = |body: Value| running.with_patch(&read_patch(&body).unwrap()).unwrap();
-        let wider = patch(json!({ "model": { "qwen38flashnext": { "max_context": 1048576 } } }));
-        assert_eq!((wider.max_context, wider.rope_scaling.factor()), (1_048_576, 4.0));
-        assert!(needs_reload(&running, &wider));
-        let trained = patch(json!({ "model": { "qwen38flashnext": { "max_context": 262144 } } }));
-        assert_eq!(trained.rope_scaling, ignis_core::RopeScaling::NONE, "inside the trained position envelope");
-        assert!(needs_reload(&running, &trained));
-        let other = patch(json!({ "model": { "qwen38": { "max_context": 1048576 } } }));
-        assert_eq!(other.rope_scaling, running.rope_scaling);
-        assert!(!needs_reload(&running, &other), "the 27B's context is not Flash-Next's");
-    }
-
     /// Spec playground/05: a `null` takes the patched key away, so
     /// `model.rope_scaling` is the default `auto` again and the table the
     /// load runs follows the context once more.
@@ -1047,29 +904,6 @@ mod tests {
         let back = on_disk.with_patch(&removal).unwrap();
         assert!(back.settings().model.rope_scaling.is_auto());
         assert_eq!(back.rope_scaling.factor(), 3.0, "auto at 786,432");
-    }
-
-    /// The host margin is read by the text models' host plans -- Flash-Next's
-    /// and, since ADR 0062 put its token embedding in pinned host memory, the
-    /// 27B's: patching it reloads the family it names, and leaves the image
-    /// model, which plans no host memory, running.
-    #[test]
-    fn the_host_margin_reloads_only_the_families_that_plan_host_memory() {
-        let patch = |running: &Config, body: Value| needs_reload(running, &running.with_patch(&read_patch(&body).unwrap()).unwrap());
-        let general = json!({ "model": { "host_margin_bytes": "8G" } });
-        let flash_next_scoped = json!({ "model": { "qwen38flashnext": { "host_margin_bytes": "8G" } } });
-        let qwen_scoped = json!({ "model": { "qwen38": { "host_margin_bytes": "8G" } } });
-        let flash_next = config(&["--profile", "none"]).for_family(ModelFamily::FlashNext).unwrap();
-        assert!(patch(&flash_next, general.clone()), "Flash-Next reads the general margin");
-        assert!(patch(&flash_next, flash_next_scoped.clone()), "and its own");
-        assert!(!patch(&flash_next, qwen_scoped.clone()), "not the 27B's");
-        let qwen = config(&["--profile", "none"]).for_family(ModelFamily::Qwen38_27b).unwrap();
-        assert!(patch(&qwen, general.clone()), "the 27B reads the general margin");
-        assert!(patch(&qwen, qwen_scoped.clone()), "and its own");
-        assert!(!patch(&qwen, flash_next_scoped.clone()), "not Flash-Next's");
-        let image = config(&["--profile", "none"]).for_family(ModelFamily::QwenImage21).unwrap();
-        assert!(!patch(&image, general), "the image model never reads the margin");
-        assert!(!patch(&image, flash_next_scoped), "the image model: another family's key");
     }
 
     #[test]
@@ -1116,34 +950,4 @@ mod tests {
         );
     }
 
-    /// Spec playground/05 AC 30: a group key written to the file is
-    /// outranked at the next start, for a family, by that family's own flag
-    /// or env var — so each is named, once, beside a general one; a family's
-    /// key only by its own family's and the general ones.
-    #[test]
-    fn a_family_flag_or_env_var_that_outranks_a_patched_group_value_is_named() {
-        let files = MemFiles::with(&[("c.yaml", "server: {}\n")]);
-        let env = &[("IGNIS_QWEN38FLASHNEXT_REUSE_KV_HOST_POOL_BYTES", "1G")];
-        let running = on_file(&files, &["--config", "c.yaml", "--qwen38-reuse-kv-host-pool-bytes", "5G"], env);
-        let shadowed = |body: Value| shadowed_at_restart(&read_patch(&body).unwrap(), &running);
-        assert_eq!(
-            shadowed(json!({ "reuse": { "kv_host_pool_bytes": "3G" } })),
-            [
-                "reuse.kv_host_pool_bytes (set by --qwen38-reuse-kv-host-pool-bytes)",
-                "reuse.kv_host_pool_bytes (set by IGNIS_QWEN38FLASHNEXT_REUSE_KV_HOST_POOL_BYTES)"
-            ]
-        );
-        assert_eq!(
-            shadowed(json!({ "reuse": { "qwen38flashnext": { "kv_host_pool_bytes": null } } })),
-            ["reuse.qwen38flashnext.kv_host_pool_bytes (set by IGNIS_QWEN38FLASHNEXT_REUSE_KV_HOST_POOL_BYTES)"],
-            "the other family's flag is not this key's"
-        );
-        let general = on_file(&files, &["--config", "c.yaml", "--reuse-kv-host-pool-bytes", "6G", "--qwen38-reuse-kv-host-pool-bytes", "5G"], &[]);
-        assert_eq!(
-            shadowed_at_restart(&read_patch(&json!({ "reuse": { "kv_host_pool_bytes": "3G" } })).unwrap(), &general),
-            ["reuse.kv_host_pool_bytes (set by --reuse-kv-host-pool-bytes)", "reuse.kv_host_pool_bytes (set by --qwen38-reuse-kv-host-pool-bytes)"],
-            "the general flag once, for the shared value and every family without its own"
-        );
-        assert!(shadowed(json!({ "reuse": { "prompt": false } })).is_empty(), "nothing sets it");
     }
-}

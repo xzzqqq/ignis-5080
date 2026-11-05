@@ -138,13 +138,13 @@ async fn the_catalog_lists_every_entry_then_every_known_model_with_its_state_on_
     assert_eq!(
         ids,
         [
-            "qwen3.8-27b", "qwen3.8-27b-abliterated", "qwen3.8-flash-next", "ignis-image-2.1-turbo", "qwen3.8-27b-16g", "qwen3.8-27b-abliterated-16g", "qwen3-asr-1.7b", "qwen3-asr-1.7b-q8", "qwen3-asr-0.6b", "nemotron-3-diarization", // the built-in catalog, then the operator's
+            "qwen3.8-27b-16g", // the built-in catalog, then the operator's
             "acme-full", "acme-part", "acme-none",
             "mock-a", "mock-gone", "mock-k", // the known models that are not entries, the start model among them
         ]
     );
 
-    let built_in = row(&rows, "qwen3.8-27b");
+    let built_in = row(&rows, "qwen3.8-27b-16g");
     assert_eq!((built_in["source"].clone(), built_in["on_disk"].clone()), (json!("built-in"), json!("absent")));
     assert!(built_in["bytes"].as_u64().unwrap() > 1 << 30, "an entry's total, even absent: {built_in}");
     assert_eq!((built_in["loaded"].clone(), built_in["switchable"].clone()), (json!(false), json!(false)), "nothing on disk to switch to");
@@ -261,12 +261,7 @@ async fn every_row_says_its_kind_the_headers_when_the_file_is_there_else_the_cat
     assert_eq!(status, StatusCode::OK, "{rows}");
     for (id, kind, why) in [
         // The built-in catalog, nothing on disk.
-        ("qwen3.8-27b", Some("text"), "a family's own id"),
         ("qwen3.8-27b-16g", Some("text"), "its alias, a family's own id"),
-        ("qwen3.8-27b-abliterated", Some("text"), "the family it states"),
-        ("ignis-image-2.1-turbo", Some("image"), "a family's own id"),
-        ("qwen3-asr-1.7b", Some("speech"), "the kind it states"),
-        ("nemotron-3-diarization", Some("diarizer"), "the kind it states"),
         // The operator's.
         ("acme-free", None, "a free id, no family, no file: nothing tells"),
         ("acme-header", Some("image"), "the header tells where the catalog does not"),

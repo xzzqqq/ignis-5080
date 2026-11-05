@@ -5,7 +5,7 @@
 - Observed: 2026-10-15
 - Last verified: 2026-10-15
 - Scope: kernel / the 27B's media encode (`ignis_media_encode`, `kernel/src/vision_encode.cu`) and the vendored Q4/Q5/Q6 row-split dispatch at the tower's shapes, RTX 5090 (sm_120)
-- Related: GitHub #324 item 5, [The image leaf on the 5090](2026-10-14-image-model-on-the-5090.md), ADR 0031, ADR 0037
+- Related: GitHub #324 item 5, [The image leaf on the 5090](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-14-image-model-on-the-5090.md), ADR 0031, ADR 0037
 - Superseded by: none
 
 ## Question

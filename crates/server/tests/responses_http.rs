@@ -20,7 +20,7 @@ use serde_json::{json, Value as JsonValue};
 use tower::ServiceExt;
 
 use ignis_server::deadline::TimeoutReply;
-use ignis_server::images::job::base64;
+use ignis_server::responses::base64;
 use ignis_server::loop_guard::{repair, LoopGuardMode, LoopGuardParams, TAG_PREFIX};
 use responses::{server, sse_events, Script, MODEL};
 

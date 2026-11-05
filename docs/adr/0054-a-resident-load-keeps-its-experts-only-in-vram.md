@@ -3,7 +3,7 @@
 ## Status
 
 Accepted (2026-10-18, owner decision). Proposed the same day, after the measurement in
-[`docs/findings/2026-10-18-flash-next-experts-device-only.md`](../findings/2026-10-18-flash-next-experts-device-only.md);
+[`docs/findings/2026-10-18-flash-next-experts-device-only.md`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-18-flash-next-experts-device-only.md);
 the owner asked for it ("se entrano tutti gli esperti in VRAM li togliamo dalla RAM e liberiamo
 quello spazio"). Amends [ADR 0045](0045-the-kv-pool-follows-residency-and-state-goes-down-to-disk.md)'s
 resident branch; its offloaded branch, and spec flash-next/03's residency on it, stand.

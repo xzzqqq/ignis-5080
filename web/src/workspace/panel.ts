@@ -1,4 +1,4 @@
-import { formatBytes } from "../decide/evidenceFile.ts";
+import { formatBytes } from "../ui/bytes.ts";
 import { readUpload } from "./attach.ts";
 import { type Author, cleanName, KIND_LABEL, kindOf, latest, present, USER, type Version, type WorkspaceFile } from "./files.ts";
 import type { ChatBinding, FileOutcome, Workspaces, WriteOutcome } from "./workspaces.ts";

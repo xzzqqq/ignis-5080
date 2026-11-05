@@ -11,6 +11,11 @@ low-latency local inference service for daily personal chat and coding agents.
 The performance goal is decode approaching SOL (Speed of Light). The fork
 starts from the unmodified upstream implementation.
 
+Optimize for low concurrency and latency. Support text, reasoning, tool calls
+and Vision on one RTX 5080 16 GB, using CPU, host RAM, PCIe and SSD as needed.
+See [architecture](docs/architecture.md) and ADR 0079 for component responsibilities
+and model/platform support.
+
 ## Development mode
 
 The Laptop handles editing, CPU checks, commits and result analysis. CUDA
@@ -25,10 +30,9 @@ connection config is the repository-root `.remote.json`, which is not committed;
 credential-free template is [.remote.example.json](.remote.example.json).
 SSH connection details are managed in `~/.ssh/config`.
 
-Use the Python entry point directly; macOS Makefile support is not required.
-Cargo currently pins a Windows target, so local CPU checks must pass an
-explicit host `--target`. Commands and current Linux target availability are
-in [Remote development](docs/user/contributing/remote-dev.md).
+Use the Python entry point for remote work and Cargo for local CPU checks.
+Cargo defaults to the host target. Commands and Linux target availability are
+listed in [Remote development](docs/user/contributing/remote-dev.md).
 
 ## Agent skills
 
@@ -72,7 +76,7 @@ change done: `docs/agents/testing.md`.
 
 Before launching **anything** on the GPU (the profile, a bench run, a gate
 leg, one `--ignored` test): check with `make gpu-status` that nothing else
-holds the card, from any worktree or agent session. The 5090 fits one run at
+holds the card, from any worktree or agent session. The 5080 fits one run at
 a time, and the loser dies with no diagnostic.
 
 ### User documentation
@@ -88,11 +92,6 @@ foreground target holds the shell until Ctrl+C. `start` and `run` launch only
 the last build and refuse a stale one, naming the changed files; `make build`
 is the fix. Before changing the Makefile: ADR 0027.
 
-Rebuilding a running server on Windows: `make stop`, then `make build`, then
-`make start`, each only once the last succeeded, since Windows locks a running
-exe and `make build` fails on it, as `make redeploy` does. Scripting
-`make start`: redirect it to a file from bash (`> file 2>&1`), since the
-server inherits a pipe (`| Tee-Object`, `| tail`) and holds it open for as
-long as it runs. Restarting a server whose log holds an incident: copy
-`ignis-server.log` and its `.err` out of `.scratch/serve/` first, since
-`make start` rewrites both.
+Redirect `make start` output to a file when scripting: a server can inherit
+an open pipe. Before restarting after an incident, copy the logs out of
+`.scratch/serve/`, since a new start rewrites them.

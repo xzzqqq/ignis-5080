@@ -6,9 +6,9 @@
 - Last verified: 2026-10-18
 - Scope: core / Flash-Next expert residency, the CPU policy model with experts pinned in VRAM outside the LRU; the host plan's pinned expert pool on the rtx5090 profile
 - Related: [GitHub #329](https://github.com/gpillon/ignis/issues/329) (item 12),
-  [spec flash-next/03](../specs/flash-next/03-expert-residency.md),
+  [spec flash-next/03](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/flash-next/03-expert-residency.md),
   [Expert residency replayed on the study's routing](2026-10-05-expert-residency-replayed-on-the-study-s-routing.md),
-  [Flash-Next decode headroom](2026-10-08-flash-next-decode-headroom.md),
+  [Flash-Next decode headroom](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-08-flash-next-decode-headroom.md),
   [ADR 0030](../adr/0030-device-memory-reserved-at-load.md)
 - Superseded by: none
 
@@ -147,7 +147,7 @@ bytes copied on a miss.
 ### 3. Decode cost on this host
 
 The measured miss cost comes from
-[Flash-Next decode headroom](2026-10-08-flash-next-decode-headroom.md) §1
+[Flash-Next decode headroom](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-08-flash-next-decode-headroom.md) §1
 and §4, served at a 15.6 GB cache. The demand copies run at 12.0 GB/s (one
 lane) and 11.9 GB/s (three), all on the critical path:
 

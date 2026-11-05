@@ -21,7 +21,6 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
 
-use ignis_artifact::flash_next::{self, FlashNextGeometry, FlashNextPlan};
 use ignis_artifact::{
     model_scope_27b_of, DeviceEncoding, DraftModule, InventoryEntry, MaterializationPlan, MaterializedArtifact,
     ModelScope, NumericFormat, ObjectHandle, Reader, StorageLayout,
@@ -32,7 +31,7 @@ use crate::exception_weights::ExceptionWeights;
 use crate::kv_format::KvFormat;
 use crate::prefill_attention::PrefillAttention;
 use crate::rope_scaling::RopeScaling;
-use crate::speculation::{FlashNextSpeculation, ProposalHead, SpeculativeBackend, Speculation};
+use crate::speculation::{ProposalHead, SpeculativeBackend, Speculation};
 use crate::vision::Vision;
 
 pub(crate) mod ffi {
@@ -867,236 +866,6 @@ pub fn plan_qwen38_27b_reservations(
 }
 
 // ---------------------------------------------------------------------------
-// Flash-Next (spec flash-next/04, GitHub #302, ADR 0043)
-// ---------------------------------------------------------------------------
-
-/// The bound-tensor descriptors of a Flash-Next artifact's device tensors
-/// (every non-expert tensor of `ignis_artifact::flash_next`'s inventory whose
-/// role is the device), at the addresses `placement` gives, with the names
-/// the leaf's binder (`kernel/src/flash_next/bind.cu`) reads. The experts are
-/// residency's and the n-gram objects the host's: none of them crosses.
-fn build_flash_next_bound_tensors(
-    fn_plan: &FlashNextPlan,
-    geometry: &FlashNextGeometry,
-    placement: impl Fn(ObjectHandle) -> Result<(u64, *const c_void), String>,
-) -> Result<(Vec<CString>, Vec<ffi::IgnisBoundTensor>), String> {
-    let mut entries = flash_next::global_entries(geometry);
-    for layer in 0..geometry.layers {
-        entries.extend(flash_next::layer_entries(geometry, layer));
-    }
-    bound_tensors(&entries, &fn_plan.handles, placement)
-}
-
-/// The descriptors of `entries`' device tensors, each placed through `placement`.
-fn bound_tensors(
-    entries: &[flash_next::Entry],
-    handles: &std::collections::BTreeMap<String, ObjectHandle>,
-    placement: impl Fn(ObjectHandle) -> Result<(u64, *const c_void), String>,
-) -> Result<(Vec<CString>, Vec<ffi::IgnisBoundTensor>), String> {
-    let mut names = Vec::with_capacity(entries.len());
-    let mut tensors = Vec::with_capacity(entries.len());
-    for entry in entries.iter().filter(|entry| entry.role == flash_next::Role::Device) {
-        let handle = *handles.get(&entry.name).ok_or_else(|| format!("{}: not bound by the Flash-Next plan", entry.name))?;
-        let flash_next::ShapeRule::Exact(dims) = &entry.shape else {
-            return Err(format!("{}: a device tensor has an exact shape", entry.name));
-        };
-        if dims.len() > 4 {
-            return Err(format!("{}: rank {} exceeds the ABI's rank-4 shape", entry.name, dims.len()));
-        }
-        let mut shape = [1i32; 4];
-        for (dst, &dim) in shape.iter_mut().zip(dims.iter()) {
-            *dst = i32::try_from(dim).map_err(|_| format!("{}: dimension {dim} overflows i32", entry.name))?;
-        }
-        let (bytes, qdata) = placement(handle)?;
-        let name = CString::new(entry.name.as_str()).map_err(|e| e.to_string())?;
-        tensors.push(ffi::IgnisBoundTensor {
-            name: name.as_ptr(),
-            qtype: qtype_code(entry.format),
-            layout: layout_code(entry.layout),
-            qdata,
-            qhigh: std::ptr::null(),
-            scales: std::ptr::null(),
-            bytes,
-            shape,
-            padded_shape: shape,
-            ndim: dims.len() as u32,
-            weight_scale_divisor: 0.0,
-            input_scale_divisor: 0.0,
-        });
-        names.push(name);
-    }
-    Ok((names, tensors))
-}
-
-/// The MTP head's 29 non-expert descriptors (flash-next-layout.md §13.3), each placed
-/// through `placement`: what an MTP load hands the leaf beside the trunk's.
-pub fn mtp_bound_tensors(
-    plan: &ignis_artifact::flash_next::mtp::MtpPlan,
-    geometry: &FlashNextGeometry,
-    placement: impl Fn(ObjectHandle) -> Result<(u64, *const c_void), String>,
-) -> Result<(Vec<CString>, Vec<ffi::IgnisBoundTensor>), String> {
-    bound_tensors(&flash_next::mtp_entries(geometry), &plan.handles, placement)
-}
-
-/// What a Flash-Next plan and its load are both asked under: one value of
-/// each, so the two cannot disagree (ADR 0059). Built from the engine's
-/// options ([`crate::flash_next::EngineOptions::load_shape`]).
-#[derive(Debug, Clone, Copy)]
-pub struct FlashNextLoadShape {
-    pub prefill_chunk_tokens: u32,
-    pub max_context_tokens: u32,
-    pub kv_format: KvFormat,
-    pub decode_lanes: u32,
-    /// Speculative decoding (spec flash-next/07); `None`: today's rounds only.
-    pub speculation: Option<FlashNextSpeculation>,
-    /// The text rotary table (ADR 0059).
-    pub rope_scaling: RopeScaling,
-}
-
-/// A Flash-Next load's options: its decode lanes, its borrowed residency
-/// (null when only planning), its speculation (spec flash-next/07) and its
-/// rotary table (ADR 0059); nothing else of the 27B's.
-fn flash_next_options(
-    decode_lanes: u32,
-    residency: *mut c_void,
-    speculation: Option<FlashNextSpeculation>,
-    rope_scaling: RopeScaling,
-) -> ffi::IgnisModelLoadOptions {
-    ffi::IgnisModelLoadOptions {
-        size: std::mem::size_of::<ffi::IgnisModelLoadOptions>() as u32,
-        speculative_backend: speculation.map_or(0, |s| s.backend().abi_code()),
-        draft_tokens: speculation.map_or(0, |s| s.draft_tokens()),
-        vision_max_tokens: 0,
-        vision_embedding_pool_bytes: 0,
-        // As the 27B's `load_options` crosses them: `none` is the factor 0
-        // the leaf reads as its linear table.
-        rope_scaling_factor: rope_scaling.factor(),
-        rope_scaling_temperature: rope_scaling.temperature(),
-        rope_scaling_beta_fast: rope_scaling.beta_fast(),
-        rope_scaling_beta_slow: rope_scaling.beta_slow(),
-        vision_item_max_tokens: 0,
-        attention_text_max_keys: 0,
-        decode_lanes,
-        residency,
-        draft_row_budget: speculation.map_or(0, |s| s.row_budget()),
-        mtp_expert_slots: std::ptr::null(),
-        prefill_attention: PrefillAttention::default().abi_code(),
-        vision_residency: 0,
-    }
-}
-
-/// Load a Flash-Next artifact whose non-expert tensors `artifact` holds on
-/// the device (`fn_plan` and `geometry` as
-/// [`ignis_artifact::flash_next::bind`] took them), under `shape` (its
-/// decode lanes, its speculation and its rotary table among them), with the
-/// expert residency it borrows. The returned model must be dropped before
-/// `residency` and `artifact` (GitHub #302).
-pub fn load_flash_next(
-    fn_plan: &FlashNextPlan,
-    geometry: &FlashNextGeometry,
-    artifact: &MaterializedArtifact,
-    shape: FlashNextLoadShape,
-    residency: &crate::residency::device::DeviceResidency,
-    mtp: Option<&crate::flash_next_mtp::MtpHead>,
-) -> Result<Model, String> {
-    let FlashNextLoadShape { prefill_chunk_tokens, max_context_tokens, kv_format, decode_lanes, speculation, rope_scaling } =
-        shape;
-    validate_prefill_config(prefill_chunk_tokens, max_context_tokens)?;
-    let placement = |handle: ObjectHandle| {
-        let view = artifact.device_view(handle).map_err(|e| e.to_string())?;
-        Ok((view.bytes, view.base as *const c_void))
-    };
-    let (_names, tensors) = build_flash_next_bound_tensors(fn_plan, geometry, placement)?;
-    let topology = ModelConfig::flash_next_from(geometry).topology_abi();
-    let mut options = flash_next_options(decode_lanes, residency.as_raw(), speculation, rope_scaling);
-    // Spec flash-next/07: the MTP head's tensors beside the trunk's, and its expert slots.
-    let mut tensors = tensors;
-    if let Some(head) = mtp {
-        tensors.extend_from_slice(head.bound_tensors());
-        options.mtp_expert_slots = head.slots().as_ptr();
-    }
-    let mut handle: *mut ffi::IgnisModel = std::ptr::null_mut();
-    let rc = unsafe {
-        ffi::ignis_model_load(
-            tensors.as_ptr(),
-            tensors.len() as u64,
-            topology.raw(),
-            prefill_chunk_tokens,
-            max_context_tokens,
-            kv_format.abi_code(),
-            &options,
-            &mut handle,
-        )
-    };
-    if rc != 0 || handle.is_null() {
-        let message = unsafe { CStr::from_ptr(ffi::ignis_model_last_error()) };
-        return Err(message.to_string_lossy().into_owned());
-    }
-    Ok(Model { handle })
-}
-
-/// What a load of a Flash-Next artifact under `shape` would reserve beside
-/// the weights, asked before the weights are on the device: `fn_plan` is
-/// what [`ignis_artifact::flash_next::bind`] returned for `reader` and
-/// `geometry`. The topology is the geometry's
-/// ([`ModelConfig::flash_next_from`]). The leaf binds the descriptors
-/// first and then checks the geometry its program runs, so a reduced
-/// fixture's refusal still says its descriptors bind.
-pub fn plan_flash_next_reservations(
-    fn_plan: &FlashNextPlan,
-    geometry: &FlashNextGeometry,
-    shape: FlashNextLoadShape,
-    mtp: Option<&ignis_artifact::flash_next::mtp::MtpPlan>,
-) -> Result<IgnisModelReservations, String> {
-    let FlashNextLoadShape { prefill_chunk_tokens, max_context_tokens, kv_format, decode_lanes, speculation, rope_scaling } =
-        shape;
-    validate_prefill_config(prefill_chunk_tokens, max_context_tokens)?;
-    let placement = |handle: ObjectHandle| {
-        fn_plan
-            .plan
-            .device_objects
-            .iter()
-            .find(|placed| placed.handle == handle)
-            .map(|placed| (placed.bytes, std::ptr::null()))
-            .ok_or_else(|| "a Flash-Next tensor is not a device object of the plan".to_string())
-    };
-    let (_names, mut tensors) = build_flash_next_bound_tensors(fn_plan, geometry, placement)?;
-    // Spec flash-next/07: the MTP head's descriptors, placed nowhere yet (a plan reads no data).
-    let (_head_names, head) = match mtp {
-        Some(plan) => mtp_bound_tensors(plan, geometry, |handle| {
-            plan.plan
-                .device_objects
-                .iter()
-                .find(|placed| placed.handle == handle)
-                .map(|placed| (placed.bytes, std::ptr::null()))
-                .ok_or_else(|| "an MTP tensor is not a device object of its plan".to_string())
-        })?,
-        None => (Vec::new(), Vec::new()),
-    };
-    tensors.extend(head);
-    let topology = ModelConfig::flash_next_from(geometry).topology_abi();
-    let options = flash_next_options(decode_lanes, std::ptr::null_mut(), speculation, rope_scaling);
-    let mut reservations = IgnisModelReservations::default();
-    let rc = unsafe {
-        ffi::ignis_model_plan_reservations(
-            tensors.as_ptr(),
-            tensors.len() as u64,
-            topology.raw(),
-            prefill_chunk_tokens,
-            max_context_tokens,
-            kv_format.abi_code(),
-            &options,
-            &mut reservations,
-        )
-    };
-    if rc != 0 {
-        let message = unsafe { CStr::from_ptr(ffi::ignis_model_last_error()) };
-        return Err(message.to_string_lossy().into_owned());
-    }
-    Ok(reservations)
-}
-
-// ---------------------------------------------------------------------------
 // Tests (CPU-only: no CUDA call in this file's mapping / host-read helpers,
 // so these run without a GPU -- only `--features cuda` gates compiling them
 // at all, the same as the rest of this module).
@@ -1106,35 +875,6 @@ pub fn plan_flash_next_reservations(
 mod tests {
     use super::*;
     use crate::vision::VisionResidency;
-
-    /// GitHub #302: the descriptors this loader builds for the artifact
-    /// crate's Flash-Next fixture artifact (packed from its converter work
-    /// tree) and the leaf's binder agree: every one binds. The fixture is a
-    /// small geometry (hidden 256), which the program's specialized ops do
-    /// not run, so the leaf refuses it -- after binding, and saying so. ADR
-    /// 0059: a plan under a YaRN table reaches the same refusal, so the leaf
-    /// takes the table it is handed.
-    #[test]
-    fn a_flash_next_fixture_artifacts_descriptors_bind_in_the_leaf() {
-        let tree = flash_next::fixture::WorkTree::new("model-load-bind").expect("work tree");
-        tree.write_all().expect("write the work tree");
-        ignis_artifact::packer::pack(&tree.pack_options(), &mut |_| {}).expect("pack");
-        let reader = Reader::open(&tree.artifact_path()).expect("open the fixture artifact");
-        let fn_plan = flash_next::bind(&reader, &tree.geometry).expect("bind the fixture artifact");
-        for scaling in [RopeScaling::NONE, RopeScaling::yarn(4.0).unwrap()] {
-            let shape = FlashNextLoadShape {
-                prefill_chunk_tokens: 128,
-                max_context_tokens: 1024,
-                kv_format: KvFormat::HqE8_2b,
-                decode_lanes: 3,
-                speculation: None,
-                rope_scaling: scaling,
-            };
-            let err = plan_flash_next_reservations(&fn_plan, &tree.geometry, shape, None)
-                .expect_err("the fixture's geometry is not one the program runs");
-            assert!(err.contains("does not run this geometry (its weights bind)"), "{scaling}: {err}");
-        }
-    }
 
     /// `ffi::IgnisMoeSlot` mirrors `struct ignis_moe_slot` by hand
     /// (`kernel/include/ignis_moe.h`: `const void *record; uint32_t k2;
@@ -1389,24 +1129,6 @@ mod tests {
         assert_eq!(options.rope_scaling_beta_slow, 2.0);
     }
 
-    /// ADR 0059: a Flash-Next load crosses its rotary table as the 27B's
-    /// does -- a YaRN table's four scalars, and `none` as the factor 0 the
-    /// leaf reads as its linear table, beside `none`'s own ramp -- so they
-    /// are the bits KV-disk's identity records for the load.
-    #[test]
-    fn a_flash_next_load_crosses_its_rope_scaling() {
-        let scalars = |o: &ffi::IgnisModelLoadOptions| {
-            [o.rope_scaling_factor, o.rope_scaling_temperature, o.rope_scaling_beta_fast, o.rope_scaling_beta_slow]
-        };
-        let scaling = RopeScaling::parse("yarn:2.25,t=0.25,bf=16,bs=2").unwrap();
-        let options = flash_next_options(3, std::ptr::null_mut(), None, scaling);
-        assert_eq!(scalars(&options), [2.25, 0.25, 16.0, 2.0]);
-        assert_eq!(scalars(&options), scalars(&load_options(None, None, scaling, 0, PrefillAttention::Fp8, LANES).expect("options")), "the 27B's");
-        let none = flash_next_options(3, std::ptr::null_mut(), None, RopeScaling::NONE);
-        assert_eq!(scalars(&none), [0.0, 0.1, 32.0, 1.0], "the factor 0 is the leaf's linear table");
-        assert_eq!((none.decode_lanes, none.speculative_backend), (3, 0));
-    }
-
     #[test]
     fn a_vision_item_bound_crosses_beside_the_envelope() {
         let bounded = Vision::new(32_768).unwrap().with_item_max_tokens(16_384);
@@ -1430,8 +1152,6 @@ mod tests {
         let with_vision = load_options(None, Some(Vision::new(8192).unwrap()), RopeScaling::NONE, 0, PrefillAttention::Fp8, LANES)
             .expect("options");
         assert_eq!(with_vision.prefill_attention, 0);
-        let flash = flash_next_options(3, std::ptr::null_mut(), None, RopeScaling::NONE);
-        assert_eq!(flash.prefill_attention, 0, "Flash-Next's attention is QSA");
     }
 
     /// GitHub #336: fewer lanes than the leaf's eight cross the options

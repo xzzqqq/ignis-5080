@@ -341,7 +341,6 @@ async fn while_a_requests_switch_runs_everything_else_is_refused_and_it_is_held_
         ("/v1/chat/completions", chat("mock-a")),
         ("/v1/chat/completions", chat("mock-b")),
         ("/v1/responses", response_body("mock-b")),
-        ("/v1/decide", decision("mock-a")),
     ] {
         let (status, headers, refused) = send(&app, Method::POST, uri, Some(body)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: {refused}");
@@ -441,31 +440,6 @@ async fn a_continuation_continues_its_own_stream_after_responses_on_other_stream
     }
 }
 
-/// `/v1/decide` pulls a switch too, ahead of the refusal a Flash-Next load
-/// gives every decision: naming the 27B there moves the server back to the
-/// model that serves it.
-#[tokio::test]
-async fn a_decision_naming_a_known_model_switches_first_even_from_a_load_that_serves_none() {
-    let loader = MockLoader::new();
-    let start = loader.model("mock-fn").with_family(ignis_core::compute::ModelFamily::FlashNext);
-    let known = ["mock-fn", "mock-a"].iter().map(|id| (id.to_string(), switch_support::source(id).artifact)).collect();
-    let server = Server::from_active(start)
-        .with_switcher(Switcher::new(Arc::clone(&loader) as _, PATIENT).with_known_models(known));
-    let app = server.app();
-    let (status, _, refused) = send(&app, Method::POST, "/v1/decide", Some(decision("mock-fn"))).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "the loaded Flash-Next serves no decision: {refused}");
-    assert_eq!(refused["error"]["code"], "model_unsupported");
-
-    let (status, _, answered) = send(&app, Method::POST, "/v1/decide", Some(decision("mock-a@interactive"))).await;
-    assert_eq!(server.active().model_id(), "mock-a", "{answered}");
-    assert_eq!(loader.loads(), ["mock-a"]);
-    // The mock template has no answer labels, so the 27B-family mock refuses
-    // the question itself — past the model checks, which is what this shows.
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answered}");
-    assert_ne!(answered["error"]["code"], "model_not_found", "{answered}");
-    assert_ne!(answered["error"]["code"], "model_unsupported", "{answered}");
-}
-
 /// AC 19: a model nobody listed, or any other model with implicit switching
 /// off, is refused by name exactly as before — and nothing loads.
 #[tokio::test]
@@ -504,10 +478,7 @@ async fn a_request_whose_switch_does_not_land_is_refused_with_its_reason() {
     let (_, _, models) = send(&app, Method::GET, "/v1/models", None).await;
     assert_eq!((models["status"].as_str(), models["data"][0]["id"].as_str()), (Some("serving"), Some("mock-a")));
 
-    let (status, _, refused) = send(&app, Method::POST, "/v1/decide", Some(decision("mock-broken"))).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "decide refuses in its own shape: {refused}");
-    assert_eq!(refused["error"]["code"], "model_switch_failed");
-    assert!(refused["error"]["message"].as_str().unwrap().contains("simulated kernel load error"), "{refused}");
+
 }
 
 // ── GET /ready across a failed switch (GitHub #327) ──────────────────────

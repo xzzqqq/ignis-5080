@@ -6,7 +6,7 @@ is built here), 0024 (the blob, now moved a window at a time), 0023 (the
 eviction priority, one tier further down, and a page shortage that takes what
 is not decoding first), 0017 (the metric contract), 0022 (pages derived from
 the format). Spec core-05 (the reservation rule it amends). Evidence:
-[Flash-Next on the 5090](../../findings/2026-10-06-flash-next-on-the-5090.md)
+[Flash-Next on the 5090](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-06-flash-next-on-the-5090.md)
 (its lanes-at-262K update), the F: disk bench (`.scratch/disk-bench/RESULTS.md`,
 untracked), GitHub #205.
 

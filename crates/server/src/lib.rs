@@ -30,20 +30,14 @@ pub mod catalog_http;
 pub mod config;
 pub mod config_http;
 pub mod deadline;
-pub mod decide;
 pub mod decoder;
 pub mod download;
 pub mod download_http;
 pub mod engine;
 mod generation_timing;
-pub mod expose;
 pub mod idle;
-pub mod image_encoder_input;
-pub mod image_prompt;
-pub mod images;
 pub mod instruction;
 pub mod load;
-pub mod locate;
 pub mod loop_guard;
 pub mod loader;
 pub mod media;
@@ -59,7 +53,6 @@ pub mod reuse;
 pub mod runtime;
 pub mod scalar;
 pub mod shutdown;
-pub mod speech;
 pub mod starting;
 pub mod stop;
 pub mod telemetry;
@@ -74,7 +67,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use axum::Router;
 
-pub use crate::active::{ActiveModel, InFlight, ModelSource, ModelStatus, Runner, StatusCell};
+pub use crate::active::{ActiveModel, InFlight, ModelSource, ModelStatus, StatusCell};
 use crate::engine::Engine;
 use crate::template::TemplateProvider;
 use crate::thinking::ReasoningEffort;
@@ -154,14 +147,6 @@ pub struct Server {
     /// routes `501`: a server built in a test without one has no config to
     /// show or change.
     pub config: Option<std::sync::Arc<config_http::ConfigState>>,
-    /// The edits decoding their condition images now, at most
-    /// `image.max_condition_decodes` at once ([`images::Decodes`]).
-    pub image_decodes: std::sync::Arc<images::Decodes>,
-    /// The speech model beside the active one (ADR 0067, spec speech/02):
-    /// its availability, its executor and the compute worker behind
-    /// `POST /v1/audio/transcriptions`. Shared by every clone, like the active
-    /// model; a model switch does not touch it.
-    pub speech: std::sync::Arc<speech::Speech>,
     /// What `POST /v1/models/download` fetches with, and the download it
     /// runs (GitHub #376): shared by every clone, like the switcher. `None`
     /// answers the route `501`: a server built in a test without one has no
@@ -208,20 +193,7 @@ pub struct Live {
     pub socket_idle_close: Duration,
     /// The loop guard (`--model-loop-guard`, ADR 0052): read per request.
     pub loop_guard: loop_guard::LoopGuardParams,
-    /// The image model's serving (`image.*`, spec image-model/05): its
-    /// queue, what one request may ask for, the condition budget, prompt
-    /// enhancement — each read per request, so a live change needs no
-    /// reload.
-    pub image: config::schema::ImageGroup,
-    /// The speech model's serving (`speech.*`, spec speech/02): which model,
-    /// its compat names, the clip and queue limits — each read per request,
-    /// so a live change needs no reload.
-    pub speech: config::schema::SpeechGroup,
-    /// The diarizer (`diarizer.*`, spec speech/08): which model, the ghost
-    /// rule, the geometries and the speaker cache's constants, read when a
-    /// Realtime session's speakers start.
-    pub diarizer: config::schema::DiarizerGroup,
-}
+    }
 
 impl Default for Live {
     /// What a server built without a config runs with: the deadlines'
@@ -243,9 +215,6 @@ impl Default for Live {
             idle_unload: Duration::ZERO,
             socket_idle_close: Duration::ZERO,
             loop_guard: loop_guard::LoopGuardParams { mode: loop_guard::LoopGuardMode::Off, ..Default::default() },
-            image: config::schema::ImageGroup::default(),
-            speech: config::schema::SpeechGroup::default(),
-            diarizer: config::schema::DiarizerGroup::default(),
         }
     }
 }
@@ -264,9 +233,6 @@ impl Live {
             idle_unload: Duration::from_secs(u64::from(config.idle_unload_secs)),
             socket_idle_close: Duration::from_secs(u64::from(config.socket_idle_close_secs)),
             loop_guard: config.loop_guard.clone(),
-            image: config.settings().image.clone(),
-            speech: config.settings().speech.clone(),
-            diarizer: config.settings().diarizer.clone(),
         }
     }
 }
@@ -360,8 +326,6 @@ impl Server {
             usage: std::sync::Arc::default(),
             switcher: None,
             config: None,
-            image_decodes: std::sync::Arc::default(),
-            speech: std::sync::Arc::default(),
             downloads: None,
         }
     }
@@ -376,8 +340,6 @@ impl Server {
     pub fn update_live(&self, edit: impl FnOnce(&mut Live)) {
         let mut live = Live::clone(&self.live());
         edit(&mut live);
-        self.speech.live_changed(&live.speech);
-        self.speech.diarizer_changed(&live.diarizer);
         self.live.store(std::sync::Arc::new(live));
     }
 
@@ -389,8 +351,6 @@ impl Server {
     pub fn apply_config(&self, config: &config::Config) {
         let live = Live::of(config);
         // The speech worker's idle clock reads `speech.idle_unload` live.
-        self.speech.live_changed(&live.speech);
-        self.speech.diarizer_changed(&live.diarizer);
         self.live.store(std::sync::Arc::new(live));
         if let Some(switcher) = &self.switcher {
             // The explicit switch by id (spec playground/05) names these
@@ -616,38 +576,6 @@ impl Server {
         self
     }
 
-    /// Serve transcriptions with `speech` (ADR 0067): `main` passes the slot
-    /// over its executor and the catalog; a server built without one has a
-    /// speech model that is unavailable, saying so.
-    pub fn with_speech(mut self, speech: std::sync::Arc<speech::Speech>) -> Self {
-        speech.live_changed(&self.live().speech);
-        speech.diarizer_changed(&self.live().diarizer);
-        self.speech = speech;
-        self
-    }
-
-    /// Serve the speech model as `speech` says (`speech.*`, spec speech/02):
-    /// what `main` resolved at start, until a live change applies another.
-    pub fn with_speech_group(self, speech: config::schema::SpeechGroup) -> Self {
-        self.update_live(|live| live.speech = speech);
-        self
-    }
-
-    /// Diarize as `diarizer` says (`diarizer.*`, spec speech/08): what `main`
-    /// resolved at start, until a live change applies another.
-    pub fn with_diarizer_group(self, diarizer: config::schema::DiarizerGroup) -> Self {
-        self.update_live(|live| live.diarizer = diarizer);
-        self
-    }
-
-    /// Serve images as `image` says (`image.*`, spec image-model/05): what
-    /// `main` resolved at start, until a live change or a switch applies
-    /// another configuration.
-    pub fn with_image(self, image: config::schema::ImageGroup) -> Self {
-        self.update_live(|live| live.image = image);
-        self
-    }
-
     /// Serve the Playground from `assets` under `/ui/` (`main` passes
     /// [`playground::EMBEDDED`] when `--server-ui` is set; tests inject their own
     /// table, including the empty one that selects the fallback page).
@@ -668,7 +596,6 @@ impl Server {
             engine.install_metrics(std::sync::Arc::clone(&metrics));
         }
         self.responses.install_metrics(std::sync::Arc::clone(&metrics));
-        self.speech.attach_metrics(std::sync::Arc::clone(&metrics));
         self.metrics = Some(metrics);
         self
     }
@@ -748,11 +675,8 @@ impl Server {
     /// it): the plan's lines replace the previous load's, and a Flash-Next
     /// load's counter source — not a reservation; the telemetry consumer
     /// reads it at every tick (GitHub #301, #302) — goes to `model`'s engine.
-    fn install_reservations(&self, model: &ActiveModel, mut reserved: metrics::LoadReservations) {
+    fn install_reservations(&self, _model: &ActiveModel, reserved: metrics::LoadReservations) {
         if let Some(metrics) = &self.metrics {
-            if let Some(engine) = model.engine() {
-                engine.install_counter_source(reserved.flash_next.take());
-            }
             metrics.set_load_reservations(reserved);
         }
     }

@@ -157,4 +157,4 @@ at 1.0-1.1 tok/s while a 34K prompt prefilled.
   30.1-31.6 s. The longest gap was 3.2 s in all three. A 2048-token chunk
   instead halves the gap (1.7 s) but leaves the lanes at ~1 tok/s and costs
   28.3-28.7 s of TTFT even with nobody decoding
-  ([finding](../findings/2026-10-07-flash-next-prefill-chunk-and-decode-share.md)).
+  ([finding](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-07-flash-next-prefill-chunk-and-decode-share.md)).

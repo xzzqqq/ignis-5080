@@ -8,7 +8,7 @@
 - Related: [GitHub #329](https://github.com/gpillon/ignis/issues/329) (item 12),
   [ADR 0055](../adr/0055-a-pinned-hot-set-is-opt-in.md),
   [A partially exclusive expert pool on the 5090](2026-10-18-partial-exclusive-expert-pool.md),
-  [spec flash-next/03](../specs/flash-next/03-expert-residency.md)
+  [spec flash-next/03](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/flash-next/03-expert-residency.md)
 - Superseded by: none
 
 ## Question

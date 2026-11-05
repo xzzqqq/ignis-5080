@@ -26,7 +26,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ignis_core::image::ImageSize;
 
 use crate::instruction::InstructionPolicy;
 use crate::thinking::ReasoningEffort;
@@ -46,7 +45,7 @@ use source::{FileSource, Fit, Resolution, Sources};
 
 /// The default loaded-model id (the v1 specialization: Qwen 3.8-27B —
 /// `GLOSSARY.md`).
-pub const DEFAULT_MODEL: &str = "qwen3.8-27b";
+pub const DEFAULT_MODEL: &str = "qwen3.8-27b-16g";
 
 /// The default bind address: localhost, port 8000 (OpenAI convention).
 pub const DEFAULT_BIND: &str = "127.0.0.1:8000";
@@ -133,22 +132,6 @@ pub const MAX_SWITCH_DRAIN_TIMEOUT_SECS: u32 = 3600;
 /// between the turns of one conversation. 0 never unloads.
 pub const DEFAULT_MODEL_IDLE_UNLOAD_SECS: u32 = 300;
 
-/// `speech.model`'s default (spec speech/02, Q49): the 1.7B Q4_K_M catalog
-/// entry, the recommended artifact of its size.
-pub const DEFAULT_SPEECH_MODEL: &str = "auto";
-
-/// The catalog id `speech.model: auto` resolves to (spec speech/02, Q49).
-pub const AUTO_SPEECH_MODEL_ID: &str = "qwen3-asr-1.7b";
-
-/// `diarizer.model`'s default (spec speech/08, Q118): the catalog's diarizer
-/// entry.
-pub const DEFAULT_DIARIZER_MODEL: &str = "auto";
-
-/// `speech.compat_names`' default (Q24): the names OpenAI clients send for
-/// a transcription, which the speech model answers to.
-pub const DEFAULT_SPEECH_COMPAT_NAMES: [&str; 5] =
-    ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe", "gpt-transcribe", "gpt-live-transcribe"];
-
 /// The upper bound `--model-idle-unload` accepts: a week, a ceiling against a
 /// fat-fingered value as [`MAX_SWITCH_DRAIN_TIMEOUT_SECS`] is for its flag —
 /// whoever wants the model never unloaded says 0.
@@ -187,27 +170,6 @@ pub const MAX_REQUEST_TIMEOUT_SECS: u32 = 3600;
 /// this only catches a unit mistake.
 pub const MAX_VISION_EMBEDDING_POOL_MIB: u64 = 64 * 1024;
 
-/// The longest side `image.sizes` takes, in pixels: 1,024 latent cells, so a
-/// size is at most 2^20 cells, the most the image leaf's arena is sized for,
-/// and its RoPE block within the table's reach (2,048 cells a side). Far past
-/// any size the checkpoint was trained at (2752 at most); against a typo.
-pub const MAX_IMAGE_SIDE: u32 = 16_384;
-
-/// The sizes an image request may ask for unless the operator names others
-/// (`--image-sizes`, spec image-model/05 §Sizes): the checkpoint card's
-/// presets, then 1024x1024, diffusers' own default output, which OpenAI
-/// clients often send.
-pub const DEFAULT_IMAGE_SIZES: [ImageSize; 8] = [
-    ImageSize::new(2048, 2048),
-    ImageSize::new(2400, 1792),
-    ImageSize::new(1792, 2400),
-    ImageSize::new(2528, 1696),
-    ImageSize::new(1696, 2528),
-    ImageSize::new(2752, 1536),
-    ImageSize::new(1536, 2752),
-    ImageSize::new(1024, 1024),
-];
-
 // The prefill-chunk and per-sequence-context defaults live in
 // `ignis_runtime` (re-exported below), the same numbers `CudaLeafConfig`
 // falls back to — one source of truth for what `ignis-server` runs with
@@ -230,7 +192,6 @@ use ignis_core::speculation::FLASH_NEXT_DEFAULT_DRAFT_TOKENS;
 pub use ignis_core::{MAX_YARN_FACTOR, RopeScaling};
 pub use ignis_core::{DEFAULT_VISION_MAX_TOKENS, VISION_MAX_TOKENS_LIMIT, Vision, VisionResidency};
 
-pub use crate::expose::Expose;
 
 /// `--media-cache-mib`'s default (the reference's 1 GiB).
 pub const DEFAULT_MEDIA_CACHE_MIB: u32 = 1024;
@@ -329,14 +290,6 @@ pub struct Config {
     /// that named it. Loaded at start and by every `model` subcommand, not
     /// here: resolution reads no file but the config.
     pub download_catalog: Option<PathBuf>,
-    /// Flash-Next's n-gram hot-row cache between loads (`--ngram-persist` /
-    /// `--ngram-persist-path`): on, beside the model, unless the operator
-    /// says otherwise.
-    pub ngram_cache: ignis_core::ngram_cache::PersistenceOptions,
-    /// Flash-Next's n-gram hot-row budget (`--ngram-hot-bytes`, GitHub
-    /// #306): a size, or `auto` for what the host plan leaves. `None`: the
-    /// 1 GiB default. The 27B has no n-gram table and refuses it.
-    pub ngram_hot_bytes: Option<ignis_core::ngram_table::HotBudget>,
     /// KV-disk, Tier 2 (spec vram-budget/03): its budget in bytes
     /// (`--kv-disk-bytes`), a ceiling cut at start to the volume's free space
     /// above its 10 GiB margin. `None`: the model family's (4 GiB on
@@ -383,15 +336,6 @@ pub struct Config {
     /// [`DEFAULT_VRAM_HEADROOM_BYTES`]) or named by `--vram-budget-bytes`,
     /// with `--vram-allow-oversubscription` only beside the latter.
     pub vram: VramMode,
-    /// Start Flash-Next with an expert cache below its 12 GiB floor, with a
-    /// warning (`--vram-allow-expert-cache-below-floor`, ADR 0045). The 27B,
-    /// which has no expert cache, refuses it.
-    pub allow_expert_cache_below_floor: bool,
-    /// Flash-Next's pinned hot set, in bytes (`--vram-pinned-expert-bytes`,
-    /// GitHub #329 item 12): the calibration-hottest experts held in the
-    /// expert cache outside its LRU, with no copy in the host pool. 0 pins
-    /// none. The 27B, which has no expert cache, refuses it.
-    pub pinned_expert_bytes: u64,
     /// The KV-RAM host tier's budget, in bytes (P4-07, GitHub #125): pinned
     /// host memory for evicted (suspended) request snapshots. `0` disables
     /// the tier (admission refuses instead of evicting once the resident
@@ -443,10 +387,6 @@ pub struct Config {
     /// `--spec-backend off`: no speculation, the default one included
     /// (GitHub #307).
     pub speculation_off: bool,
-    /// Flash-Next's draft row budget (`--spec-draft-rows`, GitHub #307): a
-    /// round of w lanes verifies min(draft tokens, rows / w - 1) drafts per
-    /// lane. `None`: the default's 8 rows; up to 32 (GitHub #329).
-    pub draft_rows: Option<u32>,
     /// The decode lanes (`--spec-decode-lanes`, GitHub #306; the 27B's too
     /// since GitHub #336), 1..=[`ignis_core::N_DECODE_LANES`], family-scoped.
     /// `None`: the model's own default
@@ -528,10 +468,6 @@ pub struct Config {
     /// <key>` (`--server-api-key`). `None` (the default) keeps the API open,
     /// as it has always been on localhost.
     pub api_key: Option<ApiKeySetting>,
-    /// How the server is exposed beyond its bind address (`--server-expose`,
-    /// ADR 0028). `Some` always comes with an API key: without one,
-    /// resolution sets `api_key` to [`ApiKeySetting::Generate`].
-    pub expose: Option<Expose>,
     /// What this config was resolved from: the gathered sources, the
     /// settings resolved from them, and the family they were resolved for.
     /// [`Config::for_family`], [`fit_to_family`] and [`Config::with_patch`]
@@ -721,7 +657,7 @@ pub const PROFILE_ENV: &str = "IGNIS_PROFILE";
 /// for [`Config::for_family`].
 ///
 /// Not for a caller that has a card: it injects a fixed RTX 5090 total
-/// ([`profile::RTX_5090_TOTAL_BYTES`]) in place of reading one, so `auto`
+/// ([`profile::RTX_5080_TOTAL_BYTES`]) in place of reading one, so `auto`
 /// resolves `rtx5090` whatever the machine. Test helpers and callers with no
 /// card go through it; the binary goes through [`resolve_on`].
 pub fn resolve_with(
@@ -729,7 +665,7 @@ pub fn resolve_with(
     env: impl Fn(&str) -> Option<String>,
     files: &dyn file::Files,
 ) -> Result<ConfigOutcome, ConfigError> {
-    resolve_on(args, env, files, &|| profile::Card::Total(profile::RTX_5090_TOTAL_BYTES))
+    resolve_on(args, env, files, &|| profile::Card::Total(profile::RTX_5080_TOTAL_BYTES))
 }
 
 /// [`resolve_with`] on the card `card` reads (ADR 0063): what `--profile
@@ -1166,16 +1102,9 @@ fn derive(
             s.server.bind
         )));
     }
-    // An exposed API is never open: the operator's key if they named one,
-    // otherwise the same generated key `--server-api-key auto` gives.
-    let api_key = match (&s.server.expose, &s.server.api_key) {
-        (Some(_), None) => Some(ApiKeySetting::Generate),
-        (_, api_key) => api_key.clone(),
-    };
+    let api_key = s.server.api_key.clone();
 
     let download_catalog = derive_download(sources, &resolution, &spelled)?;
-    derive_speech(&resolution, &spelled)?;
-    derive_diarizer(&resolution, &spelled)?;
 
     let mut model = s.model.id.clone().unwrap_or_else(|| DEFAULT_MODEL.to_owned());
     let mut speculation = speculation;
@@ -1197,11 +1126,6 @@ fn derive(
         download_endpoint: s.download.endpoint.clone(),
         download_token: s.download.token.clone(),
         download_catalog,
-        ngram_cache: ignis_core::ngram_cache::PersistenceOptions {
-            enabled: s.ngram.persist,
-            location: s.ngram.persist_path.clone(),
-        },
-        ngram_hot_bytes: s.ngram.hot_bytes,
         kv_disk_bytes: s.kv_disk.bytes,
         kv_disk_location: s.kv_disk.path.clone(),
         enable_thinking: s.model.enable_thinking,
@@ -1233,8 +1157,6 @@ fn derive(
         kv_format: s.model.kv_format,
         kv_pool: s.vram.kv_pool_bytes,
         vram,
-        allow_expert_cache_below_floor: s.vram.allow_expert_cache_below_floor,
-        pinned_expert_bytes: s.vram.pinned_expert_bytes,
         host_pool_bytes: s.reuse.kv_host_pool_bytes,
         host_margin_bytes: s.model.host_margin_bytes,
         prompt_reuse,
@@ -1258,7 +1180,6 @@ fn derive(
         },
         speculation,
         speculation_off,
-        draft_rows: s.spec.draft_rows,
         decode_lanes: s.spec.decode_lanes,
         vision,
         rope_scaling,
@@ -1277,7 +1198,6 @@ fn derive(
         metrics,
         metrics_bind_named,
         api_key,
-        expose: s.server.expose,
         basis: Basis(Arc::new(BasisInner { sources: sources.clone(), resolution: resolution.clone(), family })),
     };
     Ok((config, dropped))
@@ -1387,68 +1307,6 @@ fn derive_download(
         Some(dir) if from_file && path.is_relative() => dir.join(path),
         _ => path.clone(),
     }))
-}
-
-/// `speech.model` and `speech.compat_names` against the ids the server
-/// serves (spec speech/02), at start and on every `PATCH /v1/config`: a
-/// model that is a text or image model (a built-in entry of another kind, or
-/// a model family's id) is refused, since it would be listed and served as
-/// speech; a compat name equal to a served id is refused, since a request
-/// naming it would be two models' at once. The ids it knows here are the
-/// built-in catalog's, the model families' own, the start model's and the
-/// speech model's; an operator catalog's are checked where it is read
-/// (`speech::check_names`: at start, and by the `PATCH`).
-fn derive_speech(resolution: &Resolution, spelled: &impl Fn(&str, &str) -> String) -> Result<(), ConfigError> {
-    let s = &resolution.settings;
-    let speech_id = match s.speech.model.as_str() {
-        "auto" => Some(AUTO_SPEECH_MODEL_ID),
-        "off" => None,
-        id => Some(id),
-    };
-    if let Some(id) = speech_id {
-        let other_kind = crate::download::Catalog::built_in().entry(id).is_some_and(|entry| !entry.is_speech())
-            || ModelFamily::of_model_id(id).is_some_and(|family| family.kind() != ignis_core::compute::ModelKind::Speech);
-        if other_kind {
-            return Err(ConfigError(format!(
-                "`{}` names `{id}`, which is not a speech model: name a speech entry of the catalog, `auto` or `off`",
-                spelled("speech", "model")
-            )));
-        }
-    }
-    for name in &s.speech.compat_names {
-        let served = crate::download::Catalog::built_in().ids().contains(&name.as_str())
-            || ModelFamily::of_model_id(name).is_some()
-            || s.model.id.as_deref() == Some(name.as_str())
-            || speech_id == Some(name.as_str());
-        if served {
-            return Err(ConfigError(format!(
-                "`{}` names `{name}`, which is a served model id: a compat name is for a name no served model has",
-                spelled("speech", "compat_names")
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// `diarizer.model` against the ids the server knows (spec speech/08, Q118),
-/// at start and on every `PATCH /v1/config`, as `speech.model` is: an id of a
-/// built-in entry or a model family that is not a diarizer is refused. An
-/// operator catalog's entries are checked where it is read
-/// (`speech::check_diarizer_name`).
-fn derive_diarizer(resolution: &Resolution, spelled: &impl Fn(&str, &str) -> String) -> Result<(), ConfigError> {
-    let id = match resolution.settings.diarizer.model.as_str() {
-        "auto" | "off" => return Ok(()),
-        id => id,
-    };
-    let other_kind = crate::download::Catalog::built_in().entry(id).is_some_and(|entry| !entry.is_diarizer())
-        || ModelFamily::of_model_id(id).is_some_and(|family| family.kind() != ignis_core::compute::ModelKind::Diarizer);
-    if other_kind {
-        return Err(ConfigError(format!(
-            "`{}` names `{id}`, which is not a diarizer: name a diarizer entry of the catalog, `auto` or `off`",
-            spelled("diarizer", "model")
-        )));
-    }
-    Ok(())
 }
 
 /// `--spec-backend`, `--spec-draft-tokens` and `--spec-draft-head` (P5-02,
@@ -1609,7 +1467,7 @@ fn fit_family(
             )));
         }
         Some(_) => {}
-        None => *fitted.model = family.model_id().to_owned(),
+        None => *fitted.model = if family == ModelFamily::Qwen38_27b { DEFAULT_MODEL } else { family.model_id() }.to_owned(),
     }
     if let Some(speculation) = fitted.speculation.filter(|s| Some(s.backend()) != family.drafter()) {
         if fit == Fit::Start {
@@ -1662,12 +1520,12 @@ pub fn help_text() -> String {
          \n\
          Every field has a flag (--<group>-<field>), an env var (IGNIS_<GROUP>_<FIELD>)\n\
          and a config-file key (<group>.<field>). Precedence, highest first: flag, env\n\
-         var, config file, profile, built-in default; a field's qwen38 / qwen38flashnext\n\
+         var, config file, profile, built-in default; a field's qwen38\n\
          value wins within each. `help --fields` prints every field in full.\n\
          \n\
-         --profile defaults to `auto`: the built-in profile of the card's total memory\n\
-         ({}); a card of no class is refused, naming --profile. A named profile\n\
-         (or `none`) always wins.\n",
+         --profile defaults to `auto`: the profile selected by total GPU memory.\n\
+         Built-in profiles: {}. An unsupported card requires a named profile\n\
+         or `none`. An explicit --profile overrides auto selection.\n",
         profile::classes_text(),
     );
     for (group, fields) in schema::GROUPS {

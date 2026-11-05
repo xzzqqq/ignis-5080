@@ -5,7 +5,7 @@
 - Observed: 2026-09-27
 - Last verified: 2026-09-27
 - Scope: `/v1/decide` / attention readout over a text state (spec 19 phase 0 step 0): spans, head combinations, values and gates, calibration, position bias, the lexical paradox
-- Related: [GitHub #276](https://github.com/gpillon/ignis/issues/276); [spec 19](../specs/decide/19-a-span-read-from-attention.md); [`2026-09-26-locate-attention-no-go.md`](2026-09-26-locate-attention-no-go.md) (spec 18's result, which this reads against); [`2026-09-21-qwen-vl-grounding-primary-sources.md`](2026-09-21-qwen-vl-grounding-primary-sources.md) (the image-side literature pass)
+- Related: [GitHub #276](https://github.com/gpillon/ignis/issues/276); [spec 19](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/19-a-span-read-from-attention.md); [`2026-09-26-locate-attention-no-go.md`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-09-26-locate-attention-no-go.md) (spec 18's result, which this reads against); [`2026-09-21-qwen-vl-grounding-primary-sources.md`](2026-09-21-qwen-vl-grounding-primary-sources.md) (the image-side literature pass)
 - Superseded by: none
 
 ## Question

@@ -7,8 +7,8 @@
 - Scope: serving / decision readout primitives, one-pass pointing (spec 11 C5), the two-pass box, `/v1/decide` `point` and `box`
 - Related: [`2026-09-21-what-the-literature-says-about-pointing.md`](2026-09-21-what-the-literature-says-about-pointing.md)
   (the shallow first pass this deepens; four corrections to it are listed below),
-  [spec 11](../specs/decide/11-point-in-one-pass.md),
-  [spec 12](../specs/decide/12-the-coordinate-in-the-latent.md),
+  [spec 11](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/11-point-in-one-pass.md),
+  [spec 12](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/12-the-coordinate-in-the-latent.md),
   [`2026-09-21-vision-tower-cost-at-width.md`](2026-09-21-vision-tower-cost-at-width.md),
   [`2026-09-21-the-point-is-assembled-as-it-is-written.md`](2026-09-21-the-point-is-assembled-as-it-is-written.md),
   [`2026-09-21-a-declared-grid-is-read-to-one-part-in-ten.md`](2026-09-21-a-declared-grid-is-read-to-one-part-in-ten.md),

@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { forgetKey, useAuth } from "../api/auth.ts";
 import { canChat, canSend, loadUnderWay, type ModelState, useModel } from "../api/model.ts";
 import { Composer } from "../conversation/Composer.tsx";
 import { type ChatPicture, chatImageFromFile, type PictureAction, type PromptImage } from "../conversation/images.ts";
-import { ModelPicker } from "../conversation/ModelPicker.tsx";
 import { useNextModel } from "../conversation/useNextModel.ts";
-import { DecideView, type Drawer as DecideDrawer } from "../decide/DecideView.tsx";
 import { type OpenAgent, Transcript } from "../conversation/Transcript.tsx";
 import { contextUsage } from "../metrics/context.ts";
 import { Readout } from "../metrics/Readout.tsx";
@@ -13,26 +11,16 @@ import { MonitorView } from "../monitor/MonitorView.tsx";
 import { useMonitor, useMonitorVisible } from "../monitor/useMonitor.ts";
 import { SessionLog } from "../sessions/SessionLog.tsx";
 import { SessionsPanel } from "../sessions/SessionsPanel.tsx";
-import { StorePictures } from "../image/pictures.tsx";
-import { imagesOf, pictureName, type PoolImage } from "../image/sessions.ts";
-import { fileFromDataUrl } from "../image/studio.ts";
+import { StorePictures } from "../store/pictureViews.tsx";
+import { fileFromDataUrl } from "../store/pictureFiles.ts";
 import type { Mark, MarkedPicture } from "../markup/markup.ts";
 import { MarkupEditor } from "../markup/MarkupEditor.tsx";
-import { ImageStudio, type StudioDrawer } from "../image/Studio.tsx";
-import { useImageSessions } from "../image/useImageSessions.ts";
 import { ServerView } from "../server/ServerView.tsx";
 import { useServer, useTick } from "../server/useServer.ts";
 import { DEFAULT_SETTINGS, type PlaygroundSettings } from "../settings/defaults.ts";
 import { escapeFree } from "../ui/Sheet.tsx";
-import { type ImageId, namedBy } from "../store/imageStore.ts";
 import { pageStore } from "../store/index.ts";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
-import { lastReply } from "../sessions/sessions.ts";
-import { dictationContext } from "../speech/dictation.ts";
-import { useDictation } from "../speech/useDictation.ts";
-import { type Drawer as TranscribeDrawer, TranscribeView } from "../transcribe/TranscribeView.tsx";
-import { textModelBlocked } from "../transcribe/notes.ts";
-import { useTranscribe } from "../transcribe/useTranscribe.ts";
 import { AgentReader } from "../tools/agents/AgentReader.tsx";
 import { MemoryManager } from "../tools/local/MemoryManager.tsx";
 import { AGENT_SYSTEM_PROMPT, type AgentRun } from "../tools/agents/agents.ts";
@@ -43,7 +31,6 @@ import { StoreWorkspaceFiles } from "../workspace/WorkspaceFiles.tsx";
 import { WorkspacePanel } from "../workspace/WorkspacePanel.tsx";
 import { ChatWorkspaceBar } from "../workspace/WorkspacePicker.tsx";
 import { pageWorkspaces } from "../workspace/workspaces.ts";
-import { useHasVision } from "../workspace/vision.ts";
 import { Header, type View } from "./Header.tsx";
 import { KeyPage } from "./KeyPage.tsx";
 import { TransportNotice } from "./TransportNotice.tsx";
@@ -95,16 +82,9 @@ export function App() {
   const [memoryOpen, setMemoryOpen] = useState(false);
   const closeMemory = useCallback(() => setMemoryOpen(false), []);
   const [drawer, setDrawer] = useState<Drawer>(null);
-  // The bench has its own two drawers below `lg`; the header's buttons open
-  // whichever view is showing.
-  const [decideDrawer, setDecideDrawer] = useState<DecideDrawer>(null);
-  // The model the next message goes to: the one loaded, unless the owner picks another or the image model is loaded.
+  // The chat follows the model served by this process.
   const nextModel = useNextModel(model);
-  // The pictures the Image view's sessions name, for the chat's deletes: the view is held below the chat. The
-  // Transcripts' context images the same (#431).
-  const studioPictures = useRef<() => Iterable<ImageId> | null>(() => null);
-  const transcriptPictures = useRef<() => Iterable<ImageId> | null>(() => null);
-  const chat = useConversation({ model, next: nextModel.next, refreshModel, settings, tools, parallel, live: () => namedBy(studioPictures.current(), transcriptPictures.current()) });
+  const chat = useConversation({ model, next: nextModel.next, refreshModel, settings, tools, parallel });
   const { active } = chat;
   // The chat's workspace (spec #170): its picker in the chat's header, and the panel of its files on the right.
   const workspaces = pageWorkspaces();
@@ -112,46 +92,9 @@ export function App() {
   const workspaceList = useWorkspaceList(workspaces);
   const [workspaceOpen, setWorkspaceOpen] = useStoredFlag(STORED_FLAGS.workspacePanel, false);
   const [workspaceNotice, setWorkspaceNotice] = useState<string | null>(null);
-  // Dictation into the prompt (spec speech/04): opened with the last reply and the prompt as it stands, in that order.
-  const dictation = useDictation({
-    onChange: setInput,
-    context: () => dictationContext([lastReply(active.messages), input]),
-    speech: model.speech,
-    onUnavailable: refreshModel,
-  });
   const monitoring = view === "monitor" && monitorVisible;
-  const deciding = view === "decide";
   const serving = view === "server";
-  const imaging = view === "image";
-  const transcribing = view === "transcribe";
-  // Mounted from its first visit on, like the Decide tab: a draft of changes
-  // and a reload being followed survive a look at the chat.
   const [serverOpened, setServerOpened] = useState(false);
-  // The Image view the same: its sessions are read once, and a step under way outlives a look at the chat.
-  const [imageOpened, setImageOpened] = useState(false);
-  const [imageDrawer, setImageDrawer] = useState<StudioDrawer>(null);
-  // The Transcribe view the same, from its first visit (spec speech/07, Q84). Its state is held here: the
-  // header shows a listening from every view.
-  const [transcribeOpened, setTranscribeOpened] = useState(false);
-  const [transcribeDrawer, setTranscribeDrawer] = useState<TranscribeDrawer>(null);
-  // Whether that text model has vision: a Transcript's context images wait to be read until one does (#437).
-  const textVision = useHasVision(model);
-  const [transcribe, transcribeActions, listening, assistants, transcribePictures] = useTranscribe({
-    speech: model.speech,
-    // The notes go to the text model loaded, never to another: no request of theirs names one.
-    text: { blocked: textModelBlocked(model), contextLimit: canChat(model) ? model.contextLimit : null, vision: textVision },
-    onUnavailable: refreshModel,
-    elsewhere: async () => namedBy(chat.pictures(), studioPictures.current(), await pageWorkspaces().pictures().catch(() => null)),
-  });
-  transcriptPictures.current = transcribePictures;
-  // Held here, not in the view: the chat hands pictures to it.
-  // Each keeps the pictures the other names when it deletes a session, and those of the workspaces: the store holds
-  // every view's pictures once.
-  const [studio, studioActions] = useImageSessions(model, refreshModel, imaging, {
-    live: () => namedBy(chat.pictures(), transcribePictures()),
-    held: () => pageWorkspaces().pictures(),
-  });
-  studioPictures.current = () => (studio.loaded ? studio.sessions.flatMap((s) => [...imagesOf(s)]) : null);
   const [chatMarking, setChatMarking] = useState<ChatMarking | null>(null);
   // A switch or a load runs the header's flame and heat bar as a reply does (spec playground/05).
   const busy = chat.busy || loadUnderWay(model);
@@ -190,7 +133,7 @@ export function App() {
     const text = input.trim();
     // A dictation under way is never sent: Send waits until it ends (Q4). Files attached are a prompt by themselves.
     const files = tools.enabled && tools.workspace ? chat.attachments.length : 0;
-    if ((!text && images.length === 0 && files === 0) || !chat.canRun || dictation.controller.active) return;
+    if ((!text && images.length === 0 && files === 0) || !chat.canRun) return;
     setInput("");
     setImages([]);
     setImageError(null);
@@ -261,34 +204,15 @@ export function App() {
   }
 
   /** A picture of the conversation: marked into the prompt box, or opened in a new session of the Image view. */
-  async function onPicture(picture: ChatPicture, action: PictureAction) {
+  async function onPicture(picture: ChatPicture, _action: PictureAction) {
     // One the page's store holds (a workspace's) is read from there; the store's bytes are what the Image view keeps.
     const stored = picture.id && !picture.full ? await pageStore().getImage(picture.id).catch(() => null) : null;
     if (picture.id && !picture.full && !stored) return;
     const source = stored ?? blobOf(picture, picture.name);
-    if (action === "image") {
-      void studioActions.importPictures([{ blob: source, name: picture.name }], "new");
-      setImageOpened(true);
-      setView("image");
-      return;
-    }
     openMarking(source, `Mark ${picture.name}`, async (marked) => {
       const image = marked && (await markedImage(source, picture.name, marked));
       if (image) setImages((current) => [...current, image]);
     });
-  }
-
-  /** A picture of the Image view into the chat's prompt box. */
-  function sendToChat(picture: PoolImage) {
-    void pageStore()
-      .getImage(picture.id)
-      .then(async (blob) => {
-        if (!blob) return;
-        const read = await chatImageFromFile(blob, pictureName(picture));
-        if (read.ok) setImages((current) => [...current, read.image]);
-        else setImageError(read.error);
-        setView("chat");
-      });
   }
 
   const set = <K extends keyof PlaygroundSettings>(key: K, value: PlaygroundSettings[K]) =>
@@ -307,30 +231,20 @@ export function App() {
       <Header
         model={model}
         busy={busy}
-        onOpen={(which) => (deciding ? setDecideDrawer(which) : imaging ? setImageDrawer(which) : transcribing ? setTranscribeDrawer(which) : setDrawer(which))}
+        onOpen={setDrawer}
         onForgetKey={auth.key ? forgetKey : undefined}
         onOpenMemory={() => setMemoryOpen(true)}
-        view={monitoring ? "monitor" : deciding ? "decide" : serving ? "server" : imaging ? "image" : transcribing ? "transcribe" : "chat"}
+        view={monitoring ? "monitor" : serving ? "server" : "chat"}
         onView={(next) => {
           if (next === "server") setServerOpened(true);
-          if (next === "image") setImageOpened(true);
-          if (next === "transcribe") setTranscribeOpened(true);
           setView(next);
         }}
         monitorAvailable={monitorVisible}
-        listening={listening}
       />
 
       <TransportNotice />
 
       {monitoring && <Monitor />}
-
-      {/* Mounted whichever view is showing, like the chat below it: the tab
-          holds a whole typed request, and a glance at the Monitor is not a
-          reason to lose it. Nothing here fetches on mount. */}
-      <div className={deciding ? "contents" : "hidden"}>
-        <DecideView ready={canChat(model)} drawer={decideDrawer} onDrawer={setDecideDrawer} speech={model.speech} />
-      </div>
 
       {serverOpened && (
         <div className={serving ? "contents" : "hidden"}>
@@ -338,34 +252,7 @@ export function App() {
         </div>
       )}
 
-      {imageOpened && (
-        <div className={imaging ? "contents" : "hidden"}>
-          <ImageStudio model={model} state={studio} actions={studioActions} drawer={imageDrawer} onDrawer={setImageDrawer} onSendToChat={sendToChat} />
-        </div>
-      )}
-
-      {transcribeOpened && (
-        <div className={transcribing ? "contents" : "hidden"}>
-          <TranscribeView
-            state={transcribe}
-            actions={transcribeActions}
-            listening={listening}
-            assistants={assistants}
-            speech={model.speech}
-            drawer={transcribeDrawer}
-            onDrawer={setTranscribeDrawer}
-            workspaces={pageWorkspaces()}
-            onOpenInChat={(markdown) => {
-              // A new chat, its prompt box seeded with the Transcript; nothing is sent (Q89).
-              newSession();
-              setInput(markdown);
-              setView("chat");
-            }}
-          />
-        </div>
-      )}
-
-      <div className={monitoring || deciding || serving || imaging || transcribing ? "hidden" : "contents"}>
+      <div className={monitoring || serving ? "hidden" : "contents"}>
         <div className="relative flex min-h-0 flex-1">
           {drawer && (
             <div className="fixed inset-0 z-30 bg-[#1c2026]/60 lg:hidden" onClick={() => setDrawer(null)} aria-hidden />
@@ -427,7 +314,6 @@ export function App() {
               value={input}
               onChange={setInput}
               ready={canSend(model) && nextModel.next.id !== null}
-              modelPicker={<ModelPicker model={model} next={nextModel.next} rows={nextModel.rows} onChoose={nextModel.choose} />}
               busy={chat.sendBlocked}
               streamingHere={chat.streamingHere}
               usage={contextUsage(active.log, settings.maxTokens, canChat(model) ? model.contextLimit : null)}
@@ -443,11 +329,10 @@ export function App() {
               onAddImages={(files) => void addImages(files)}
               onRemoveImage={(index) => setImages((current) => current.filter((_, i) => i !== index))}
               onMarkImage={markBoxImage}
-              dictation={dictation}
             />
           </main>
 
-          {workspaceOpen && <WorkspacePanel workspaces={workspaces} view={chatWorkspace} chat={chat.binding} chats={chat.chatNames} speech={model.speech} onClose={() => setWorkspaceOpen(false)} />}
+          {workspaceOpen && <WorkspacePanel workspaces={workspaces} view={chatWorkspace} chat={chat.binding} chats={chat.chatNames} onClose={() => setWorkspaceOpen(false)} />}
 
           <SettingsPanel
             open={drawer === "settings"}

@@ -3,7 +3,7 @@
 ## Status
 
 Accepted (2026-10-18, owner decision: option 3 of
-[`docs/findings/2026-10-18-flash-next-verify-rows-past-8.md`](../findings/2026-10-18-flash-next-verify-rows-past-8.md)).
+[`docs/findings/2026-10-18-flash-next-verify-rows-past-8.md`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-18-flash-next-verify-rows-past-8.md)).
 GitHub #329 item 5. The default budget (8 rows) and every profile are unchanged; whether a
 profile takes a wider budget is the RTX PRO 6000 measurement's to decide. It decided: there
 every budget past 8 loses to 8 (0.42-0.84x), so the `rtxpro6000` profile keeps 8

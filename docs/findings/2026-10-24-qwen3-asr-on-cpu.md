@@ -9,7 +9,7 @@
   dictations with and without context, language ID
 - Related: [ADR 0067](../adr/0067-the-speech-model-waits-on-the-host-and-borrows-free-kv-pages.md),
   [ADR 0068](../adr/0068-the-speech-models-cpu-executor-is-ours-in-rust.md),
-  [spec speech](../specs/speech/spec.md), [spec speech/01](../specs/speech/01-cpu-executor.md),
+  [spec speech](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/speech/spec.md), [spec speech/01](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/speech/01-cpu-executor.md),
   [Rust quantized matmul matches ggml on the CPU](2026-10-24-rust-quantized-matmul-matches-ggml.md)
 - Superseded by: none
 

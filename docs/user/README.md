@@ -1,48 +1,67 @@
-# The ignis user guide
+# Run Ignis-5080
 
-This folder is the source of the guide published at
-**https://gpillon.github.io/ignis/**, where it has search, navigation and
-reading paths. Every page is plain Markdown and reads here as well. An AI
-agent working for a user (asked what ignis is, to install it, or to connect a
-client) starts at [the agent path](paths/agent.md).
+This fork serves Qwen3.8-27B on Linux with one RTX 5080 16 GB. It supports
+text, reasoning, tool calls and image input. The Chat UI, Monitor, settings,
+workspace files and image markup are available at `/ui/` when built in.
 
-| Section | Start with |
-|---|---|
-| Start here | [Install](start/install.md), or [with a coding agent](start/install-with-an-agent.md) |
-| Why ignis | [What sets it apart](why-ignis/index.mdx), a topic per page with its numbers and sources |
-| Reading paths | [User](paths/user.md), [advanced](paths/advanced.md), [developer](paths/developer.md), [contributor](paths/contributor.md), [agent](paths/agent.md) |
-| Guides | [Get a model](guides/models.md), [air-gapped machines](guides/air-gapped.md), [Knative](guides/knative.md), [telemetry](guides/telemetry.md), [measure a 16 GB card](guides/measure-a-16gb-card.md) |
-| Concepts | [How ignis serves a request](concepts/how-ignis-serves.md) |
-| Configuration | [Fields, precedence, profiles](configuration/index.md) |
-| Playground | [Overview](playground/index.md), [chat](playground/chat.md), [settings](playground/settings.md), [tools and agents](playground/tools-and-agents.md), [Decide](playground/decide.md), [image studio](playground/image-studio.md), [Transcribe](playground/transcribe.md), [Monitor](playground/monitor.md), [Server](playground/server.md) |
-| API | [Endpoints](api/index.md), [chat completions](api/chat-completions.md), [Responses](api/responses.md), [speech to text](api/transcriptions.md), [live transcription](api/realtime-transcription.md) |
-| Reference | [Every config field](reference/configuration.md), [profiles](reference/profiles.md), [models](reference/models.md), [metrics](reference/metrics.md), [HTTP routes](reference/http-routes.md) |
-| Troubleshooting | [Troubleshooting](troubleshooting.md) |
-| Changelog | On the site, written from the [GitHub releases](https://github.com/gpillon/ignis/releases) |
-| Contributing | [Contributing](contributing/index.md) |
+## Build and start
 
-The pages under `reference/` are generated from the code (`make
-docs-reference`), the pictures under `images/playground/` by `make
-docs-screenshots`, and the site's Changelog from the releases; the rest is
-written by hand, and every user-visible change
-updates it in the same commit ([`docs/agents/user-docs.md`](../agents/user-docs.md)).
+Configure the [remote development entry point](contributing/remote-dev.md)
+and put `qwen3_8_27b_trellis_sc30-v2.ninfer` with its verified conversion
+sidecar in `models/`. The pinned catalog also supports `ignis-server model
+download qwen3.8-27b-16g` on the Linux host. Download configuration and
+integrity checks are listed in [the reference](reference/cli.md).
 
-## Speech to text
+From the Laptop:
 
-The server transcribes audio with Qwen3-ASR on `POST /v1/audio/transcriptions`,
-on the CPU and beside the model on the card: it takes no VRAM and is served
-through a model switch. It is on once its files are on disk
-(`ignis-server model download qwen3-asr-1.7b`); `GET /v1/models` says whether it
-can serve and, if not, why. OpenAI's clients work unchanged (`model` may be
-`whisper-1`; Aider works with `OPENAI_API_BASE`). A client can also stream the
-audio while the person speaks, over OpenAI's Realtime transcription session on
-`/v1/realtime?intent=transcription`, and get the text as it settles. See
-[speech to text](api/transcriptions.md), [live transcription](api/realtime-transcription.md),
-its [configuration](configuration/speech.md) and its [metrics](reference/metrics.md).
-The file may be WAV, FLAC, MP3 or AAC, or an Ogg or Matroska/WebM container
-holding FLAC; Opus is not decoded yet. A transcription waits for the one
-compute worker, first in, first out, behind live sessions, and takes about a
-fifth to a quarter of the audio's length on a 10-thread desktop CPU; with
-`speech.max_queue` (4) waiting, the next is `503 engine_full` with a
-`Retry-After`. Leave `language` off unless the model guesses wrong: forcing a
-language on speech with another language's jargon in it distorts the jargon.
+```sh
+python3 scripts/remote.py sync
+python3 scripts/remote.py exec -- make build CUDA=1 UI=1
+python3 scripts/remote.py exec -- make gpu-status
+python3 scripts/remote.py exec -- make start CUDA=1 UI=1
+python3 scripts/remote.py exec -- make status
+# After use:
+python3 scripts/remote.py exec -- make stop
+```
+
+`make start` uses the last build and refuses to start if its sources have changed. It writes logs
+under `.scratch/serve/`. Set `API_KEY=auto` to require a generated key; keep
+`BIND=127.0.0.1:8000` for a local listener. When the server runs remotely,
+use SSH port forwarding to reach it from the Laptop.
+
+## Clients and capabilities
+
+Use base URL `http://127.0.0.1:8000/v1` and model `qwen3.8-27b-16g`.
+The family alias `qwen3.8-27b` resolves to the same artifact. Chat Completions
+and Responses support streaming, reasoning and tool calls. Send images as
+chat image parts. The Vision tower stages weights from host memory; the
+profile allows up to 4,096 image tokens per request.
+
+Use `/health` and `/ready` to check service health and readiness. The server
+provides request timeouts, cancellation, idle unload/reload, prompt reuse,
+KV-RAM, KV-disk, API keys, structured logs and Prometheus metrics.
+Model-management routes handle downloads, file removal and loading.
+The loader rejects artifacts from other model families.
+
+## Configuration
+
+The built-in `rtx50-16gb` profile configures two decode lanes, DFlash2 with
+seven draft tokens and the full draft head, 1,200 MiB VRAM headroom, and
+Vision weights in host memory. The load planner adapts the context to
+available VRAM.
+
+- [All configuration fields](reference/configuration.md)
+- [Profile values](reference/profiles.md)
+- [Pinned model files](reference/models.md)
+- [HTTP routes](reference/http-routes.md), also `/v1/docs/` on the server
+- [Metrics](reference/metrics.md)
+- [Command line](reference/cli.md)
+- [Performance and capacity protocol](contributing/coding-agent-benchmark.md)
+
+## Removed upstream features
+
+Speech, transcription, dictation, diarization, image generation/editing,
+Flash-Next serving, Decide/SystemOne/Locate and public tunnels are removed.
+Their former HTTP endpoints return 404. Existing conversation images can
+still be viewed. Windows production builds, the public guide website and
+upstream release publishing are also removed; see [ADR 0079](../adr/0079-the-fork-serves-qwen38-27b-on-one-rtx-5080.md).

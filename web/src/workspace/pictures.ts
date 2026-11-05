@@ -1,5 +1,5 @@
 import type { PromptImage } from "../conversation/images.ts";
-import { fileFromDataUrl } from "../image/studio.ts";
+import { fileFromDataUrl } from "../store/pictureFiles.ts";
 import type { AttachedFile } from "./attach.ts";
 import type { WorkspaceFile } from "./files.ts";
 import type { ChatBinding, Workspaces, Written } from "./workspaces.ts";

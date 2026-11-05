@@ -5,7 +5,7 @@
 - Observed: 2026-10-08
 - Last verified: 2026-10-08
 - Scope: kernel / paged KV mapping, `ignis_seq_grow`; serving / decode round latency, spec vram-budget/03 P0 (ACs 26-27)
-- Related: https://github.com/gpillon/ignis/issues/309, [ADR 0045](../adr/0045-the-kv-pool-follows-residency-and-state-goes-down-to-disk.md), spec [vram-budget/03](../specs/vram-budget/03-kv-pool-policy-and-kv-disk.md) (P0, ACs 26-27), [Flash-Next on the 5090](2026-10-06-flash-next-on-the-5090.md) (its lanes-at-262K harness)
+- Related: https://github.com/gpillon/ignis/issues/309, [ADR 0045](../adr/0045-the-kv-pool-follows-residency-and-state-goes-down-to-disk.md), spec [vram-budget/03](../specs/vram-budget/03-kv-pool-policy-and-kv-disk.md) (P0, ACs 26-27), [Flash-Next on the 5090](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-06-flash-next-on-the-5090.md) (its lanes-at-262K harness)
 - Superseded by: none
 
 ## Question

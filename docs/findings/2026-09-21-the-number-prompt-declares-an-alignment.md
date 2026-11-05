@@ -6,7 +6,7 @@
 - Last verified: 2026-09-21
 - Scope: server / `/v1/decide` constrained decode, prompt
 - Related: [ADR 0034](../adr/0034-the-leaf-answers-without-generating.md),
-  [a fixed-width number is wrong at exactly one width](2026-09-20-number-width-and-decide-e2e.md)
+  [a fixed-width number is wrong at exactly one width](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-09-20-number-width-and-decide-e2e.md)
   (whose width rule this corrects),
   [constrained digit readout](2026-09-19-constrained-digit-readout-points.md),
   [GitHub #254](https://github.com/gpillon/ignis/issues/254)

@@ -5,7 +5,7 @@
 - Observed: 2026-10-31
 - Last verified: 2026-10-31
 - Scope: Playground / the Transcribe view's notes: today's full rewrite, the running notes kept by a notes thread with tools (#428's shape), the recap; the 27B (`qwen3.8-27b`, NVFP4, `rtx5090` profile) on the RTX 5090; transcripts made by ignis (Qwen3-ASR 1.7B and the diarizer, on the CPU)
-- Related: [ADR 0076](../adr/0076-the-running-notes-send-the-notes-back-and-the-recap-does-not.md), [spec speech/07, Q125](../specs/speech/07-transcribe.md), https://github.com/gpillon/ignis/issues/428, https://github.com/gpillon/ignis/issues/429
+- Related: [ADR 0076](../adr/0076-the-running-notes-send-the-notes-back-and-the-recap-does-not.md), [spec speech/07, Q125](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/speech/07-transcribe.md), https://github.com/gpillon/ignis/issues/428, https://github.com/gpillon/ignis/issues/429
 - Superseded by: none
 
 ## Question

@@ -5,7 +5,7 @@
 - Observed: 2026-10-13
 - Last verified: 2026-10-13
 - Scope: serving / cold prefill rate at the make defaults, the 27B and Flash-Next on the same prompts; Flash-Next's expert bytes per prompt
-- Related: [upstream quick wins](2026-09-24-upstream-quick-wins-ab.md) (the README's 27B cells), [Flash-Next prefill chunk decomposition](2026-10-07-flash-next-prefill-chunk-decomposition.md), [Flash-Next on the 5090](2026-10-06-flash-next-on-the-5090.md)
+- Related: [upstream quick wins](2026-09-24-upstream-quick-wins-ab.md) (the README's 27B cells), [Flash-Next prefill chunk decomposition](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-07-flash-next-prefill-chunk-decomposition.md), [Flash-Next on the 5090](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-06-flash-next-on-the-5090.md)
 - Superseded by: none
 
 ## Question
@@ -53,7 +53,7 @@ Observed:
 
 Inferred:
 
-- **On this host Flash-Next's prefill is held by the link.** At the copy engine's measured 11.7-12.3 GB/s, 233 GB keeps the link busy ~19-20 s of a 31-32 s TTFT, most of it under compute. [The decomposition](2026-10-07-flash-next-prefill-chunk-decomposition.md) measured an 8192-token chunk's compute (1.72-1.79 s) and its expert stream (1.72-1.87 s) as equal, with 19-23% of the chunk waiting on copies alone.
+- **On this host Flash-Next's prefill is held by the link.** At the copy engine's measured 11.7-12.3 GB/s, 233 GB keeps the link busy ~19-20 s of a 31-32 s TTFT, most of it under compute. [The decomposition](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-07-flash-next-prefill-chunk-decomposition.md) measured an 8192-token chunk's compute (1.72-1.79 s) and its expert stream (1.72-1.87 s) as equal, with 19-23% of the chunk waiting on copies alone.
 - **Its rate is flat because every chunk re-streams the experts.** Each 8192-token chunk touches ~90% of the pool, so the cost is per chunk, and the rate is the chunk's.
 - **A Gen 4 or Gen 5 host shrinks the copy side ~2x or ~4x, and the chunk becomes compute-bound, which is about where it already is.** Copies and compute are equal per chunk, so the gain is bounded, not 2-4x. Here a 46K prompt runs ~2.4 s per 8192 tokens.
   - With the copies hidden and the n-gram gather (~0.46 s per chunk, card idle) left as is: 8192 / (1.75 + 0.46) s ≈ 3.7K tok/s.

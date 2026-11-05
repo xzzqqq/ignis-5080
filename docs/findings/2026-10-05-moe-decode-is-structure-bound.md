@@ -6,7 +6,7 @@
 - Last verified: 2026-10-06
 - Scope: kernel / Flash-Next routed-expert decode (`kernel/src/moe_decode.cu`)
 - Related: [GitHub #300](https://github.com/gpillon/ignis/issues/300),
-  [spec flash-next/02](../specs/flash-next/02-the-moe-kernels.md) (Acceptance 6),
+  [spec flash-next/02](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/flash-next/02-the-moe-kernels.md) (Acceptance 6),
   [ADR 0044](../adr/0044-experts-in-trellis-with-a-k-per-expert.md)
 - Superseded by: none
 

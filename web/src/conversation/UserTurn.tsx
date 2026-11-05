@@ -1,6 +1,6 @@
 import { memo, useState } from "react";
 import type { Message, TurnSwitch } from "../sessions/sessions.ts";
-import { IconBrush, IconFork, IconImage, IconPencil } from "../ui/icons.tsx";
+import { IconBrush, IconFork, IconPencil } from "../ui/icons.tsx";
 import type { ChatPicture, PictureAction } from "./images.ts";
 import { MessageEditor } from "./MessageEditor.tsx";
 import { ActionButton, ActionRow, EditedMark, RERUN_BLOCKED, sameTurnProps, type TurnActions } from "./TurnActions.tsx";
@@ -117,9 +117,7 @@ export function PictureTools({ picture, onPicture }: { picture: ChatPicture; onP
       <button type="button" aria-label={`Mark ${picture.name}`} title="Mark the area to change, into the prompt box" className={tool} onClick={() => onPicture(picture, "mark")}>
         <IconBrush />
       </button>
-      <button type="button" aria-label={`Open ${picture.name} in the Image view`} title="Open in the Image view, in a new session" className={tool} onClick={() => onPicture(picture, "image")}>
-        <IconImage />
-      </button>
+
     </span>
   );
 }

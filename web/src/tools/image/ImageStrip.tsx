@@ -1,8 +1,8 @@
 import { useState } from "react";
 import type { ChatPicture, PictureAction } from "../../conversation/images.ts";
 import { PictureTools } from "../../conversation/UserTurn.tsx";
-import { usePictureUrl } from "../../image/pictures.tsx";
-import { downloadImage, progressShare, sidesOf } from "../../image/studio.ts";
+import { usePictureUrl } from "../../store/pictureViews.tsx";
+import { downloadImage, progressShare, sidesOf } from "../../store/pictureFiles.ts";
 import { IconChevron, IconDownload } from "../../ui/icons.tsx";
 import { Lightbox } from "../../ui/Lightbox.tsx";
 import { versionOf } from "../../workspace/pictures.ts";

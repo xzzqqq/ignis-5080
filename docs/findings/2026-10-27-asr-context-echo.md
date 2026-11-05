@@ -7,8 +7,8 @@
 - Scope: speech / Qwen3-ASR-1.7B (the `auto` entry, Q4_K_M decoder) on the CPU through
   `POST /v1/audio/transcriptions`: the text on silence, white noise, a meeting's silent gaps and short turns and the
   heads of Italian clips, under five contexts; the guard `copies_context` that answers it
-- Related: [#362](https://github.com/gpillon/ignis/issues/362), [spec speech/07](../specs/speech/07-transcribe.md),
-  [Naming the language in the context](2026-10-27-asr-language-hint.md), [Speech to text](../user/api/transcriptions.md)
+- Related: [#362](https://github.com/gpillon/ignis/issues/362), [spec speech/07](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/speech/07-transcribe.md),
+  [Naming the language in the context](2026-10-27-asr-language-hint.md), [Speech to text](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/user/api/transcriptions.md)
 - Superseded by: none
 
 ## Question

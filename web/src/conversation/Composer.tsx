@@ -1,18 +1,15 @@
 import { type ClipboardEvent, type KeyboardEvent, type ReactNode, useRef } from "react";
 import { createPortal } from "react-dom";
-import { formatBytes } from "../decide/evidenceFile.ts";
+import { formatBytes } from "../ui/bytes.ts";
 import type { ContextUsage } from "../metrics/context.ts";
 import { ContextMeter } from "../metrics/ContextMeter.tsx";
-import { DictationMic, DictationStrip, HintText, toneClass } from "../speech/Dictation.tsx";
-import { dictationHint } from "../speech/dictation.ts";
-import { type Dictation, dictationKeys, useDictationState } from "../speech/useDictation.ts";
 import type { AttachedChip } from "../workspace/attach.ts";
 import { useAnchoredMenu } from "../ui/anchoredMenu.ts";
 import { IconBrush, IconClose, IconImage, IconPaperclip, IconPlus } from "../ui/icons.tsx";
 import { dataUriBytes, type PromptImage } from "./images.ts";
 
 /** The hint line's idle words (spec speech/04, "The hint line"). */
-export const IDLE_HINT = "Enter sends, Shift+Enter adds a line. Dictate with the mic, or hold Ctrl+Shift+Space while you speak.";
+export const IDLE_HINT = "Enter sends, Shift+Enter adds a line.";
 
 /**
  * The prompt box under the conversation: Send, or Stop while this session
@@ -49,17 +46,9 @@ export function Composer(props: {
   /** Opens a picture of the box in the markup editor. */
   onMarkImage?: (index: number) => void;
   /** Dictation into the prompt; its text lands at the cursor and is never sent by itself (Q4). */
-  dictation: Dictation;
 }) {
-  const { busy, streamingHere, dictation } = props;
-  const mic = useDictationState(dictation);
-  // Send waits until a dictation ends, so a dictation is never sent by itself.
-  const dictating = mic.phase !== "idle";
-  const live = mic.phase === "listening" || mic.phase === "finishing";
-  const hint = dictationHint(mic, "Send") ??
-    (busy && !streamingHere
-      ? { text: "A reply is streaming in another session. Send works again once it ends.", tone: "ash" as const }
-      : { text: mic.unavailable?.sentence ?? IDLE_HINT, tone: "ash" as const });
+  const { busy, streamingHere } = props;
+  const hint = busy && !streamingHere ? "A reply is streaming in another session. Send works again once it ends." : IDLE_HINT;
   const picker = useRef<HTMLInputElement>(null);
   const imagePicker = useRef<HTMLInputElement>(null);
   /** An empty prompt still goes out when it carries an image or a file: the picture or the file is the question. */
@@ -68,7 +57,7 @@ export function Composer(props: {
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (!dictating) props.onSend();
+      props.onSend();
     }
   }
 
@@ -81,7 +70,7 @@ export function Composer(props: {
   }
 
   return (
-    <div className="shrink-0 px-4 pb-4 md:px-10" {...dictationKeys(dictation)}>
+    <div className="shrink-0 px-4 pb-4 md:px-10">
       {props.canAttach && (props.attachments.length > 0 || props.attachError) && (
         <div className="mx-auto mb-2 flex w-full max-w-3xl flex-wrap items-center gap-2">
           {props.attachments.map((a) => (
@@ -130,14 +119,8 @@ export function Composer(props: {
           {props.imageError && <span className="pb-2 text-xs leading-snug text-fault">{props.imageError}</span>}
         </div>
       )}
-      {dictating && (
-        <div className="mx-auto mb-2 w-full max-w-3xl">
-          <DictationStrip dictation={dictation} state={mic} />
-        </div>
-      )}
-      {/* While listening, the box's underline is the running heat bar. */}
       <div
-        className={`cut relative mx-auto flex w-full max-w-3xl items-end gap-2 bg-surface p-2 [--cut-size:14px] ${live ? "" : "shadow-[inset_0_-2px_0_var(--line)] focus-within:shadow-[inset_0_-2px_0_var(--ember)]"}`}
+        className={`cut relative mx-auto flex w-full max-w-3xl items-end gap-2 bg-surface p-2 [--cut-size:14px] shadow-[inset_0_-2px_0_var(--line)] focus-within:shadow-[inset_0_-2px_0_var(--ember)]`}
       >
         <AddMenu>
           {props.canAttach && (
@@ -183,7 +166,6 @@ export function Composer(props: {
           }}
         />
         <textarea
-          ref={dictation.field}
           className="max-h-60 min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-[15px] leading-normal text-ink [field-sizing:content] placeholder:text-ash focus:outline-none"
           rows={1}
           name="prompt"
@@ -194,7 +176,6 @@ export function Composer(props: {
           onKeyDown={onKeyDown}
           onPaste={onPaste}
         />
-        <DictationMic dictation={dictation} state={mic} />
         {streamingHere ? (
           <button
             type="button"
@@ -207,19 +188,18 @@ export function Composer(props: {
           <button
             type="button"
             className="cut bg-[#ff5a1f] px-5 py-2.5 font-display text-sm font-semibold text-[#1c2026] hover:bg-[#ff7a45] disabled:cursor-default disabled:bg-line disabled:text-ash"
-            disabled={busy || !hasPrompt || !props.ready || dictating}
+            disabled={busy || !hasPrompt || !props.ready}
             onClick={props.onSend}
           >
             Send
           </button>
         )}
-        {live && <span aria-hidden="true" className="dictation-heat absolute inset-x-0 bottom-0 h-0.5" />}
       </div>
       <div className="mx-auto mt-2 flex w-full max-w-3xl items-center justify-between gap-4 px-1">
         <div className="flex min-w-0 items-center gap-4">
           {props.modelPicker}
-          <p className={`min-w-0 text-xs ${toneClass(hint.tone)}`}>
-            <HintText text={hint.text} />
+          <p className="min-w-0 text-xs text-ash">
+            {hint}
           </p>
         </div>
         <ContextMeter usage={props.usage} />

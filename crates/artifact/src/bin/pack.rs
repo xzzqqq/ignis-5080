@@ -44,11 +44,11 @@
 //! the units `text`, `mtp`, `vision`, `dflash2`, no Flash-Next geometry;
 //! `--out` defaults to `<work>/../qwen3_8_27b_trellis_sc30-v2.ninfer`.
 
+use ignis_artifact::packer::{pack, Family, PackOptions, PackOutcome, ARTIFACT_FILE_NAME, MTP_ARTIFACT_FILE_NAME};
 use std::path::PathBuf;
 
 use ignis_artifact::flash_next::FlashNextGeometry;
 use ignis_artifact::packer::{
-    pack, Family, PackOptions, PackOutcome, ARTIFACT_FILE_NAME, MTP_ARTIFACT_FILE_NAME, QWEN_IMAGE_ARTIFACT_FILE_NAME,
     TRELLIS_27B_ARTIFACT_FILE_NAME,
 };
 
@@ -104,14 +104,13 @@ fn main() {
         (None | Some("main"), None) => Family::Main,
         (Some("mtp"), Some(pair_main)) => Family::Mtp { pair_main },
         (Some("mtp"), None) => usage_error("--family mtp needs --pair-main"),
-        (Some("qwen-image"), None) => Family::QwenImage21,
         (Some("qwen3.8-27b-trellis"), None) => Family::Qwen27bTrellis,
         (None | Some("main") | Some("qwen-image") | Some("qwen3.8-27b-trellis"), Some(_)) => {
             usage_error("--pair-main is for --family mtp")
         }
         _ => usage_error("--family takes main, mtp, qwen-image or qwen3.8-27b-trellis"),
     };
-    if matches!(family, Family::QwenImage21 | Family::Qwen27bTrellis)
+    if matches!(family, Family::Qwen27bTrellis)
         && (layers.is_some() || experts.is_some() || geometry_named)
     {
         usage_error("--layers, --experts and --geometry are Flash-Next's, not this --family's");
@@ -122,7 +121,6 @@ fn main() {
             Some(model_dir) => model_dir.join(match family {
                 Family::Main => ARTIFACT_FILE_NAME,
                 Family::Mtp { .. } => MTP_ARTIFACT_FILE_NAME,
-                Family::QwenImage21 => QWEN_IMAGE_ARTIFACT_FILE_NAME,
                 Family::Qwen27bTrellis => TRELLIS_27B_ARTIFACT_FILE_NAME,
             }),
             None => usage_error("--work has no parent directory: pass --out"),
@@ -138,7 +136,6 @@ fn main() {
     let mut options = match family {
         Family::Mtp { pair_main } => PackOptions::mtp(work_dir, artifact, geometry, pair_main),
         Family::Main => PackOptions::new(work_dir, artifact, geometry),
-        Family::QwenImage21 => PackOptions::qwen_image(work_dir, artifact),
         Family::Qwen27bTrellis => PackOptions::trellis_27b(work_dir, artifact),
     };
     if let Some(mib) = header_mib {

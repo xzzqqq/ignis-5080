@@ -45,7 +45,6 @@ async fn a_server_serves_on_a_listener_bound_before_it_and_stops_on_request() {
     let addr = listener.local_addr().expect("local addr");
     // The port is known before serving starts: this is where `main` opens
     // the tunnel.
-    assert_eq!(ignis_server::expose::origin_port(addr), Ok(addr.port()));
 
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let serving = tokio::spawn(server().serve_on_until(listener, None, async {

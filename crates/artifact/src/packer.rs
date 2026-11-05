@@ -97,22 +97,6 @@ pub fn default_identity() -> ArtifactIdentity {
     }
 }
 
-/// The image model's container file name, beside the converter's `work/`
-/// (`tools/image-converter`; "Qwen" is never its primary name, ADR 0050).
-pub const QWEN_IMAGE_ARTIFACT_FILE_NAME: &str = "ignis_image_2_1_turbo-v2.ninfer";
-
-/// The image model's header reservation: its directory is ~0.4 MB.
-pub const QWEN_IMAGE_HEADER_BYTES: u64 = 4 << 20;
-
-/// The image model's identity: FP8 row-scaled linears, BF16 elsewhere, the
-/// vision tower's matrices W8, from revision `fc13ba19`.
-pub fn qwen_image_identity() -> ArtifactIdentity {
-    ArtifactIdentity {
-        model_id: crate::qwen_image::MODEL_ID.into(),
-        weights_id: "fp8rows-bf16-fc13ba1".into(),
-    }
-}
-
 /// The 27B's 16 GB artifact's file name, beside the converter's `work/`
 /// (spec 27b-16gb/01).
 pub const TRELLIS_27B_ARTIFACT_FILE_NAME: &str = "qwen3_8_27b_trellis_sc30-v2.ninfer";
@@ -149,9 +133,6 @@ pub enum Family {
     /// The MTP head's companion (flash-next-layout.md §13): the one unit `mtp/`,
     /// pinned to the main container `pair_main`.
     Mtp { pair_main: PathBuf },
-    /// The image model (spec image-model/01): `frontend/` and the four
-    /// tensor units of [`crate::qwen_image::WORK_UNITS`].
-    QwenImage21,
     /// The 27B's 16 GB artifact (spec 27b-16gb/01): `frontend/` and the
     /// tensor units of [`TRELLIS_27B_UNITS`].
     Qwen27bTrellis,
@@ -204,21 +185,6 @@ impl PackOptions {
             header_bytes: MTP_HEADER_BYTES,
             family: Family::Mtp { pair_main },
             ..Self::new(work_dir, artifact, geometry)
-        }
-    }
-
-    /// The defaults for the image model: `work_dir` → `artifact`.
-    pub fn qwen_image(work_dir: PathBuf, artifact: PathBuf) -> Self {
-        Self {
-            work_dir,
-            artifact,
-            geometry: None,
-            identity: qwen_image_identity(),
-            header_bytes: QWEN_IMAGE_HEADER_BYTES,
-            keep_work: false,
-            delete_batch_bytes: DEFAULT_DELETE_BATCH_BYTES,
-            accept_status: vec!["complete".into()],
-            family: Family::QwenImage21,
         }
     }
 
@@ -282,9 +248,6 @@ pub fn family_units(family: &Family, layers: usize) -> Vec<String> {
     match family {
         Family::Main => unit_names(layers),
         Family::Mtp { .. } => vec!["mtp".into()],
-        Family::QwenImage21 => {
-            std::iter::once("frontend").chain(crate::qwen_image::WORK_UNITS).map(String::from).collect()
-        }
         Family::Qwen27bTrellis => {
             std::iter::once("frontend").chain(TRELLIS_27B_UNITS.iter().copied()).map(String::from).collect()
         }
@@ -318,7 +281,7 @@ pub fn pack(options: &PackOptions, progress: &mut dyn FnMut(&str)) -> Result<Pac
     let units = family_units(&options.family, options.layers());
     let pair = match &options.family {
         Family::Mtp { pair_main } => Some(pair_record(pair_main)?),
-        Family::Main | Family::QwenImage21 | Family::Qwen27bTrellis => None,
+        Family::Main | Family::Qwen27bTrellis => None,
     };
 
     let mut state = if state_file.exists() {
@@ -707,7 +670,7 @@ fn plan_unit(
         // the image model's and the 16 GB 27B's units: tensors.json only,
         // every name under the unit's own prefix (`vision/...`, `vae/...`,
         // `text/...`; the 27B's `mtp/...` is not Flash-Next's `mtp` unit)
-        _ if *family == Family::Qwen27bTrellis || crate::qwen_image::WORK_UNITS.contains(&unit) => {
+        _ if *family == Family::Qwen27bTrellis => {
             plan_tensors_json(&mut plan, &done, Some(&format!("{unit}/")))?;
         }
         "global" => plan_tensors_json(&mut plan, &done, None)?,

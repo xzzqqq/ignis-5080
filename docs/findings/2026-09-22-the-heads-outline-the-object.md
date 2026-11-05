@@ -5,7 +5,7 @@
 - Observed: 2026-09-22
 - Last verified: 2026-09-23
 - Scope: model / how the served 27B's attention reads image tokens at the `point` scaffold; `/v1/decide` pointing
-- Related: https://github.com/gpillon/ignis/issues/263, [spec 13](../specs/decide/13-point-by-attention-head.md) (GitHub #260), [ADR 0038](../adr/0038-the-seam-carries-one-attention-head.md), [How the head map is read](2026-09-22-how-the-head-map-is-read.md), [An anchored head set points and boxes](2026-09-23-an-anchored-head-set-points-and-boxes.md), [spec 14](../specs/decide/14-point-and-box-from-the-head-set.md)
+- Related: https://github.com/gpillon/ignis/issues/263, [spec 13](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/13-point-by-attention-head.md) (GitHub #260), [ADR 0038](../adr/0038-the-seam-carries-one-attention-head.md), [How the head map is read](2026-09-22-how-the-head-map-is-read.md), [An anchored head set points and boxes](2026-09-23-an-anchored-head-set-points-and-boxes.md), [spec 14](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/14-point-and-box-from-the-head-set.md)
 - Superseded by: none
 
 ## Question

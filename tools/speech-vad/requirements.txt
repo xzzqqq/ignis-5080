@@ -1,5 +1,0 @@
-# server_vad's oracle's Python (tools/speech-vad/record.py checks these at start). The silero-vad
-# wheel is read as a file (--wheel, sha256-checked), not installed.
-torch==2.14.1+cpu
-numpy==2.5.4
-safetensors==0.8.0

@@ -1,7 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { activeTransport, chooseTransport, fallBackToHttp } from "../api/transport.ts";
-import { chooseSilence, dictationSilence } from "../speech/silence.ts";
 import { ALL_TOOLS, NO_TOOLS, type ToolsState } from "../tools/index.ts";
 import { DEFAULT_SETTINGS, type PlaygroundSettings } from "./defaults.ts";
 import { type KeepView, KeepSessions, SettingsPanel, ToolsSetting } from "./SettingsPanel.tsx";
@@ -161,26 +160,7 @@ describe("readBudgetInput", () => {
 
 // The dictation's silence (Q80): a per-viewer setting in General, on at 3 s.
 
-describe("SettingsPanel: the dictation's silence", () => {
-  afterEach(() => chooseSilence(3_000));
 
-  const region = (html: string) => html.slice(html.indexOf("Dictation stops after"), html.indexOf("Transport"));
-
-  it("sits in General with Off, 2 s, 3 s and 5 s, on at 3 s", () => {
-    const html = region(panel());
-    expect(radios(html).map((r) => r.label)).toEqual(["Off", "2 s", "3 s", "5 s"]);
-    expect(checked(html)).toEqual(["3 s"]);
-  });
-
-  it("shows the pick, Off included, and says what a held key does", () => {
-    chooseSilence(null);
-    expect(checked(region(panel()))).toEqual(["Off"]);
-    chooseSilence(5_000);
-    expect(checked(region(panel()))).toEqual(["5 s"]);
-    expect(region(panel())).toContain("never stops by itself");
-    expect(dictationSilence()).toBe(5_000);
-  });
-});
 
 // The wire the conversation goes over (GitHub #283): WebSocket by default,
 // HTTP when picked, and a word when the page fell back to HTTP on its own.

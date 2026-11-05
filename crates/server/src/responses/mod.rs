@@ -41,6 +41,7 @@ use crate::loop_guard::Guarding;
 use ignis_core::SchedEvent;
 use crate::Server;
 use events::{ResponseEvents, ResponseObject};
+pub use events::base64;
 use input::CreateResponse;
 
 /// How [`drive`] left a response.

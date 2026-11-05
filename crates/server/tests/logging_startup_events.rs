@@ -217,7 +217,10 @@ fn a_missing_artifact_sidecar_emits_a_sidecar_missing_event() {
     // load is refused before anything is read out of the container.
     let artifact = std::env::temp_dir()
         .join(format!("ignis-logging-test-no-sidecar-{}.ninfer", std::process::id()));
-    std::fs::write(&artifact, b"not a real container").expect("write the stand-in artifact");
+    let mut writer = ignis_artifact::ContainerWriter::create(&artifact,
+        ignis_artifact::ArtifactIdentity { model_id: "qwen3.8-27b".into(), weights_id: "test".into() }, 4096).unwrap();
+    writer.append_resource("test/r", ignis_artifact::ResourceEncoding::RawBytesV1, 1, &mut &b"x"[..]).unwrap();
+    writer.finish().unwrap();
     let record = run(&["--model-artifact", artifact.to_str().unwrap()]);
     assert_eq!(record["event_name"], "ignis.artifact.sidecar_missing");
     assert_eq!(record["severity_text"], "ERROR");
@@ -328,52 +331,6 @@ fn a_developer_policy_that_rerenders_history_warns_at_start() {
             "{policy} moves no message and warns about nothing"
         );
     }
-}
-
-/// Spec image-model/05 §Prompt enhancement (review-322cf M3): a start whose
-/// `image.prompt_enhancer` names no text model it can switch to warns once,
-/// naming it — from the flag, which the live knobs now carry from the start
-/// — and goes on; one naming the model it serves says nothing.
-#[test]
-fn an_enhancer_no_switch_reaches_warns_at_start() {
-    let records = run_until(&["--image-prompt-enhancer", "nobody"], &[], &["ignis.process.started"]);
-    let warning = find(&records, "ignis.config.prompt_enhancer_unknown");
-    assert_eq!(warning["severity_text"], "WARN");
-    assert_eq!(warning["attributes"]["enhancer"], "nobody");
-    assert!(warning["attributes"]["reason"].as_str().unwrap().contains("switch.known_models"), "{warning}");
-    let served = find(&records, "ignis.process.started");
-    let records = run_until(&[], &[], &["ignis.process.started"]);
-    assert!(
-        !records.iter().any(|r| r["event_name"] == "ignis.config.prompt_enhancer_unknown"),
-        "the default enhancer is the model this start serves: {served}"
-    );
-}
-
-/// GitHub #260: the load says how `point` will be answered before the first
-/// request. A load with no artifact binds no vision, so it says neither
-/// method; `chain` and the served artifact's `head` need a `--vision-enabled` load,
-/// which is the GPU profile's to see.
-#[test]
-fn the_load_says_which_method_point_will_use() {
-    let records = run_until(&[], &[], &["ignis.process.started"]);
-    let method = find(&records, "ignis.decide.pointing_head");
-    assert_eq!(method["severity_text"], "INFO");
-    assert_eq!(method["attributes"]["point_method"], "none", "{method}");
-    // GitHub #263: and whether a box can be asked for `head` — no image, no
-    // box either way.
-    assert_eq!(method["attributes"]["box_methods"], "none", "{method}");
-    assert!(method["attributes"]["artifact"].as_str().is_some(), "{method}");
-}
-
-/// GitHub #275: the load says whether `locate` can be answered before the
-/// first request. A load with no artifact has nobody's heads, so it cannot.
-#[test]
-fn the_load_says_whether_locate_is_available() {
-    let records = run_until(&[], &[], &["ignis.process.started"]);
-    let locate = find(&records, "ignis.decide.locate");
-    assert_eq!(locate["severity_text"], "INFO");
-    assert_eq!(locate["attributes"]["available"], false, "{locate}");
-    assert!(locate["attributes"]["artifact"].as_str().is_some(), "{locate}");
 }
 
 #[test]

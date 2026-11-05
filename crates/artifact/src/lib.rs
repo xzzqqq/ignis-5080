@@ -34,7 +34,6 @@ pub mod inventory;
 pub mod materializer;
 pub mod normalize;
 pub mod packer;
-pub mod qwen_image;
 pub mod f64_reference;
 pub mod vision;
 pub mod writer;
@@ -947,7 +946,11 @@ mod direct_io {
 
 #[cfg(unix)]
 mod direct_io {
-    use libc::{close, open, pread, O_CLOEXEC, O_DIRECT, O_RDONLY};
+    use libc::{close, open, pread, O_CLOEXEC, O_RDONLY};
+    #[cfg(target_os = "linux")]
+    use libc::O_DIRECT;
+    #[cfg(not(target_os = "linux"))]
+    const O_DIRECT: i32 = 0;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 

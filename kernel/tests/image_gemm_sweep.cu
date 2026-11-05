@@ -3,7 +3,7 @@
 
 #include "image_gemm_sweep.h"
 
-#include "image/fp8_gemm_kernel.cuh"
+#include "fp8_gemm/fp8_gemm_kernel.cuh"
 
 namespace image_gemm_sweep {
 namespace {

@@ -717,7 +717,7 @@ fn operator_catalog() -> OneFile {
     let file = |f: &CatalogFile| format!("      - {{ name: {}, bytes: {}, sha256: \"{}\" }}\n", f.name, f.bytes, f.sha256);
     let entry = entry();
     let text = format!(
-        "models:\n  - id: test-model\n    repo: {REPO}\n    revision: \"{REVISION}\"\n    artifact: {ARTIFACT}\n    card_class: 32\n    files:\n{}{}",
+        "models:\n  - id: test-model\n    repo: {REPO}\n    revision: \"{REVISION}\"\n    artifact: {ARTIFACT}\n    card_class: 16\n    files:\n{}{}",
         file(&entry.files[0]),
         file(&entry.files[1])
     );

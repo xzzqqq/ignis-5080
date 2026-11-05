@@ -5,7 +5,7 @@
 - Observed: 2026-09-28
 - Last verified: 2026-09-28
 - Scope: `/v1/decide` `locate` and the generation route over real logs (one production cluster, public LogHub samples), 16K-200K tokens; spec 21's registered hypotheses on a fresh set; the folded method (owner's idea)
-- Related: [spec 21](../specs/decide/21-locate-in-real-logs.md) (registered in `e17c5e8`, judge `c5d3386`, both before R2 was asked); [the instance is read while copying](2026-09-27-the-instance-is-read-while-copying.md) (the exploratory results judged here); [locate at length](2026-09-27-locate-at-length.md); [`compress.py`](../../tools/locate-sets/compress.py), [`folded_locate.py`](../../tools/locate-sets/folded_locate.py), [`r2_judge.py`](../../tools/locate-sets/r2_judge.py)
+- Related: [spec 21](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/decide/21-locate-in-real-logs.md) (registered in `e17c5e8`, judge `c5d3386`, both before R2 was asked); [the instance is read while copying](2026-09-27-the-instance-is-read-while-copying.md) (the exploratory results judged here); [locate at length](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-09-27-locate-at-length.md); [`compress.py`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/tools/locate-sets/compress.py), [`folded_locate.py`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/tools/locate-sets/folded_locate.py), [`r2_judge.py`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/tools/locate-sets/r2_judge.py)
 - Superseded by: none
 
 ## Question

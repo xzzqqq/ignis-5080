@@ -21,7 +21,7 @@
 //!
 //! The admission moving a decoding victim *through the server's own load* is
 //! AC 23's first leg, `kv_disk_gpu.rs`. Machine-local artifacts
-//! (`IGNIS_ARTIFACT_27B`, `IGNIS_FLASH_NEXT_DIR`); explicit GPU profile (ADR
+//! (`IGNIS_ARTIFACT_27B`); explicit GPU profile (ADR
 //! 0006): a missing artifact or GPU is a skip outside it, a failure under it.
 //! The files go under this checkout's `.scratch/kv-disk-gpu/` (or
 //! `IGNIS_KV_DISK_TEST_DIR`), emptied after each leg.
@@ -32,20 +32,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use ignis_artifact::packer::ARTIFACT_FILE_NAME;
 use ignis_artifact::{FrontendSet, Reader};
 use ignis_core::ngram_cache::CacheLocation;
 use ignis_core::scheduler::DiskSource;
 use ignis_core::types::{DecodeParams, FinishReason, RequestClass, RequestId, RequestInput, SchedEvent};
 use ignis_core::{gpu_profile, ConcreteScheduler, Scheduler};
-use ignis_server::runtime::{cuda_scheduler_with_thinking_close, flash_next_scheduler_with_ngram_cache, EngineShape};
+use ignis_server::runtime::{cuda_scheduler_with_thinking_close, EngineShape};
 
-const ARTIFACT_27B: &str = r"F:\ai\q38\ninfer-models\qwen3_8_27b_nvfp4full-v2.ninfer";
+const ARTIFACT_27B: &str = r"models/qwen3_8_27b_trellis_sc30-v2.ninfer";
 const MODEL_27B: &str = "qwen3.8-27b";
-const FLASH_NEXT_DIR: &str = "F:/ai/models/Qwen3.8-Flash-Next-ignis";
-const MODEL_FLASH_NEXT: &str = "qwen3.8-flash-next";
-/// Flash-Next's EOS (generation_config.json).
-const EOS_FLASH_NEXT: u32 = 248_044;
 const PAGE_TOKENS: u32 = 64;
 const CONTEXT: u32 = 8192;
 /// A's prompt and tokens: over half the context, so no arrival of the same
@@ -54,8 +49,7 @@ const A_PROMPT: u32 = 4400;
 const A_TOKENS: u32 = 120;
 const B_PROMPT: u32 = 4300;
 const B_TOKENS: u32 = 16;
-/// The arena of the KV-RAM leg: A's blob at this context is ~150 MB on
-/// Flash-Next and ~270 MB on the 27B.
+/// The arena of the KV-RAM leg: A's blob at this context is ~270 MB.
 const ARENA_BYTES: u64 = 512 << 20;
 /// No run takes longer than this; a move that never lands fails here instead
 /// of spinning.
@@ -64,8 +58,7 @@ const MAX_RUN: std::time::Duration = std::time::Duration::from_secs(600);
 #[derive(Debug, Clone, Copy)]
 enum Family {
     Qwen27b,
-    FlashNext,
-}
+    }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tier {
@@ -137,8 +130,7 @@ fn shape(family: Family, tier: Tier) -> EngineShape {
     };
     match family {
         Family::Qwen27b => base,
-        Family::FlashNext => EngineShape { decode_lanes: 2, prefill_chunk: 2048, ..base },
-    }
+        }
 }
 
 fn load(family: Family, tier: Tier, blobs: &BlobDir) -> Option<(ConcreteScheduler, ignis_server::metrics::LoadReservations, String)> {
@@ -155,24 +147,7 @@ fn load(family: Family, tier: Tier, blobs: &BlobDir) -> Option<(ConcreteSchedule
             cuda_scheduler_with_thinking_close(&path, MODEL_27B.into(), eos, shape(family, tier), None, &location)
                 .map(|(s, r)| (s, r, MODEL_27B.to_owned()))
         }
-        Family::FlashNext => {
-            let dir = std::env::var_os("IGNIS_FLASH_NEXT_DIR").map_or_else(|| PathBuf::from(FLASH_NEXT_DIR), PathBuf::from);
-            let path = dir.join(ARTIFACT_FILE_NAME);
-            if !path.exists() && gpu_profile::skip_or_fail(&format!("no Flash-Next artifact at {}", path.display())) {
-                return None;
-            }
-            flash_next_scheduler_with_ngram_cache(
-                &path,
-                MODEL_FLASH_NEXT.into(),
-                EOS_FLASH_NEXT,
-                shape(family, tier),
-                None,
-                Default::default(),
-                &location,
-            )
-            .map(|(s, r)| (s, r, MODEL_FLASH_NEXT.to_owned()))
-        }
-    };
+        };
     match loaded {
         Ok(loaded) => Some(loaded),
         Err(e) => {
@@ -355,16 +330,4 @@ fn qwen27b_a_live_move_resumes_bit_exact_through_kv_ram() {
 #[ignore = "GPU profile only: the real 27B artifact"]
 fn qwen27b_a_live_move_resumes_bit_exact_through_kv_disk() {
     a_live_move_resumes_bit_exact(Family::Qwen27b, Tier::KvDisk);
-}
-
-#[test]
-#[ignore = "GPU profile only: the real Flash-Next artifact"]
-fn flash_next_a_live_move_resumes_bit_exact_through_kv_ram() {
-    a_live_move_resumes_bit_exact(Family::FlashNext, Tier::KvRam);
-}
-
-#[test]
-#[ignore = "GPU profile only: the real Flash-Next artifact"]
-fn flash_next_a_live_move_resumes_bit_exact_through_kv_disk() {
-    a_live_move_resumes_bit_exact(Family::FlashNext, Tier::KvDisk);
 }

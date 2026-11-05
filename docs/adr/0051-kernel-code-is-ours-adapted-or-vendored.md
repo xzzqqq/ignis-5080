@@ -26,7 +26,7 @@ The image model (ADR 0050) needs kernels ignis does not have:
 
 Well-optimized, permissively licensed versions exist for the 5090:
 FlashAttention-2, SageAttention, CUTLASS 2.x, FlashInfer and ggml (survey:
-[kernels for the image model on the 5090](../findings/2026-10-13-image-model-kernels-on-the-5090.md)).
+[kernels for the image model on the 5090](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-13-image-model-kernels-on-the-5090.md)).
 Writing a known kernel again from scratch costs more than it teaches. Copying
 parts of one costs little, provided the source and licence stay on record.
 

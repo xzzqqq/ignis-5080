@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import { contextUsage } from "../metrics/context.ts";
 import { ImageStrip } from "../tools/image/ImageStrip.tsx";
 import { Composer } from "./Composer.tsx";
-import { fixedDictation } from "../speech/fixture.ts";
 import { UserTurn } from "./UserTurn.tsx";
 
 // The chat's pictures and what can be done with them: a picture the user sent
@@ -19,7 +18,7 @@ describe("pictures of the conversation", () => {
     const message = { id: 1, role: "user" as const, content: "what is this", reasoning: "", streaming: false, images: [image] };
     const html = renderToStaticMarkup(<UserTurn message={message} actions={actions} onResend={none} onPicture={none} />);
     expect(html).toContain('aria-label="Mark room.jpg"');
-    expect(html).toContain('aria-label="Open room.jpg in the Image view"');
+    expect(html).not.toContain('aria-label="Open room.jpg in the Image view"');
     expect(renderToStaticMarkup(<UserTurn message={message} actions={actions} onResend={none} />)).not.toContain("Mark room.jpg");
   });
 
@@ -35,7 +34,7 @@ describe("pictures of the conversation", () => {
     };
     const html = renderToStaticMarkup(<ImageStrip runs={[run]} onPicture={none} />);
     expect(html).toContain('aria-label="Mark made-1.png"');
-    expect(html).toContain('aria-label="Open made-1.png in the Image view"');
+    expect(html).not.toContain('aria-label="Open made-1.png in the Image view"');
     expect(html).toContain("Marked area only");
     expect(renderToStaticMarkup(<ImageStrip runs={[run]} />)).not.toContain("Mark made-1.png");
   });
@@ -74,7 +73,6 @@ describe("pictures of the conversation", () => {
       onAddImages: none,
       onRemoveImage: none,
       onMarkImage: none,
-      dictation: fixedDictation(),
     };
     const marked = { ...image, markup: { source: new Blob([]), marks: [], keepOutside: true, region: new Blob([]) } };
     const html = renderToStaticMarkup(<Composer {...props} images={[image, marked]} />);

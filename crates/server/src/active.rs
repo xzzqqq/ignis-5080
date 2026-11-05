@@ -15,7 +15,6 @@ use std::sync::{Arc, Mutex};
 use ignis_core::compute::{ModelFamily, ModelKind};
 
 use crate::engine::Engine;
-use crate::images::ImageModel;
 use crate::media::MediaAcquirer;
 use crate::template::TemplateProvider;
 
@@ -37,7 +36,7 @@ use crate::template::TemplateProvider;
 #[derive(Clone)]
 pub struct ActiveModel {
     /// What the model computes with, by its kind (spec image-model/05).
-    pub runner: Runner,
+    pub runner: Engine,
     /// The chat-template / tokenizer seam (artifact-02 plugs the real
     /// frontend object set in here).
     pub template: Arc<dyn TemplateProvider>,
@@ -87,16 +86,6 @@ pub struct ActiveModel {
     driver: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
-/// What a loaded model computes with: its [`ModelKind`] as a value.
-#[derive(Clone)]
-pub enum Runner {
-    /// A text model's engine: the core scheduler + per-request event
-    /// routing (submit / drive / route — `engine.rs`).
-    Text(Engine),
-    /// The image model's runner and job count (`crate::images`).
-    Image(ImageModel),
-}
-
 /// The work waiting and running on a loaded model
 /// ([`ActiveModel::in_flight`]): a text model's requests not yet on a lane
 /// and on one, the image model's jobs queued and the one running.
@@ -137,7 +126,7 @@ impl ActiveModel {
             calibration: ignis_core::pointing::calibration(engine.artifact()),
             locate: ignis_core::locate::calibration(engine.artifact()),
             alphabet: Arc::new(template.answer_alphabet()),
-            runner: Runner::Text(engine),
+            runner: engine,
             template,
             family: ModelFamily::Qwen38_27b,
             media: None,
@@ -147,89 +136,35 @@ impl ActiveModel {
         }
     }
 
-    /// The image model `image` (ADR 0050): its family, the placeholder
-    /// template, no calibration, labels nor acquirer, and no source until
-    /// [`ActiveModel::with_source`].
-    pub fn image(image: ImageModel) -> Self {
-        let template: Arc<dyn TemplateProvider> = Arc::new(crate::template::SimpleTemplateProvider);
-        Self {
-            calibration: None,
-            locate: None,
-            alphabet: Arc::new(template.answer_alphabet()),
-            runner: Runner::Image(image),
-            template,
-            family: ModelFamily::QwenImage21,
-            media: None,
-            source: None,
-            adapted: String::new(),
-            driver: Arc::default(),
-        }
-    }
-
     /// What the model produces: what its runner is.
-    pub fn kind(&self) -> ModelKind {
-        match self.runner {
-            Runner::Text(_) => ModelKind::Text,
-            Runner::Image(_) => ModelKind::Image,
-        }
-    }
+    pub fn kind(&self) -> ModelKind { ModelKind::Text }
 
     /// The id it is served under.
-    pub fn model_id(&self) -> String {
-        match &self.runner {
-            Runner::Text(engine) => engine.model_id(),
-            Runner::Image(image) => image.model_id(),
-        }
-    }
+    pub fn model_id(&self) -> String { self.runner.model_id() }
 
     /// A text model's engine; `None` on the image model, which has none.
-    pub fn engine(&self) -> Option<&Engine> {
-        match &self.runner {
-            Runner::Text(engine) => Some(engine),
-            Runner::Image(_) => None,
-        }
-    }
+    pub fn engine(&self) -> Option<&Engine> { Some(&self.runner) }
 
     /// The engine of a model a text route has checked the kind of
     /// (`crate::api::check_served_kind`): every route that reads it refuses
     /// the image model first, so the image model here is a route that skipped
     /// the check, and that panics naming it rather than serving it.
-    pub fn text_engine(&self) -> &Engine {
-        self.engine().unwrap_or_else(|| panic!("{} is an image model and has no engine: a text route skipped the kind check", self.model_id()))
-    }
-
-    /// The image model's runner and jobs; `None` on a text model.
-    pub fn image_model(&self) -> Option<&ImageModel> {
-        match &self.runner {
-            Runner::Text(_) => None,
-            Runner::Image(image) => Some(image),
-        }
-    }
+    pub fn text_engine(&self) -> &Engine { &self.runner }
 
     /// The work waiting and running on it now: what the idle clock reads to
     /// tell it is in use, and a switch's drain to tell it is done. A text
     /// model's from its engine's wait-free counters, the image model's from
     /// its job count.
     pub fn in_flight(&self) -> InFlight {
-        match &self.runner {
-            Runner::Text(engine) => {
-                let counters = engine.interval_counters();
-                InFlight { waiting: counters.waiting, running: counters.running }
-            }
-            Runner::Image(image) => image.jobs.in_flight(),
-        }
+        let counters = self.runner.interval_counters();
+        InFlight { waiting: counters.waiting, running: counters.running }
     }
 
     /// Tell the model to stop now, not waiting for it: a text model's thread
     /// ends every request still on it with an error ([`Engine::shutdown`]);
     /// the image model's queue admits nothing more and cancels its jobs
     /// between denoising steps.
-    pub fn stop(&self) {
-        match &self.runner {
-            Runner::Text(engine) => engine.shutdown(),
-            Runner::Image(image) => image.jobs.close(),
-        }
-    }
+    pub fn stop(&self) { self.runner.shutdown(); }
 
     /// Keep the model thread's handle (`Engine::with_clock_and_driver`) so a
     /// switch away from this model can join it.
@@ -274,9 +209,6 @@ impl ActiveModel {
     /// for — nothing was kept to wait on. Calling this twice is harmless.
     pub fn shut_down(&self) {
         self.stop();
-        if let Runner::Image(image) = &self.runner {
-            image.shut_down();
-        }
         let driver = self.driver.lock().expect("driver lock").take();
         if let Some(driver) = driver {
             if driver.join().is_err() {

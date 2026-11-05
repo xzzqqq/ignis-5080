@@ -32,7 +32,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{options, post};
+use axum::routing::options;
 use axum::{Json, Router};
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
@@ -184,35 +184,6 @@ fn v1_parts() -> (Router<Arc<Server>>, utoipa::openapi::OpenApi) {
         // GitHub #282: the Responses API, and its WebSocket mode as the
         // `get` of the same path.
         .routes(routes!(crate::responses::create_response, crate::responses::socket::connect))
-        // GitHub #239 — the decision endpoint, and the Jev name for it so an
-        // unmodified Jev client reaches this server by changing the URL.
-        // The alias is a `route`, not a `routes!`: it is the same handler
-        // under a second name, and OpenAPI has no notion of an alias, so
-        // listing it would duplicate every schema reference under it. The
-        // `/v1/decide` description names it instead.
-        .routes(routes!(crate::decide::decide))
-        .route(
-            "/v1/systemone",
-            post(crate::decide::decide).options(cors_preflight),
-        )
-        // Spec image-model/05: the image model's routes. An edit's form
-        // carries up to ten condition images, so its body limit is the media
-        // one on every load: the image model has no vision acquirer, which is
-        // what widens it for the chat routes.
-        .routes(routes!(crate::images::routes::create_image))
-        .routes({
-            let (schemas, paths, edits) = routes!(crate::images::routes::create_image_edit);
-            (schemas, paths, edits.layer(axum::extract::DefaultBodyLimit::max(MEDIA_REQUEST_BODY_LIMIT)))
-        })
-        // Spec speech/02: the speech model's transcription. A form carries the
-        // audio itself, up to 20 minutes of it uncompressed, so its body limit
-        // is the media one on every load.
-        .routes({
-            let (schemas, paths, transcribe) = routes!(crate::speech::route::create_transcription);
-            (schemas, paths, transcribe.layer(axum::extract::DefaultBodyLimit::max(MEDIA_REQUEST_BODY_LIMIT)))
-        })
-        // Spec speech/03: the Realtime transcription session, a WebSocket.
-        .routes(routes!(crate::speech::realtime::connect))
         .route("/v1/models", options(cors_preflight))
         .route("/v1/models/switch", options(cors_preflight))
         .route("/v1/models/catalog", options(cors_preflight))
@@ -226,10 +197,6 @@ fn v1_parts() -> (Router<Arc<Server>>, utoipa::openapi::OpenApi) {
         .route("/v1/tokenize", options(cors_preflight))
         .route("/v1/detokenize", options(cors_preflight))
         .route("/v1/responses", options(cors_preflight))
-        .route("/v1/decide", options(cors_preflight))
-        .route("/v1/images/generations", options(cors_preflight))
-        .route("/v1/images/edits", options(cors_preflight))
-        .route("/v1/audio/transcriptions", options(cors_preflight))
         .split_for_parts();
     describe_fields(&mut document);
     (router, document)
@@ -244,9 +211,6 @@ fn describe_fields(document: &mut utoipa::openapi::OpenApi) {
     for (path, surface) in [
         ("/v1/chat/completions", Surface::Chat),
         ("/v1/responses", Surface::Responses),
-        ("/v1/images/generations", Surface::Images),
-        ("/v1/images/edits", Surface::Images),
-        ("/v1/audio/transcriptions", Surface::Transcriptions),
     ] {
         let operation = document.paths.paths.get_mut(path).and_then(|item| item.post.as_mut());
         let operation = operation.expect("the operations with a field table are documented");
@@ -327,11 +291,7 @@ async fn require_serving(State(server): State<Arc<Server>>, req: Request, next: 
     // The field declarations are static (spec playground/05): nothing about
     // the model's state changes them, so no state holds them back.
     let static_route = req.method() == axum::http::Method::GET && req.uri().path() == "/v1/config/fields";
-    // Spec speech/02 (Q40): the speech model is no part of a switch, a load or
-    // a warm-up, and serves on the CPU through all of them.
-    let speech_route = (req.method() == axum::http::Method::POST && req.uri().path() == "/v1/audio/transcriptions")
-        || (req.method() == axum::http::Method::GET && req.uri().path() == "/v1/realtime");
-    if switch_route || static_route || speech_route || req.method() == axum::http::Method::OPTIONS {
+    if switch_route || static_route || req.method() == axum::http::Method::OPTIONS {
         return next.run(req).await;
     }
     let message = match &*status {
@@ -665,9 +625,8 @@ async fn count_use(State(server): State<Arc<Server>>, req: Request, next: Next) 
 /// (`crate::responses::socket`). A
 /// test classifies every documented `/v1` operation as one of these or as
 /// one that does not use the model, so a new route is never left out unseen.
-const MODEL_ROUTES: [&str; 8] = [
-    "/v1/chat/completions", "/v1/responses", "/v1/decide", "/v1/systemone", "/v1/tokenize", "/v1/detokenize",
-    "/v1/images/generations", "/v1/images/edits",
+const MODEL_ROUTES: [&str; 4] = [
+    "/v1/chat/completions", "/v1/responses", "/v1/tokenize", "/v1/detokenize",
 ];
 
 /// Whether a request uses the model ([`MODEL_ROUTES`]), for idle unload.
@@ -791,9 +750,6 @@ pub(crate) struct PreparedRequest {
     /// What acquiring the request's media cost, for its events; `None`
     /// without media.
     pub media: Option<MediaStats>,
-    /// Where each content part of the last message ends, in tokens (GitHub
-    /// #270, [`RenderedPrompt::part_ends`]); empty unless asked for.
-    pub part_ends: Vec<Option<u32>>,
     /// The rendered text and each token's byte range in it (GitHub #275,
     /// [`RenderedPrompt::text`]); `None` unless asked for.
     pub text: Option<crate::template::PromptText>,
@@ -847,7 +803,6 @@ fn build_request(
     // replaces this built-in provider through the same constructor
     // injection (v1 placeholder: deterministic word-hash tokens).
     let rendered = match structure {
-        Structure::PartEnds => server.active().template.apply_chat_template_with_part_ends(messages, thinking, tools)?,
         Structure::Text => server.active().template.apply_chat_template_with_text(messages, thinking, tools)?,
         Structure::Tokens => server.active().template.apply_chat_template(messages, thinking, tools)?,
     };
@@ -891,7 +846,7 @@ fn request_input(
         forced_literal: None,
         warm_up: false,
 };
-    Ok(PreparedRequest { input, model, prompt_tokens, media: None, part_ends: rendered.part_ends, text })
+    Ok(PreparedRequest { input, model, prompt_tokens, media: None, text })
 }
 
 /// What a render reports beside its tokens: nothing more, where each part of
@@ -900,7 +855,6 @@ fn request_input(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Structure {
     Tokens,
-    PartEnds,
     Text,
 }
 
@@ -951,52 +905,12 @@ async fn prepare_input(
     // A media prompt reports no text: a `locate` refuses a parts `state`
     // before it renders one.
     let prepared = match structure {
-        Structure::PartEnds => model_loaded.template.prepare_multimodal_with_part_ends(messages, thinking, tools, acquired.media),
         Structure::Tokens | Structure::Text => model_loaded.template.prepare_multimodal(messages, thinking, tools, acquired.media),
     };
     let (rendered, multimodal) = prepared.map_err(content_rejection)?;
     let prepared =
         request_input(server, model, rendered, params, Some(multimodal)).map_err(template_rejection)?;
     Ok(PreparedRequest { media: Some(acquired.stats), ..prepared })
-}
-
-/// [`prepare_request`] for one question of a decision (GitHub #239): no
-/// model override, no tools, thinking already forced off by the caller.
-///
-/// Shares the conversation path rather than duplicating it, so a decision's
-/// prompt goes through the same instruction policy, the same media
-/// acquisition and the same multimodal render as a chat turn — an image is
-/// evidence here exactly as it is there. The error is a rendered response,
-/// ready to stand in a question's slot.
-///
-/// With [`Structure::PartEnds`], the render reports where each content part
-/// of the last message ends (GitHub #270) — the decision's `state` parts —
-/// which is what its reuse boundaries are cut from; with
-/// [`Structure::Text`], the rendered text and each token's place in it,
-/// which is what a `locate` maps its segments by (GitHub #275).
-pub(crate) async fn prepare_decision_request(
-    server: &Server,
-    model: Option<String>,
-    messages: &[ChatMessage],
-    params: DecodeParams,
-    thinking: &ThinkingOptions,
-    structure: Structure,
-) -> Result<PreparedRequest, (&'static str, String)> {
-    prepare_input(server, model, messages, params, thinking, &[], structure)
-        .await
-        .map_err(|response| {
-            // The shared path answers with a rendered `Response`, which is
-            // the wrong shape here: a decision's refusal is one of N, and
-            // has to carry a code the decision's own 422 can name. What
-            // survives the crossing is the status, which is enough to say
-            // *which* of the two things went wrong.
-            let code = if response.status() == StatusCode::BAD_REQUEST {
-                "malformed_request"
-            } else {
-                "render_failed"
-            };
-            (code, format!("its prompt was refused ({})", response.status()))
-        })
 }
 
 /// The response for refused media (GitHub #179): a 400 with the media
@@ -1846,8 +1760,6 @@ pub(crate) fn now() -> u64 {
     summary = "The servable models, the loaded one first",
     description = "The models a request may name and be served by now, without a download. `data[0]` is always the model this server loaded (`active: true`), with its `kind` (`text` or `image`: the routes it serves; the speech model's is `speech`) and for a text model the context a single request may spend (`max_model_len`, prompt plus completion), how many requests it decodes at once (`decode_lanes`) and every adaptation its load took to fit the VRAM plan (`adapted`, in the order taken, as the `ignis.runtime.vram_plan` log line spells them; `\"\"` when it took none — the 27B under `rtx50-16gb` in a 13 GiB budget (16 GiB less 3 GiB of desktop) says `max_context 262144 -> 65536 (adapt_context_step 65536, adapt_spare_tokens 65536)`). `max_model_len` and `decode_lanes` are the values the load runs, after any adaptation; `GET /v1/config` keeps the values configured. The other entries (`active: false`) are the models a request naming them switches to: every catalog entry whose artifact is under `download.path` (catalog order), then every known model (`switch.known_models`, and the model the server started on) whose artifact is a file (id order) — read at each request, so a model downloaded into a running server is listed at once. Their `kind` is given only when the id is a model family's own, and `max_model_len`, `decode_lanes` and `adapted` never: they are known once a model is loaded. No entry carries a path. With `switch.allow_implicit` false only `data[0]` is listed. Among the others, a catalog entry on disk whose `card_class` is above this card's (ADR 0064) is listed with `available: false` and the `reason`, naming its class and the card's: a request naming it is refused `409 model_above_card_class` and never switches to it — or, on a card where another entry answers to its id (on a 16 GB card `qwen3.8-27b-16g` to `qwen3.8-27b`), is served by that one, which the reason names. Every other entry is `available: true`. A server serves one text or image model at a time: a request naming another entry waits while it replaces the loaded one; a text request naming the image model is refused `409 model_kind_mismatch`. The speech model is loaded beside it, not instead of it (ADR 0067): it is listed right after `data[0]`, with `kind: \"speech\"`, `active: true` and `available: true`, only while it is available -- turned on by `speech.model`, its files on disk and the host able to run it -- whether or not it is loaded right now, and never as a model a switch goes to. Its compat names (`speech.compat_names`) are not listed.
 
-The top-level `speech` object, `{\"available\": bool, \"reason\": string, \"diarizer\": {...}}`, is always present, beside `status`: `reason` says why the speech model cannot serve (turned off, its files missing and the command that fetches them, or the CPU lacking AVX2) and is absent while it can, so a page can disable its microphone before it is pressed. Its `diarizer` member, `{\"id\": string, \"loaded\": bool, \"available\": bool, \"reason\": string}`, says the same of the diarizer that gives a Realtime session its speakers (`diarizer.model`; it is no entry of `data`, no request names it): `id` is the model `diarizer.model` names and is absent when it names none, `loaded` whether its weights are in memory now (the first session that asks for speakers loads them, the speech model's idle unload frees them), `available` and `reason` as the speech model's, the reason naming `ignis-server model download <id>` when its files are missing.
-
 `status` beside the entries says what the API is doing, and speaks of `data[0]`: `serving`; `switching` while a switch replaces the model (`switching` names both ids, and `data[0]` is still the old model until the new one serves); or `failed` when the last switch failed (`reason` says why) — briefly, while the previous model is reloaded, or until a switch succeeds when it could not be. While switching or failed this route answers; every other `/v1` route answers 503 -- but `POST /v1/audio/transcriptions` and `GET /v1/realtime`, which serve on the CPU through a switch.
 
 `unloaded` when nobody used the model for `model.idle_unload` seconds and it was unloaded (`data[0]` still names it, and the API stays up): the next request that needs it loads it again and is served once it is warm. `loading` while that load runs, `switching` naming what loads; requests arriving meanwhile wait for it. A load out of `unloaded` that fails is `failed`, and the next request tries again.",
@@ -1886,30 +1798,6 @@ fn models_now(server: &Server) -> ModelList {
         available: true,
         reason: None,
     }];
-    // The speech model (ADR 0067, spec speech/02): beside the loaded one, not
-    // instead of it, and listed only while it can serve. Right after
-    // `data[0]`, which stays the text or image model.
-    let speech = server.speech.availability(&server.live().speech);
-    let diarizer = server.speech.diarizer_availability();
-    let speech_state = SpeechState {
-        available: speech.available(),
-        reason: speech.reason.clone(),
-        diarizer: DiarizerState { id: diarizer.id, loaded: diarizer.loaded, available: diarizer.reason.is_none(), reason: diarizer.reason },
-    };
-    if let (true, Some(id)) = (speech.available(), speech.id) {
-        data.push(ModelInfo {
-            id,
-            object: "model",
-            owned_by: "ignis",
-            active: true,
-            kind: Some(ModelKind::Speech.as_str()),
-            max_model_len: None,
-            decode_lanes: None,
-            adapted: None,
-            available: true,
-            reason: None,
-        });
-    }
     // No header read here: a family's own id says its kind, any other none.
     data.extend(rest.into_iter().map(|servable| ModelInfo {
         kind: ModelFamily::of_model_id(&servable.id).map(|family| family.kind().as_str()),
@@ -1927,7 +1815,6 @@ fn models_now(server: &Server) -> ModelList {
         object: "list",
         data,
         status: status.as_str(),
-        speech: speech_state,
         switching: match &*status {
             ModelStatus::Switching { from, to } => Some(SwitchIds { from: from.clone(), to: to.clone() }),
             // The load leaving `unloaded` (spec model-switch/02): what loads.
@@ -1953,9 +1840,6 @@ struct ModelList {
     /// `serving`, `switching` or `failed` (spec model-switch/01); `unloaded`
     /// or `loading` (spec model-switch/02).
     status: &'static str,
-    /// Whether the speech model can serve, and if not why (spec speech/02):
-    /// always present.
-    speech: SpeechState,
     /// The switch under way, while `status` is `switching`; the load under
     /// way, while it is `loading`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1967,37 +1851,6 @@ struct ModelList {
     /// absent before the first.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_switch: Option<LastSwitchInfo>,
-}
-
-/// Whether the speech model can serve.
-#[derive(Serialize, ToSchema)]
-struct SpeechState {
-    available: bool,
-    /// Why it cannot: turned off, its files missing (with the command that
-    /// fetches them), or the host unable to run it. Absent while it can.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    /// The diarizer beside it (spec speech/08): no request names it, so it
-    /// is no entry of `data`.
-    diarizer: DiarizerState,
-}
-
-/// Whether the diarizer can serve, and whether it is in memory.
-#[derive(Serialize, ToSchema)]
-struct DiarizerState {
-    /// The id `diarizer.model` names; absent when it names none (`off`, or
-    /// `auto` with no diarizer in the catalog).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    /// Whether its weights are in memory now: loaded by the first session
-    /// that asks for speakers, unloaded with the speech model.
-    loaded: bool,
-    available: bool,
-    /// Why it cannot: turned off, no diarizer in the catalog, its files
-    /// missing (with the command that fetches them), or the host unable to
-    /// run it. Absent while it can.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
 }
 
 /// How a switch or a reload ended.
@@ -2209,24 +2062,6 @@ fn resolve_by_id(server: &Server, model: &str) -> Result<std::path::PathBuf, Res
     switcher.resolve(model).map_err(|why| {
         let message = match why {
             Unswitchable::AboveClass(refusal) => return above_card_class(&refusal),
-            Unswitchable::Speech => {
-                return error_response_naming(
-                    StatusCode::CONFLICT,
-                    "invalid_request_error",
-                    "model_kind_mismatch",
-                    format!("{model} is a speech model: it is loaded beside the active model by a transcription, and a switch never goes to it"),
-                    Some("model"),
-                )
-            }
-            Unswitchable::Diarizer => {
-                return error_response_naming(
-                    StatusCode::CONFLICT,
-                    "invalid_request_error",
-                    "model_kind_mismatch",
-                    format!("{model} is a diarizer: it is loaded beside the speech model by the first session that asks for speakers, and a switch never goes to it"),
-                    Some("model"),
-                )
-            }
             Unswitchable::Unknown => format!(
                 "unknown model: {model} is neither in switch.known_models nor a catalog entry; GET /v1/models/catalog lists the models this server can switch to"
             ),
@@ -3727,8 +3562,6 @@ mod tests {
             ("GET", "/v1/responses"),
             // The speech model runs beside the text model on the CPU, and a
             // transcription is no use of it (spec speech/02, Q40).
-            ("POST", "/v1/audio/transcriptions"),
-            ("GET", "/v1/realtime"),
         ];
         let (_, document) = v1_parts();
         let document = serde_json::to_value(&document).expect("the document serializes");

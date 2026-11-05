@@ -19,7 +19,7 @@
   [ADR 0075](../adr/0075-the-vision-tower-is-staged-and-the-embedding-pool-host-mapped-unless-the-load-asks-for-the-device.md),
   [decode round anatomy](2026-09-18-decode-round-anatomy.md),
   [dense trellis kernels on the 5090](2026-10-23-dense-trellis-kernels-on-the-5090.md),
-  [Flash-Next decode fusion](2026-10-08-flash-next-decode-fusion.md)
+  [Flash-Next decode fusion](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-08-flash-next-decode-fusion.md)
 - Superseded by: none
 
 ## Question
@@ -232,7 +232,7 @@ stored as `[in/16][out/16]` words (`ignis_trellis_linear.h:9-11`) and could be r
 - **The NVFP4 decode round:** 1,166 nodes, 4.8% idle; host submission ~0.32 µs per node; all memcpy nodes together
   ~0.5% of the round ([decode round anatomy](2026-09-18-decode-round-anatomy.md)).
 - **Launch cost:** about 1 µs is the bare cost of a launch in graph replay on the 5090
-  ([Flash-Next decode fusion](2026-10-08-flash-next-decode-fusion.md)).
+  ([Flash-Next decode fusion](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-08-flash-next-decode-fusion.md)).
 
 ### E10. Dispatches in a trellis decode round, counted from the code
 

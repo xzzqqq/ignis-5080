@@ -179,22 +179,6 @@ fn in_use(server: &Server, entry: &CatalogEntry, dir: &Path) -> Option<String> {
             entry.id
         ));
     }
-    // Spec speech/02: the speech model serves beside the loaded one, from
-    // the files its worker loaded, until the worker unloads it.
-    if let Some(speech) = server.speech.loaded().filter(|speech| lists_file(entry, dir, &speech.decoder)) {
-        return Some(format!(
-            "{} is the speech model loaded ({}), which transcribes from its files; remove it once the speech worker has unloaded it, speech.idle_unload seconds after its last transcription",
-            entry.id, speech.id
-        ));
-    }
-    // Spec speech/08: the diarizer reads its GGUF for the sessions with
-    // speakers until the speech worker unloads it with the speech model.
-    if server.speech.diarizer_loaded().is_some_and(|weights| lists_file(entry, dir, &weights)) {
-        return Some(format!(
-            "{} is the diarizer loaded, which gives live sessions their speakers from its file; remove it once the speech worker has unloaded it, speech.idle_unload seconds after the last session",
-            entry.id
-        ));
-    }
     if server.downloads.as_ref().and_then(|downloads| downloads.running()).is_some_and(|download| download.entry().id == entry.id) {
         return Some(format!(
             "{} is being downloaded; cancel its download (POST /v1/models/download/cancel), or let it end, before removing it",

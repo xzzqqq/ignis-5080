@@ -45,7 +45,6 @@ use tokio::sync::{oneshot, watch};
 use crate::media::MediaStats;
 use crate::generation_timing::{GenerationClock, TimingResult};
 use crate::metrics::Metrics;
-use ignis_core::flash_next_counters::FlashNextCounterSource;
 use crate::telemetry::{
     CancelCause, IntervalCounters, IntervalStatsProvider, SystemClock, Telemetry, TelemetryClock,
 };
@@ -127,9 +126,6 @@ enum TelemetryFact {
     Stopped(RequestId, u32),
     SetStats(Arc<dyn IntervalStatsProvider>),
     SetMetrics(Arc<Metrics>),
-    /// Where the load's own counters are read (a Flash-Next load's, GitHub
-    /// #301, #302), or `None` for a load without them.
-    SetCounterSource(Option<Arc<FlashNextCounterSource>>),
 }
 
 /// What the request log reports about a request that its [`RequestInput`]
@@ -340,14 +336,6 @@ impl Engine {
     /// told: it sends exactly the facts it sent before.
     pub(crate) fn install_metrics(&self, metrics: Arc<Metrics>) {
         let _ = self.facts.send(TelemetryFact::SetMetrics(metrics));
-    }
-
-    /// Have the telemetry consumer read the load's own counters from
-    /// `source` at every tick (GitHub #301, #302): host memory the device
-    /// and the n-gram table write, read with no call into the model thread
-    /// or the leaf. `None` takes them out again.
-    pub(crate) fn install_counter_source(&self, source: Option<Arc<FlashNextCounterSource>>) {
-        let _ = self.facts.send(TelemetryFact::SetCounterSource(source));
     }
 
     /// The loaded model id (for `GET /v1/models`) — immutable for the
@@ -905,7 +893,6 @@ async fn telemetry_task(
             TelemetryFact::Stopped(request, tokens) => telemetry.on_stopped(request, tokens),
             TelemetryFact::SetStats(provider) => telemetry.with_stats(provider),
             TelemetryFact::SetMetrics(metrics) => telemetry.with_metrics(metrics),
-            TelemetryFact::SetCounterSource(source) => telemetry.with_counter_source(source),
         }
         if moves_in_flight {
             // Before the counters: whoever sees them moved sees this too.
@@ -1714,8 +1701,7 @@ mod tests {
             TelemetryFact::Cancelled(..)
             | TelemetryFact::Stopped(..)
             | TelemetryFact::SetStats(_)
-            | TelemetryFact::SetMetrics(_)
-            | TelemetryFact::SetCounterSource(_) => {
+            | TelemetryFact::SetMetrics(_) => {
                 unreachable!("only the async side sends these")
             }
         }

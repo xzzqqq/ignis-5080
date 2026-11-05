@@ -18,13 +18,12 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 
-use ignis_core::image::ImageSize;
 use ignis_core::ngram_cache::CacheLocation;
 use ignis_core::ngram_table::HotBudget;
 use ignis_core::{ExceptionWeights, KvFormat, KvPoolSize, PrefillAttention, ProposalHeadSetting, RopeSetting, SpeculativeBackend, VisionResidency};
 use serde_json::Value;
 
-use super::{ApiKey, ApiKeySetting, Expose, SpecChoice};
+use super::{ApiKey, ApiKeySetting, SpecChoice};
 use crate::instruction::{DeveloperMessagePolicy, SystemMessagePolicy};
 use crate::thinking::ReasoningEffort;
 
@@ -746,22 +745,6 @@ impl FieldKind for TimeoutReplyKind {
     }
 }
 
-/// How the server is exposed beyond its bind address (ADR 0028).
-pub struct ExposeKind;
-
-impl FieldKind for ExposeKind {
-    type Value = Expose;
-    const TAG: &'static str = "expose mode";
-
-    fn parse(raw: &str) -> Result<Expose, String> {
-        Expose::parse(raw)
-    }
-
-    fn render(value: &Expose) -> Value {
-        Value::String(value.as_str().to_owned())
-    }
-}
-
 /// The API key: the operator's own, or `auto` for one generated at start.
 /// Written back as typed — the one place that happens is a file the operator
 /// asked to have written; `GET /v1/config` never shows this kind's field.
@@ -820,7 +803,11 @@ impl FieldKind for SpecBackend {
         if raw.eq_ignore_ascii_case("off") {
             return Ok(SpecChoice::Off);
         }
-        SpeculativeBackend::parse(&raw.to_ascii_lowercase()).map(SpecChoice::Backend)
+        if raw.eq_ignore_ascii_case("dflash2") {
+            Ok(SpecChoice::Backend(SpeculativeBackend::Dflash2))
+        } else {
+            Err(format!("unsupported speculation backend `{raw}`; expected dflash2 or off"))
+        }
     }
 
     fn render(value: &SpecChoice) -> Value {
@@ -989,58 +976,6 @@ impl FieldKind for KnownModels {
     }
 }
 
-/// The image sizes a request may ask for (spec image-model/05 §Sizes):
-/// `<width>x<height>` entries, `;`- or `,`-separated — a flag names one or
-/// more per occurrence, a file may give a list. Each side is a nonzero
-/// multiple of 32, the VAE's 16 pixels a latent cell times the DiT's 2 × 2
-/// patch, and at most [`crate::config::MAX_IMAGE_SIDE`]; at least one size,
-/// and none twice.
-pub struct Sizes;
-
-impl FieldKind for Sizes {
-    type Value = Vec<ImageSize>;
-    const TAG: &'static str = "WxH;...";
-    const REPEATABLE: bool = true;
-
-    fn parse(raw: &str) -> Result<Self::Value, String> {
-        let mut sizes: Vec<ImageSize> = Vec::new();
-        for entry in raw.split([';', ',']).map(str::trim).filter(|entry| !entry.is_empty()) {
-            let size = ImageSize::parse(entry)?;
-            if size.width % 32 != 0 || size.height % 32 != 0 {
-                return Err(format!("takes sizes whose sides are multiples of 32, got `{entry}`"));
-            }
-            if size.width.max(size.height) > crate::config::MAX_IMAGE_SIDE {
-                return Err(format!("takes sides of at most {} pixels, got `{entry}`", crate::config::MAX_IMAGE_SIDE));
-            }
-            if sizes.contains(&size) {
-                return Err(format!("names `{entry}` twice"));
-            }
-            sizes.push(size);
-        }
-        if sizes.is_empty() {
-            return Err(format!("expects at least one <width>x<height>, got `{raw}`"));
-        }
-        Ok(sizes)
-    }
-
-    fn render(value: &Self::Value) -> Value {
-        Value::Array(value.iter().map(|size| Value::String(size.to_string())).collect())
-    }
-
-    fn file_text(value: &Value) -> Result<Option<String>, String> {
-        match value {
-            Value::Array(items) => Ok(Some(
-                items
-                    .iter()
-                    .map(|item| item.as_str().map(str::to_owned).ok_or_else(|| "lists something that is not a `<width>x<height>`".to_owned()))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(";"),
-            )),
-            other => scalar_text(other),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1143,11 +1078,10 @@ mod tests {
         assert_eq!(SystemPolicy::parse("Strict"), Ok(SystemMessagePolicy::Strict));
         assert_eq!(DeveloperPolicy::parse("One-After-System"), Ok(DeveloperMessagePolicy::OneAfterSystem));
         assert_eq!(SpecBackend::parse("off"), Ok(SpecChoice::Off));
-        assert_eq!(SpecBackend::parse("mtp"), Ok(SpecChoice::Backend(SpeculativeBackend::Mtp)));
+        assert!(SpecBackend::parse("mtp").is_err());
         assert!(SpecBackend::parse("eagle").unwrap_err().contains("eagle"));
         assert_eq!(DraftHead::parse("shortlist"), Ok(ProposalHeadSetting::Fixed(ignis_core::ProposalHead::Shortlist)));
         assert_eq!(DraftHead::parse("Auto"), Ok(ProposalHeadSetting::Auto));
-        assert_eq!(ExposeKind::parse("cloudflare-quick"), Ok(Expose::CloudflareQuick));
         assert_eq!(TimeoutReplyKind::parse("Partial"), Ok(crate::deadline::TimeoutReply::Partial));
         round_trips::<KvFormatKind>(KvFormat::Bf16);
         round_trips::<PrefillAttentionKind>(PrefillAttention::Fp16);
@@ -1247,26 +1181,4 @@ mod tests {
         round_trips::<KnownModels>(known);
     }
 
-    #[test]
-    fn sizes_are_multiples_of_32_named_once_each() {
-        let sizes = Sizes::parse("2048x2048; 2752x1536,1024x1024").unwrap();
-        assert_eq!(sizes, [ImageSize::new(2048, 2048), ImageSize::new(2752, 1536), ImageSize::new(1024, 1024)]);
-        for (raw, says) in [
-            ("1000x1024", "multiples of 32"),
-            ("1024x1024;1024x1024", "twice"),
-            ("1024", "<width>x<height>"),
-            (";", "at least one"),
-            ("0x32", "<width>x<height>"),
-            ("32x16416", "at most 16384"),
-        ] {
-            assert!(Sizes::parse(raw).unwrap_err().contains(says), "{raw}");
-        }
-        // A file may give a list as well as the joined string.
-        let list = serde_json::json!(["2048x2048", "1024x1024"]);
-        assert_eq!(Sizes::file_text(&list), Ok(Some("2048x2048;1024x1024".into())));
-        assert!(Sizes::file_text(&serde_json::json!([2048])).is_err());
-        assert_eq!(Sizes::render(&sizes), serde_json::json!(["2048x2048", "2752x1536", "1024x1024"]));
-        assert_eq!(Sizes::parse("16384x16384;32x16384"), Ok(vec![ImageSize::new(16384, 16384), ImageSize::new(32, 16384)]), "the bound itself");
-        round_trips::<Sizes>(sizes);
     }
-}

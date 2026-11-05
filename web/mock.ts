@@ -1,7 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import { completionBody, finishFields, mockThinking, readMockBudget } from "./mockChat.ts";
-import { mockDecide } from "./mockDecide.ts";
 import { createMetricsSim } from "./mockMetrics.ts";
 import { createServerSim, type MockAnswer } from "./mockServer.ts";
 
@@ -255,22 +254,7 @@ export function mockIgnis(): Plugin {
         req.on("close", () => clearInterval(timer));
       });
 
-      server.middlewares.use("/v1/decide", async (req, res) => {
-        if (req.method !== "POST") {
-          res.statusCode = 405;
-          res.end();
-          return;
-        }
-        let raw = "";
-        req.on("data", (part) => (raw += part));
-        await new Promise((resolve) => req.on("end", resolve));
-        const { status, body } = mockDecide(raw);
-        res.statusCode = status;
-        res.setHeader("Content-Type", "application/json");
-        // One prefill, and the answers land together: the wait is the prefill,
-        // not a stream.
-        setTimeout(() => res.end(JSON.stringify(body)), 260);
-      });
+
 
       // A live simulation (mockMetrics.ts), so the Monitor has traffic to draw.
       const metrics = createMetricsSim();

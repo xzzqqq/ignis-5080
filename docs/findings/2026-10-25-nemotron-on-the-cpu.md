@@ -11,7 +11,7 @@
 - Related: [ADR 0067](../adr/0067-the-speech-model-waits-on-the-host-and-borrows-free-kv-pages.md),
   [ADR 0068](../adr/0068-the-speech-models-cpu-executor-is-ours-in-rust.md),
   [ADR 0069](../adr/0069-the-speakers-come-from-nemotron-diarization-beside-qwen3-asr.md),
-  [spec speech/07](../specs/speech/07-transcribe.md), [spec speech/08](../specs/speech/08-diarization.md),
+  [spec speech/07](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/speech/07-transcribe.md), [spec speech/08](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/speech/08-diarization.md),
   [Qwen3-ASR on the CPU](2026-10-24-qwen3-asr-on-cpu.md)
 - Superseded by: none
 

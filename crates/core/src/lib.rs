@@ -42,10 +42,6 @@ pub mod decision;
 // not).
 pub mod dflash2_readout;
 pub mod disk;
-#[cfg(feature = "cuda")]
-pub mod flash_next;
-#[cfg(feature = "cuda")]
-pub mod flash_next_mtp;
 pub mod flash_next_counters;
 pub mod forced_literal;
 pub mod gdn;
@@ -56,22 +52,6 @@ pub mod gqa_layer;
 pub mod gpu_profile;
 pub mod host;
 pub mod hq_ring;
-pub mod image;
-#[cfg(feature = "cuda")]
-pub mod image_attn;
-pub mod image_autoencoder;
-#[cfg(feature = "cuda")]
-pub mod image_dit;
-pub mod image_encoder;
-#[cfg(feature = "cuda")]
-pub mod image_encoder_attn;
-#[cfg(feature = "cuda")]
-pub mod image_gemm;
-pub mod image_leaf;
-pub mod image_transformer;
-#[cfg(feature = "cuda")]
-pub mod image_vae;
-pub mod image_vision;
 pub mod identity;
 pub mod kv;
 pub mod kv_format;
@@ -92,8 +72,6 @@ pub mod prefix;
 pub mod constrained;
 pub mod request;
 pub mod residency;
-#[cfg(all(feature = "cuda", feature = "residual-tap"))]
-pub mod residual_tap;
 pub mod retained_slot;
 pub mod rope_scaling;
 pub mod scheduler;

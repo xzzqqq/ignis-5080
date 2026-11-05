@@ -609,7 +609,6 @@ async fn labels_stay_within_the_bounded_sets() {
         "ignis_kv_page_bytes",
         "ignis_kv_pool_used_pages",
         // GitHub #324: the image model's counterpart, 0 on a text load.
-        "ignis_condition_budget_used_bytes",
         "ignis_kv_ram_arena_bytes",
         // GitHub #281: the host retained slots and their pinned block.
         "ignis_retained_host_slots",
@@ -647,9 +646,6 @@ async fn labels_stay_within_the_bounded_sets() {
         "retained_slots",
         "hq_residual_window",
         "residual",
-        "residency",
-        "expert_cache",
-        "condition_budget",
     ];
     const TTFT_LE: &[&str] =
         &["0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "30", "60", "120", "300", "+Inf"];
@@ -710,16 +706,12 @@ async fn a_load_with_kv_disk_exports_the_tier_from_the_first_scrape_within_bound
             budget_bytes: 0,
             kv_pool_pages: 0,
             kv_page_bytes: 0,
-            residency_bytes: 0,
-            expert_cache_bytes: 0,
-            condition_budget_bytes: 0,
             kv_ram_arena_bytes: 0,
             retained_slots: 0,
             retained_host_slots: 0,
             retained_host_bytes: 0,
             kv_disk_bytes: Some(16 << 30),
-            flash_next: None,
-        },
+            },
     );
     let (api, metrics) = apps(server);
     let first = scrape(&metrics).await;

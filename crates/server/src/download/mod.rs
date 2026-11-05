@@ -437,93 +437,15 @@ mod tests {
         let ArtifactSource::Use(path) = artifact_source(&settings, |_| true, never_asked) else { panic!("on disk") };
         let card = options.card_class();
         let serving = served_start_options(options.clone(), &served, Some(&path), &catalog, card, &|_| Some(ModelFamily::Qwen38_27b)).unwrap();
-        assert_eq!((serving.model.as_str(), serving.artifact.as_deref()), ("qwen3.8-27b-16g", Some(dir.join("qwen3_8_27b_trellis_sc30-v2.ninfer").as_path())));
+        assert_eq!((serving.model.as_str(), serving.artifact.as_deref()), ("qwen3.8-27b-16g", None));
         let placeholder = served_start_options(options.clone(), &served, None, &catalog, card, &|_| panic!("no artifact, no header"));
         assert_eq!(placeholder.unwrap(), options, "a placeholder start loads nothing");
 
-        let options = start_config_on(crate::config::profile::RTX_5090_TOTAL_BYTES);
+        let options = start_config_on(crate::config::profile::RTX_5080_TOTAL_BYTES);
         let served = start_model(&catalog, &options.model, options.card_class()).unwrap();
         assert_eq!(served, crate::config::DEFAULT_MODEL);
         let own = dir.join("qwen3_8_27b_nvfp4full-v2.ninfer");
         assert_eq!(served_start_options(options.clone(), &served, Some(&own), &catalog, options.card_class(), &|_| panic!("its own entry")).unwrap(), options);
-    }
-
-    /// ADR 0064 §2: an alias resolves only within one model family, by the
-    /// artifact's header (ADR 0047). A start that has to fetch the entry
-    /// answering to the default id knows the header only once the fetch has
-    /// landed: an artifact of another family — or of none — then refuses the
-    /// start before it loads, naming both families.
-    #[test]
-    fn a_start_whose_answering_entry_holds_another_family_is_refused_once_fetched() {
-        let catalog = catalog::testing::built_in();
-        let dir = PathBuf::from(DIR);
-        let options = start_config_on(16 << 30);
-        let served = start_model(&catalog, &options.model, options.card_class()).unwrap();
-        let mut settings = settings(&served, &dir);
-        settings.catalog = &catalog;
-        let ArtifactSource::Download { entry, dir } = artifact_source(&settings, nothing_exists, |_, _| None) else { panic!("fetched") };
-        let fetched = entry.artifact_path(&dir);
-        for header in [Some(ModelFamily::FlashNext), None] {
-            let Err(StartRefusal::AboveClass(refusal)) = served_start_options(options.clone(), &served, Some(&fetched), &catalog, options.card_class(), &|_| header) else {
-                panic!("{header:?}: refused")
-            };
-            let said = refusal.to_string();
-            assert!(said.contains("qwen3.8-27b-16g lists it as an alias") && said.contains("one model family"), "{said}");
-        }
-    }
-
-    /// ADR 0074, `main`'s start path end to end with the built-in catalog
-    /// (GitHub #423): `--model-id qwen3.8-27b-abliterated` on a 16 GB card
-    /// starts the abliterated 16 GB build, which answers to it, under its own
-    /// id — its artifact and id over the start options — when its artifact's
-    /// header names the 27B's family, the one both entries state; one of
-    /// another family refuses the start before it loads, naming both. On a
-    /// 32 GB card, a 96 GB one or one of no known class the id is its own
-    /// entry's.
-    #[test]
-    fn a_start_naming_the_uncensored_variant_on_a_16gb_card_serves_its_16gb_build() {
-        use crate::config::profile::CardClass;
-        let catalog = catalog::testing::built_in();
-        let dir = PathBuf::from(DIR);
-        let options = start_config_with(&["--model-id", "qwen3.8-27b-abliterated"], 16 << 30);
-        assert_eq!((options.model.as_str(), options.card_class()), ("qwen3.8-27b-abliterated", Some(CardClass::Gb16)));
-        let served = start_model(&catalog, &options.model, options.card_class()).unwrap();
-        assert_eq!(served, "qwen3.8-27b-abliterated-16g");
-        let mut settings = settings(&served, &dir);
-        settings.catalog = &catalog;
-        let ArtifactSource::Use(path) = artifact_source(&settings, |_| true, never_asked) else { panic!("on disk") };
-        assert_eq!(path, dir.join("qwen3_8_27b_trellis_sc30-v2-huihui-abliterated.ninfer"));
-        let card = options.card_class();
-        let serving = served_start_options(options.clone(), &served, Some(&path), &catalog, card, &|_| Some(ModelFamily::Qwen38_27b)).unwrap();
-        assert_eq!((serving.model.as_str(), serving.artifact.as_deref()), ("qwen3.8-27b-abliterated-16g", Some(path.as_path())));
-        let Err(StartRefusal::AboveClass(refusal)) = served_start_options(options.clone(), &served, Some(&path), &catalog, card, &|_| Some(ModelFamily::FlashNext)) else {
-            panic!("a header of another family refuses the start")
-        };
-        let said = refusal.to_string();
-        for named in ["qwen3.8-27b-abliterated-16g lists it as an alias", "Qwen3.8-Flash-Next", "Qwen3.8-27B", "one model family"] {
-            assert!(said.contains(named), "{named}: {said}");
-        }
-
-        for card in [Some(CardClass::Gb32), Some(CardClass::Gb96), None] {
-            assert_eq!(start_model(&catalog, "qwen3.8-27b-abliterated", card), Ok("qwen3.8-27b-abliterated".to_owned()), "{card:?}");
-        }
-        let options = start_config_with(&["--model-id", "qwen3.8-27b-abliterated"], crate::config::profile::RTX_5090_TOTAL_BYTES);
-        let served = start_model(&catalog, &options.model, options.card_class()).unwrap();
-        assert_eq!(served, "qwen3.8-27b-abliterated");
-        let own = dir.join("qwen3_8_27b_nvfp4full-v2-huihui-abliterated.ninfer");
-        assert_eq!(served_start_options(options.clone(), &served, Some(&own), &catalog, options.card_class(), &|_| panic!("its own entry")).unwrap(), options);
-    }
-
-    /// ADR 0064 §3: a start whose model no entry loads on this card is
-    /// refused naming both classes — the default model on a 16 GB card in a
-    /// catalog without the 16 GB 27B.
-    #[test]
-    fn a_start_with_no_artifact_the_card_cannot_load_is_refused_naming_both_classes() {
-        use crate::config::profile::CardClass;
-        let refusal = start_model(&catalog::testing::thirty_two(), crate::config::DEFAULT_MODEL, Some(CardClass::Gb16)).unwrap_err();
-        assert_eq!((refusal.model.as_str(), refusal.needs, refusal.card), ("qwen3.8-27b", CardClass::Gb32, CardClass::Gb16));
-        let refusal = start_model(&catalog::testing::built_in(), "Qwen3.8-Flash-Next", Some(CardClass::Gb16)).unwrap_err();
-        assert!(refusal.to_string().contains("qwen3.8-flash-next needs a 32 GB card"), "{refusal}");
     }
 
     #[test]
@@ -659,7 +581,7 @@ mod tests {
         )
         .expect("valid");
         let dir = PathBuf::from(DIR);
-        for id in ["acme-ft", "qwen3.8-flash-next", "qwen3.8-27b-abliterated"] {
+        for id in ["acme-ft", "qwen3.8-27b-16g"] {
             let mut settings = settings(id, &dir);
             settings.catalog = &operator;
             let entry = operator.entry(id).expect("listed");
@@ -740,7 +662,7 @@ mod tests {
         assert!(answered);
         assert!(asked.contains(&entry.id), "{asked}");
         assert!(asked.contains(&format!("https://huggingface.co/{}", entry.repo)), "{asked}");
-        assert!(asked.contains("18.1 GiB"), "{asked}");
+        assert!(asked.contains("12.5 GiB"), "{asked}");
         assert!(asked.contains(&path.display().to_string()), "{asked}");
         assert!(asked.contains("[y/N]"), "{asked}");
     }

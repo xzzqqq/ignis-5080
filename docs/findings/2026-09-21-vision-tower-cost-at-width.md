@@ -8,7 +8,7 @@
   `crates/core/src/vision.rs`, `crates/server/src/media.rs`)
 - Related: [GitHub #244](https://github.com/gpillon/ignis/issues/244),
   `docs/specs/vision-fanout/02-the-towers-cost-at-width.md`,
-  [`2026-09-20-number-width-and-decide-e2e.md`](2026-09-20-number-width-and-decide-e2e.md),
+  [`2026-09-20-number-width-and-decide-e2e.md`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-09-20-number-width-and-decide-e2e.md),
   [`2026-09-20-shared-vision-embedding-fan-out.md`](2026-09-20-shared-vision-embedding-fan-out.md),
   [GitHub #243](https://github.com/gpillon/ignis/issues/243),
   [GitHub #248](https://github.com/gpillon/ignis/issues/248),
@@ -238,7 +238,7 @@ had already paid the encode.
   ([#243](https://github.com/gpillon/ignis/issues/243), spec 01) and warming
   it ahead (spec 04) — and the product lever is telling callers that a 2048 px
   screenshot points as well as a 4096 px one for a twelfth of the cost.
-- [`2026-09-20-number-width-and-decide-e2e.md`](2026-09-20-number-width-and-decide-e2e.md)'s
+- [`2026-09-20-number-width-and-decide-e2e.md`](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-09-20-number-width-and-decide-e2e.md)'s
   fan-out row and its "the vision embedding wants a cache of its own"
   implication were both true when written and are both answered by #243 and
   its own finding. Its width table (576-16,384 columns, 0.022-4.111 s) reads

@@ -24,13 +24,7 @@ pub enum Surface {
     Chat,
     /// `POST /v1/responses`, and the WebSocket mode's `response.create`.
     Responses,
-    /// `POST /v1/images/generations`'s body and `POST /v1/images/edits`'s
-    /// form (spec image-model/05), whose text parts are read as JSON values.
-    Images,
-    /// `POST /v1/audio/transcriptions`'s form (spec speech/02), whose text
-    /// parts are read as JSON values.
-    Transcriptions,
-}
+    }
 
 /// One field's row: when its value is inert, and why any other value is
 /// refused.
@@ -296,75 +290,12 @@ pub const RESPONSES: &[FieldRule] = &[
     FieldRule { name: "client_metadata", inert: always, inert_when: ALWAYS, refusal: None },
 ];
 
-/// The Images API's fields past what the image routes read
-/// (`crate::images::routes`): `response_format`, `output_format`,
-/// `background`, `size`, `n` and `mask` are refused where they are read.
-pub const IMAGES: &[FieldRule] = &[
-    FieldRule {
-        name: "partial_images",
-        inert: null_or_zero,
-        inert_when: "`0`",
-        refusal: Some("partial images are not sent, each image comes whole in its completed event; send 0 or omit partial_images"),
-    },
-    // One image model, at one quality and in one style.
-    FieldRule { name: "quality", inert: always, inert_when: ALWAYS, refusal: None },
-    FieldRule { name: "style", inert: always, inert_when: ALWAYS, refusal: None },
-    FieldRule { name: "moderation", inert: always, inert_when: ALWAYS, refusal: None },
-    // PNG only, which takes no compression level.
-    FieldRule { name: "output_compression", inert: always, inert_when: ALWAYS, refusal: None },
-    // An edit is conditioned on its whole images, at the size the condition
-    // budget leaves them.
-    FieldRule { name: "input_fidelity", inert: always, inert_when: ALWAYS, refusal: None },
-    FieldRule { name: "user", inert: always, inert_when: ALWAYS, refusal: None },
-];
-
-/// The transcription form's fields past what the route reads
-/// (`crate::speech::route`): `file`, `model`, `prompt`, `keywords[]`,
-/// `language`, `languages[]`, `response_format`, `timestamp_granularities[]`
-/// and `stream` are honoured or refused where they are read. The form's text
-/// parts arrive as the JSON values a body would carry, the array fields under
-/// their `[]` names.
-pub const TRANSCRIPTIONS: &[FieldRule] = &[
-    FieldRule {
-        name: "temperature",
-        inert: null_or_zero_number,
-        inert_when: "`0`",
-        refusal: Some("this server decodes greedily; send 0 or omit temperature"),
-    },
-    FieldRule {
-        name: "chunking_strategy",
-        inert: null,
-        inert_when: "`null`",
-        refusal: Some("the clip is transcribed as one block, with no automatic split in this version; omit chunking_strategy or send null"),
-    },
-    FieldRule {
-        name: "include[]",
-        inert: null_or_empty_array,
-        inert_when: "empty",
-        refusal: Some("log probabilities are not served (`logprobs`); omit include[]"),
-    },
-    FieldRule {
-        name: "known_speaker_names[]",
-        inert: null_or_empty_array,
-        inert_when: "empty",
-        refusal: Some("this server does not diarize; omit known_speaker_names[]"),
-    },
-    FieldRule {
-        name: "known_speaker_references[]",
-        inert: null_or_empty_array,
-        inert_when: "empty",
-        refusal: Some("this server does not diarize; omit known_speaker_references[]"),
-    },
-];
-
 /// The table for `surface`.
 pub fn table(surface: Surface) -> &'static [FieldRule] {
     match surface {
         Surface::Chat => CHAT,
         Surface::Responses => RESPONSES,
-        Surface::Images => IMAGES,
-        Surface::Transcriptions => TRANSCRIPTIONS,
-    }
+        }
 }
 
 /// The first field of `fields` whose value `surface`'s table refuses. An
@@ -528,20 +459,9 @@ mod tests {
         refused(Surface::Responses, "context_management", &[json!([{ "type": "compaction" }])], "compaction");
     }
 
-    /// Review-322b L3: the image routes take what OpenAI's SDKs send and
-    /// refuse partial images, which are never sent.
-    #[test]
-    fn images_refuse_partial_images_and_take_the_rest() {
-        accepted(Surface::Images, "partial_images", &[json!(null), json!(0)]);
-        refused(Surface::Images, "partial_images", &[json!(1), json!(3), json!("2")], "comes whole");
-        for name in ["quality", "style", "moderation", "output_compression", "input_fidelity", "user"] {
-            accepted(Surface::Images, name, &[json!(null), json!("high"), json!(80), json!({ "a": 1 })]);
-        }
-    }
-
     #[test]
     fn the_description_names_every_refused_field_and_its_reason() {
-        for surface in [Surface::Chat, Surface::Responses, Surface::Images] {
+        for surface in [Surface::Chat, Surface::Responses] {
             let text = describe(surface);
             for rule in table(surface) {
                 assert!(text.contains(&format!("`{}`", rule.name)), "{surface:?}: {} missing", rule.name);

@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     fn entry() -> CatalogEntry {
-        crate::download::Catalog::built_in().entry("qwen3-asr-0.6b").expect("a built-in entry").clone()
+        crate::download::Catalog::built_in().entry("qwen3.8-27b-16g").expect("a built-in entry").clone()
     }
 
     fn dir(tag: &str) -> PathBuf {
@@ -214,7 +214,7 @@ mod tests {
         let held = EntryLock::take(&entry, &dir, Holder::Command).expect("free");
         let Err(NotLocked::Held(err)) = EntryLock::take(&entry, &dir, Holder::Server) else { panic!("held by the command") };
         assert!(
-            err.0.starts_with(&format!("qwen3-asr-0.6b is already being downloaded into {}, by `ignis-server model download` (process {pid}), which holds", dir.display())),
+            err.0.starts_with(&format!("qwen3.8-27b-16g is already being downloaded into {}, by `ignis-server model download` (process {pid}), which holds", dir.display())),
             "{err}"
         );
         drop(held);

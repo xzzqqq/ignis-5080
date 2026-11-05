@@ -1,9 +1,3 @@
-# Hold the guide's generated reference (docs/user/reference/) to the code on a
-# push that changes only the pages (ADR 0066). A code change runs the same
-# test in the release workflow, whose paths-ignore skips docs/**; this
-# workflow covers the other way a page can drift, a hand edit, with the one
-# test that compares them.
-
 name: docs-reference
 
 on:
@@ -29,8 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The repository's .cargo/config.toml defaults to the Windows target, as
-      # the release workflow's test job notes: name the runner's own.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu

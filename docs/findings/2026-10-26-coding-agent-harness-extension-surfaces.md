@@ -7,8 +7,8 @@
 - Scope: connectors / plugin and extension APIs, MCP clients, Agent Skills, permissions, provider configuration and
   distribution of opencode v1.19.4, pi 1.4.0 (`main` `b84d5d1`), DeepSeek Harness 0.2.1-rc.3 and qwen-code 0.26.1
   (installed 0.23.0), for reaching `/v1/systemone`, `/v1/images/*`, `/v1/audio/transcriptions` and `PATCH /v1/config`
-- Related: [#383](https://github.com/gpillon/ignis/issues/383), [System One decisions](../user/api/decide.md),
-  [Connect a client](../user/start/connect-a-client.md), [the agent path](../user/paths/agent.md),
+- Related: [#383](https://github.com/gpillon/ignis/issues/383), [System One decisions](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/user/api/decide.md),
+  [Connect a client](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/user/start/connect-a-client.md), [the agent path](../user/paths/agent.md),
   [ADR 0071](../adr/0071-the-server-downloads-and-removes-models-from-the-server-view.md)
 - Superseded by: none
 
@@ -136,7 +136,7 @@ Inferences, labelled as such:
   whenever auto-memory writes.
 - qwen-code side jobs: with `fastModel` unset, side queries and the background memory agents land on the main ignis
   model as extra requests; set to another id, `fastModel` is a second model id, which makes ignis switch models.
-- The agent path and [Connect a client](../user/start/connect-a-client.md) already document the provider pitfalls
+- The agent path and [Connect a client](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/user/start/connect-a-client.md) already document the provider pitfalls
   (one model id, a stable system prompt); a connector page would extend them, not replace them.
 
 ## Limits and unknowns

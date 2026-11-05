@@ -41,7 +41,6 @@ import type { PlaygroundSettings } from "../settings/defaults.ts";
 import { type AgentRun, parseAgentCall, runAgents, toolResult } from "../tools/agents/agents.ts";
 import { askToolResult, parseAskCall } from "../tools/ask/ask.ts";
 import { unknownCall } from "../tools/errors.ts";
-import { type ImageRun, imageToolResult, parseImageCall, runImages } from "../tools/image/image.ts";
 import { type LocalContext, type LocalRun, localToolImages, localToolResult, runLocalCalls, shownRun, startedRun } from "../tools/local/local.ts";
 import { agentExtras, routeCall, toolExtras, type ToolsState } from "../tools/index.ts";
 import { browserMemory } from "../tools/local/memory.ts";
@@ -51,7 +50,7 @@ import { parseWebCall, runWeb, type WebRun, webToolResult } from "../tools/web/w
 import { type AttachedFile, attachedChip, fromLegacy, readAttached, type Taken, takeTurnFiles, turnAdds, withAttached } from "../workspace/attach.ts";
 import { noticeFiles } from "../workspace/notice.ts";
 import type { ChatNames } from "../workspace/panel.ts";
-import { boxPictures, madeIn } from "../workspace/pictures.ts";
+import { boxPictures } from "../workspace/pictures.ts";
 import { seenIn } from "../workspace/tools.ts";
 import { useVision } from "../workspace/vision.ts";
 import { type ChatBinding, pageWorkspaces, type Workspaces } from "../workspace/workspaces.ts";
@@ -415,7 +414,6 @@ export function useConversation({
     // Calls of the latest reply still without a result, if the loop breaks while they run.
     let unanswered: ToolCall[] = [];
     // The pictures this turn's calls made, by the round that made them: `made-N` counts on across rounds.
-    const turnImages: ImageRun[] = [];
     try {
       if (target) {
         markSwitch({ ...target, status: "switching" });
@@ -446,7 +444,7 @@ export function useConversation({
         unanswered = calls;
         conversation = [
           ...conversation,
-          ...(await runToolCalls(sessionId, conversation, turnImages, reply, requestSettings, extras, agentTools, local, maxRounds, abort.signal)),
+          ...(await runToolCalls(sessionId, reply, requestSettings, extras, agentTools, local, maxRounds, abort.signal)),
         ];
         unanswered = [];
         if (abort.signal.aborted) break;
@@ -528,9 +526,7 @@ export function useConversation({
    */
   async function runToolCalls(
     sessionId: number,
-    conversation: Message[],
     /** The picture calls of this turn's earlier rounds: their replies in `conversation` do not carry them. */
-    turnImages: ImageRun[],
     reply: Message,
     requestSettings: Settings,
     extras: ToolExtras,
@@ -551,15 +547,11 @@ export function useConversation({
     let questions = calls.filter((c) => routeCall(c.name, available) === "ask").map(parseAskCall);
     const localCalls = calls.filter((c) => routeCall(c.name, available) === "local");
     let localRuns: LocalRun[] = localCalls.map(startedRun);
-    const imageParsed = calls.filter((c) => routeCall(c.name, available) === "image").map((c) => parseImageCall(c, available));
-    const imageTasks = imageParsed.flatMap((p) => (p.ok ? [p.task] : []));
-    let imageRuns: ImageRun[] = imageParsed.map((p) => (p.ok ? { ...p.task, status: "queued" } : p.run));
     const show = () => {
       const agents = runs;
       const web = webRuns;
       const asked = questions;
       const localNow = localRuns;
-      const pictures = imageRuns;
       setSoon(`${sessionId}:${reply.id}:tools`, (l) => ({
         ...l,
         sessions: updateMessage(l.sessions, sessionId, reply.id, (m) => ({
@@ -569,7 +561,6 @@ export function useConversation({
           unknownTools,
           questions: asked,
           local: localNow.map(shownRun),
-          ...(pictures.length > 0 ? { imageRuns: pictures } : {}),
         })),
       }));
     };
@@ -627,18 +618,6 @@ export function useConversation({
       }),
       ...asking,
     ]);
-    const pictured = await runImages(imageTasks, {
-      messages: [...conversation, { role: "assistant", imageRuns: turnImages }],
-      signal,
-      onModelChange: refreshModel,
-      // While the Workspace switch is on the pictures land in the chat's workspace (#394), which the reply shows them from.
-      ...(tools.workspace && local.workspace ? madeIn(local.workspace.workspaces, local.workspace.chat) : {}),
-      onUpdate: (run) => {
-        imageRuns = imageRuns.map((r) => (r.callId === run.callId ? run : r));
-        show();
-      },
-    });
-    turnImages.push(...pictured);
     // A row per request an agent made; a run that failed adds one for its error.
     for (const run of runs) {
       if (!tasks.some((t) => t.callId === run.callId)) continue;
@@ -658,7 +637,6 @@ export function useConversation({
       ...unknownTools.map((call) => [call.callId, call.error] as const),
       ...questions.map((q) => [q.callId, askToolResult(q)] as const),
       ...localRuns.map((run) => [run.callId, localToolResult(run)] as const),
-      ...imageRuns.map((run) => [run.callId, imageToolResult(run)] as const),
     ]);
     // A picture a read_file call read with vision rides on its result, which keeps it: every later request sends the same bytes.
     const readPictures = new Map(localRuns.map((run) => [run.callId, localToolImages(run)] as const));

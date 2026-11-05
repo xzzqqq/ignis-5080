@@ -15,7 +15,7 @@ use serde_json::Value;
 
 /// Every model family a config value can be scoped to, in the order
 /// `help --fields` and the scoped-name tables list them.
-pub const FAMILIES: [ModelFamily; 2] = [ModelFamily::Qwen38_27b, ModelFamily::FlashNext];
+pub const FAMILIES: [ModelFamily; 1] = [ModelFamily::Qwen38_27b];
 
 /// The spelling of `family` as a config scope (spec config-v2/01 §Family
 /// scope): `qwen38` / `qwen38flashnext` in a flag or a file key,
@@ -494,82 +494,10 @@ mod tests {
     }
 
     #[test]
-    fn applicability_names_the_families_it_takes() {
-        let flash = Applicability::Only(&[ModelFamily::FlashNext]);
-        assert!(flash.to(ModelFamily::FlashNext) && !flash.to(ModelFamily::Qwen38_27b));
-        assert!(Applicability::AllFamilies.to(ModelFamily::Qwen38_27b));
-        assert_eq!(flash.describe(), "Qwen3.8-Flash-Next");
-    }
-
-    /// Spec speech/08, AC 14: a field only the diarizer's family takes is
-    /// refused by every other family that judges it, and judged by none of
-    /// the active model's: they take it as they take `speech.*`.
-    #[test]
-    fn a_diarizer_field_is_the_diarizers_family_to_judge() {
-        let diarizer = Applicability::Only(&[ModelFamily::Nemotron3Diarization]);
-        assert!(diarizer.to(ModelFamily::Nemotron3Diarization) && !diarizer.refused_by(ModelFamily::Nemotron3Diarization));
-        for family in ModelFamily::ALL.into_iter().filter(|family| *family != ModelFamily::Nemotron3Diarization) {
-            assert!(!diarizer.to(family), "{family:?} takes it");
-            assert!(!diarizer.judged_by(family) && !diarizer.refused_by(family), "{family:?} judges it");
-        }
-        assert_eq!(diarizer.describe(), "Nemotron 3 Diarization");
-        // An active model's field: the diarizer does not judge it, the other
-        // active families refuse it as before (the image model included).
-        let flash = Applicability::Only(&[ModelFamily::FlashNext]);
-        assert!(flash.refused_by(ModelFamily::Qwen38_27b) && flash.refused_by(ModelFamily::QwenImage21));
-        assert!(!flash.judged_by(ModelFamily::Nemotron3Diarization));
-        assert!(Applicability::AllFamilies.judged_by(ModelFamily::Nemotron3Diarization));
-    }
-
-    #[test]
-    fn the_family_scopes_are_plain_identifiers_and_read_back() {
-        assert_eq!(scope(ModelFamily::Qwen38_27b), "qwen38");
-        assert_eq!(scope(ModelFamily::FlashNext), "qwen38flashnext");
-        for family in FAMILIES {
-            assert_eq!(family_of_scope(scope(family)), Some(family));
-            assert_eq!(family_of_scope(&scope(family).to_ascii_uppercase()), Some(family));
-        }
-        assert_eq!(family_of_scope("qwen3.8-27b"), None, "a model id is not a scope");
-        // the image model has a spelling but no config scope until spec image-model/05
-        assert_eq!(scope(ModelFamily::QwenImage21), "qwenimage21");
-        assert_eq!(family_of_scope("qwenimage21"), None);
-        // nor has the diarizer, whose fields keep their plain keys (spec speech/08)
-        assert_eq!(family_of_scope(scope(ModelFamily::Nemotron3Diarization)), None);
-    }
-
-    #[test]
     fn attributes_are_off_unless_listed() {
         assert!(!Attr::listed(&[], Attr::Visible));
         assert!(Attr::listed(&[Attr::Patchable, Attr::Visible], Attr::Visible));
         assert!(!Attr::listed(&[Attr::Patchable], Attr::ReloadRequired));
     }
 
-    #[test]
-    fn a_field_is_spelled_one_way_per_surface() {
-        let meta = FieldMeta {
-            group: "kv_disk",
-            name: "kv_host_pool_bytes",
-            kind: "bytes",
-            nullable: false,
-            default: || Value::Null,
-            file_text: |_| Ok(None),
-            canonical: |_| Ok(Value::Null),
-            description: " The budget.\n\n More.",
-            validator: Validator::None,
-            applies: Applicability::AllFamilies,
-            visible: false,
-            patchable: false,
-            reload_required: false,
-            scoped: true,
-            switch: false,
-            repeatable: false,
-        };
-        assert_eq!(meta.flag(), "--kv-disk-kv-host-pool-bytes");
-        assert_eq!(meta.env(), "IGNIS_KV_DISK_KV_HOST_POOL_BYTES");
-        assert_eq!(meta.file_key(), "kv_disk.kv_host_pool_bytes");
-        assert_eq!(meta.scoped_flag(ModelFamily::Qwen38_27b), "--qwen38-kv-disk-kv-host-pool-bytes");
-        assert_eq!(meta.scoped_env(ModelFamily::FlashNext), "IGNIS_QWEN38FLASHNEXT_KV_DISK_KV_HOST_POOL_BYTES");
-        assert_eq!(meta.scoped_file_key(ModelFamily::FlashNext), "kv_disk.qwen38flashnext.kv_host_pool_bytes");
-        assert_eq!(meta.summary(), "The budget.");
     }
-}

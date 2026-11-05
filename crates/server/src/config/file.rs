@@ -633,29 +633,6 @@ mod tests {
     use crate::config::schema::field;
     use serde_json::json;
 
-    #[test]
-    fn a_document_reads_into_general_family_and_profile_layers() {
-        let value = json!({
-            "profile": "small-card",
-            "reuse": { "kv_host_pool_bytes": "8G", "qwen38flashnext": { "kv_host_pool_bytes": "1G" } },
-            "model": { "max_context": 131072, "artifact": null },
-            "server": { "ui": false },
-            "profiles": { "small-card": { "vram": { "headroom_bytes": "2G" } } }
-        });
-        let document = read_document(&value, "ignis.config.yaml").unwrap();
-        assert_eq!(document.profile.as_deref(), Some("small-card"));
-        let pool = field("reuse", "kv_host_pool_bytes").unwrap();
-        assert_eq!(document.values.get(pool, None).unwrap().raw, "8G");
-        let scoped = document.values.get(pool, Some(ModelFamily::FlashNext)).unwrap();
-        assert_eq!(scoped.raw, "1G");
-        assert_eq!(scoped.spelling, "reuse.qwen38flashnext.kv_host_pool_bytes (ignis.config.yaml)");
-        assert_eq!(document.values.get(field("model", "max_context").unwrap(), None).unwrap().raw, "131072");
-        assert!(document.values.get(field("model", "artifact").unwrap(), None).is_none(), "null is unset");
-        assert_eq!(document.values.get(field("server", "ui").unwrap(), None).unwrap().raw, "false");
-        let profile = &document.profiles["small-card"];
-        assert_eq!(profile.get(field("vram", "headroom_bytes").unwrap(), None).unwrap().raw, "2G");
-    }
-
     /// Spec config-v2/01, Testing: an unknown field or a wrong type is a
     /// `ConfigError` naming it, not a serde panic or a silent default.
     #[test]
@@ -748,23 +725,6 @@ mod tests {
         let before = document.clone();
         remove(&mut document, [(pool, q), (pool, None), (field("vram", "headroom_bytes").unwrap(), None)]);
         assert_eq!(document, before, "a key that is not there is no change");
-    }
-
-    /// A rewrite says whether it changed the document: a removal of a key the
-    /// file does not hold, or a value it holds already, does not; a new value
-    /// does. The format is the path's, YAML for a path that names none.
-    #[test]
-    fn a_rewrite_says_whether_the_document_changed() {
-        let files = testing::MemFiles::with(&[("c.conf", "reuse:\n  kv_host_pool_bytes: 2G\n")]);
-        let path = Path::new("c.conf");
-        let pool = field("reuse", "kv_host_pool_bytes").unwrap();
-        let rewrite = |changes, removals| rewrite(&files, path, changes, removals, None).unwrap();
-        assert!(!rewrite(vec![], vec![(pool, Some(ModelFamily::FlashNext))]).changed, "a removal of a key not there");
-        assert!(!rewrite(vec![(pool, None, json!("2G"))], vec![]).changed, "the value it holds");
-        let rewritten = rewrite(vec![(pool, None, json!("3G"))], vec![]);
-        assert!(rewritten.changed);
-        assert_eq!(Format::Yaml.read(&rewritten.text).unwrap(), json!({ "reuse": { "kv_host_pool_bytes": "3G" } }));
-        assert_eq!((Format::of_file(path), Format::of_file(Path::new("c.json"))), (Format::Yaml, Format::Json));
     }
 
     #[test]

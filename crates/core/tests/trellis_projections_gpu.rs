@@ -43,8 +43,12 @@ use ignis_core::trellis::{self, Call, TrellisWeight, TrellisWorkspace};
 
 use bf16::{bf16_to_f64, f32_to_bf16};
 
-const TRELLIS: &str = "F:/ai/models/Qwen3.8-27B-trellis-3bpw-ignis/qwen3_8_27b_trellis_sc30-v2.ninfer";
-const SERVED: &str = r"F:\ai\q38\ninfer-models\qwen3_8_27b_nvfp4full-v2.ninfer";
+
+fn reference_artifact() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var("IGNIS_REFERENCE_ARTIFACT")
+        .unwrap_or_else(|_| "models/qwen3_8_27b_nvfp4full-v2.ninfer".into()))
+}
 const HIDDEN: usize = 5120;
 /// Tokens per projection: two activations, so a token-major mix-up shows too.
 const TOKENS: usize = 2;
@@ -171,13 +175,13 @@ fn holds(label: &str, ours: &[f64], theirs: &[f64]) -> f64 {
 #[test]
 #[ignore = "GPU profile only: scripts/gpu-profile.ps1"]
 fn the_trellis_matrices_are_the_served_linears_in_spec_01s_row_orders() {
-    for path in [TRELLIS, SERVED] {
+    for path in [trellis_artifact(), reference_artifact()] {
         if !Path::new(path).exists() && gpu_profile::skip_or_fail(&format!("artifact absent: {path}")) {
             return;
         }
     }
-    let ours = Reader::open(Path::new(TRELLIS)).unwrap_or_else(|e| panic!("open {TRELLIS}: {e}"));
-    let served = Reader::open(Path::new(SERVED)).unwrap_or_else(|e| panic!("open {SERVED}: {e}"));
+    let ours = Reader::open(Path::new(trellis_artifact())).unwrap_or_else(|e| panic!("open {}: {e}", trellis_artifact()));
+    let served = Reader::open(Path::new(reference_artifact())).unwrap_or_else(|e| panic!("open {}: {e}", reference_artifact()));
     let device = match CudaDevice::create(0) {
         Ok(device) => device,
         Err(e) => {
@@ -280,4 +284,9 @@ fn the_trellis_matrices_are_the_served_linears_in_spec_01s_row_orders() {
     let Some((logits, vocab)) = gpu.trellis_product(&ours, "text/output_head", &x, 1) else { return };
     assert_eq!(vocab, 248_320);
     holds("text/output_head", &logits, &served_product(&served, "text/output_head", vocab, HIDDEN, &x, 1));
+}
+
+fn trellis_artifact() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var("IGNIS_MODEL_ARTIFACT").unwrap_or_else(|_| "models/qwen3_8_27b_trellis_sc30-v2.ninfer".into())).as_str()
 }

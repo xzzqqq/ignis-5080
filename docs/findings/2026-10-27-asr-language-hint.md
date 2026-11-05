@@ -8,8 +8,8 @@
   `POST /v1/audio/transcriptions`: the language label and the text on Italian FLEURS clips, on 1.0-2.5 s pieces cut
   from them and on English FLEURS clips, with no context, with a language hint in `prompt` and with `language=it`;
   the default of the Playground Transcribe view's languages setting
-- Related: [#362](https://github.com/gpillon/ignis/issues/362), [spec speech/07](../specs/speech/07-transcribe.md),
-  [Qwen3-ASR on the CPU](2026-10-24-qwen3-asr-on-cpu.md), [Speech to text](../user/api/transcriptions.md)
+- Related: [#362](https://github.com/gpillon/ignis/issues/362), [spec speech/07](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/specs/speech/07-transcribe.md),
+  [Qwen3-ASR on the CPU](2026-10-24-qwen3-asr-on-cpu.md), [Speech to text](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/user/api/transcriptions.md)
 - Superseded by: none
 
 ## Question

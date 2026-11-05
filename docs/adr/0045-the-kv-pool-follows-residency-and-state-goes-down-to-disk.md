@@ -184,7 +184,7 @@ the claimant to get past the hang no longer cancels it.
 `crates/core/tests/kv_ram_windowed_moves.rs` pins the claim going in the
 advance a move a window at a time lands.
 
-Sources: [Flash-Next on the 5090](../findings/2026-10-06-flash-next-on-the-5090.md)
+Sources: [Flash-Next on the 5090](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-06-flash-next-on-the-5090.md)
 (its 2026-10-07 update: lanes at 262K), the F: disk bench
 (`.scratch/disk-bench/RESULTS.md`, 2026-09-29; untracked, local to the owner's
 clone), GitHub #205 (the owner's Tier 2 header decision and its RoPE comment).
@@ -229,7 +229,7 @@ clone), GitHub #205 (the owner's Tier 2 header decision and its RoPE comment).
     stalls up to ~150 ms.
   - A full 8,192-token Flash-Next chunk takes ~3.2 s, ~1.7 s of it expert
     copies; even a traversal of a few tokens re-streams 0.13-0.66 s of experts
-    ([the agent turn tail](../findings/2026-10-07-flash-next-agent-turn-tail.md)).
+    ([the agent turn tail](https://github.com/xzzqqq/ignis-5080/blob/9259978846d7db1a0161253138f6e34006dfbb64/docs/findings/2026-10-07-flash-next-agent-turn-tail.md)).
 - **The n-gram table reads its rows from the same NVMe** while a prompt
   prefills (#306).
 - **A reservation is whole and never grows** (spec core-05). At admission a

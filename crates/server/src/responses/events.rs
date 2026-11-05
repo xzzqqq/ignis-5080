@@ -51,7 +51,7 @@ pub(crate) const REASONING_BLOB_PREFIX: &str = "ignis:v1:";
 /// `encrypted_content` (ADR 0052): opaque to a client, and neither signed
 /// nor encrypted, since a client can send any reasoning it likes in clear.
 pub(crate) fn reasoning_blob(reasoning: &str) -> String {
-    format!("{REASONING_BLOB_PREFIX}{}", crate::images::job::base64(reasoning.as_bytes()))
+    format!("{REASONING_BLOB_PREFIX}{}", base64(reasoning.as_bytes()))
 }
 
 /// The reasoning a [`reasoning_blob`] carries; `None` for any other
@@ -921,4 +921,16 @@ mod tests {
         assert!(at("response.output_text.delta") < at("response.output_text.done"));
         assert_eq!(emitted.last().unwrap()["type"], "response.completed");
     }
+}
+
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() { ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
 }
