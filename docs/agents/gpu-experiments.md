@@ -1,0 +1,71 @@
+# GPU experiments for delegated work
+
+The main agent supplies the question, constraints and expected deliverable.
+The subagent owns its worktree, request and analysis loop. Use `python3 scripts/remote.py experiment`; do not
+sync a candidate over the shared remote checkout or ask the main agent to
+run its GPU commands.
+
+1. Check `python3 scripts/remote.py experiment status`. Install the worker
+   once if absent; upgrades require an empty queue.
+2. Write `.scratch/request.json` with a unique id, question, timeout, argv
+   steps and required output files. Pin remote inputs with SHA-256 when
+   results depend on their contents. Use candidate-relative build paths,
+   `{output}` for results and explicit service/model configuration.
+3. Run `python3 scripts/remote.py experiment submit .scratch/request.json`
+   from the subagent worktree. It freezes working changes without committing.
+4. Use `result`, `wait --timeout 60`, `fetch` and `cancel` with the returned id.
+   After a lost submission reply use `retry <id>`, which reuses the saved
+   submission. A new candidate or configuration gets a new id.
+5. Inspect artifacts and logs, revise and repeat. Command success alone is
+   not a correctness or performance verdict. Record skipped/failed checks.
+6. Return the conclusion, observations, evidence, known limits, job ids,
+   source HEAD/snapshot/tree and local/remote result paths. Identify which
+   working changes should be integrated. The main agent decides integration.
+
+For a service experiment use `make build`, `make start` redirected to a log,
+measure, then `make stop` inside the job. The unit cleans up descendants even
+on failure or cancellation. Never spawn another unit/container/SSH process
+to escape it. Keep shared models and tools read-only. Use `prune <id>` after
+collecting a terminal result to remove only its candidate build/cache.
+
+Minimal request (`.scratch/request.json`):
+
+```json
+{
+  "version": 1,
+  "id": "candidate-001",
+  "task": "candidate-check",
+  "question": "Does this candidate pass its check?",
+  "timeout_s": 600,
+  "steps": [
+    {"name": "check", "argv": ["bash", "scripts/my-check.sh", "{output}"],
+     "artifacts": ["report.json"]}
+  ]
+}
+```
+
+Replace the example check with the candidate's actual script. Optional `env`
+sets command environment; `inputs` contains absolute remote `path` and `sha256`
+pairs checked before/after execution. `config` is descriptive metadata; argv/env
+control execution. Artifacts are relative files under `{output}`.
+
+Configure `.remote.json` in this worktree or its main worktree first. The remote
+needs Linux, systemd user services, cgroup v2 and the validated `.remote.env`.
+`experiment install` enables the worker and user lingering for SSH disconnects.
+Each request snapshots source and private remote config into an isolated build;
+`local.mk`, existing builds and models are not copied. Supply model paths and
+service parameters explicitly. `--commit SHA` selects committed source only.
+
+`stop` cancels the active job and retains queued jobs; `start` resumes consumption.
+`status` shows blocked reasons and worker health. `result ID` includes progress;
+`fetch ID` downloads terminal results to `.scratch/experiment-results/ID`, verifies
+hashes and refuses overwrites. Receipts live in `.scratch/experiment-submissions/ID`.
+Never remove a receipt before resolving an uncertain submission. Failed,
+cancelled, timed-out or interrupted attempts are not automatically replayed.
+
+Exit codes: 0 success, 1 unsuccessful terminal experiment, 2 control/request
+error, 3 still pending/wait timeout, 4 unavailable or blocked worker, 255 usually
+SSH failure. Cleanup may extend beyond the requested runtime timeout. The queue
+is for trusted collaborators; unmanaged GPU commands must still obey host-wide
+exclusive use. Validation: `python3 scripts/validate_experiments.py --out
+.scratch/queue-validation-new` (requires an idle queue and uses the real GPU).

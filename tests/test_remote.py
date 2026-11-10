@@ -15,6 +15,14 @@ import remote
 
 
 class RemoteTest(unittest.TestCase):
+    def test_experiment_help_lists_actions_without_connecting(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output, \
+                patch.object(remote, "load_config") as config, self.assertRaises(SystemExit) as result:
+            remote.main(["experiment", "--help"])
+        self.assertEqual(result.exception.code, 0)
+        self.assertIn("submit, retry, status", output.getvalue())
+        config.assert_not_called()
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

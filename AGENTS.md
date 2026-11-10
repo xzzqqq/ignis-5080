@@ -30,6 +30,10 @@ connection config is the repository-root `.remote.json`, which is not committed;
 credential-free template is [.remote.example.json](.remote.example.json).
 SSH connection details are managed in `~/.ssh/config`.
 
+Delegated GPU experiments use `python3 scripts/remote.py experiment`, not
+`sync` over the shared checkout. Each subagent submits its own frozen
+candidate to the serial queue; see [Agent experiment loop](docs/agents/gpu-experiments.md).
+
 Use the Python entry point for remote work and Cargo for local CPU checks.
 Cargo defaults to the host target. Commands and Linux target availability are
 listed in [Remote development](docs/user/contributing/remote-dev.md).

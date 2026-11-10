@@ -1,5 +1,7 @@
 import contextlib
 import importlib.util
+import fcntl
+import os
 from unittest.mock import patch
 from pathlib import Path
 import tempfile
@@ -11,6 +13,20 @@ spec.loader.exec_module(profile)
 
 
 class ProfileTests(unittest.TestCase):
+    def test_inherited_queue_lease_is_reentrant_and_keeps_host_lock_after_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (root / "ignis-gpu-profile.lock").open("a") as lease:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with patch.dict(os.environ, {"IGNIS_GPU_LEASE_FD": str(lease.fileno()),
+                                             "IGNIS_EXPERIMENT_GPU_DIR": str(root)}):
+                    with profile.exclusive_marker(root):
+                        self.assertTrue((root / "ignis-gpu-preflight.ok").exists())
+                with (root / "ignis-gpu-profile.lock").open("a") as competitor:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertFalse((root / "ignis-gpu-preflight.ok").exists())
+
     def test_busy_card_is_refused_even_with_little_memory_used(self):
         replies = iter(["NVIDIA GeForce RTX 5080\n", "123, another-agent\n"])
         with self.assertRaisesRegex(RuntimeError, "held"):

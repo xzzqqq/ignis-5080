@@ -44,6 +44,14 @@ def ssh_command(config: dict[str, str], command: list[str]) -> list[str]:
             config["host"], remote]
 
 
+def config_path(root: Path) -> Path:
+    path = root / ".remote.json"
+    if not path.exists() and (root / ".git").is_file():
+        from experiments.source import common_root
+        path = common_root(root) / ".remote.json"
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest="action", required=True)
@@ -51,6 +59,10 @@ def main(argv: list[str] | None = None) -> int:
     execute.add_argument("command", nargs=argparse.REMAINDER, help="-- command [arguments ...]")
     synchronize = actions.add_parser("sync", help="Sync committed and uncommitted source; preserve remote caches")
     synchronize.add_argument("--dry-run", action="store_true", help="Report compressed transfer size without applying")
+    experiment = actions.add_parser("experiment", help="Isolated, persistent remote GPU experiments",
+        epilog="Commands: install, start, stop, submit, retry, status, result, wait, cancel, fetch, prune. "
+               "Use experiment <command> --help for arguments.")
+    experiment.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command if args.action == "exec" else []
     if command[:1] == ["--"]:
@@ -58,7 +70,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "exec" and not command:
         parser.error("exec requires -- command [arguments ...]")
     try:
-        config = load_config(ROOT / ".remote.json")
+        config = load_config(config_path(ROOT))
+        if args.action == "experiment":
+            from experiments.client import main as experiments
+            return experiments(ROOT, config, ssh_command, args.arguments)
         if args.action == "sync":
             from remote_sync import sync
             return sync(ROOT, config, ssh_command, args.dry_run)

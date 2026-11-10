@@ -24,9 +24,18 @@ def check_card(run=subprocess.check_output):
 
 @contextlib.contextmanager
 def exclusive_marker(directory):
-    lock = directory / "ignis-gpu-profile.lock"
+    lock = Path(os.environ.get("IGNIS_EXPERIMENT_GPU_DIR", directory)) / "ignis-gpu-profile.lock"
     marker = directory / "ignis-gpu-preflight.ok"
-    with lock.open("a") as handle:
+    inherited = os.environ.get("IGNIS_GPU_LEASE_FD")
+    if inherited is not None:
+        fd = int(inherited)
+        held, expected = os.fstat(fd), lock.stat()
+        if (held.st_dev, held.st_ino) != (expected.st_dev, expected.st_ino):
+            raise RuntimeError("inherited GPU lease does not match the host lock")
+        handle = os.fdopen(os.dup(fd), "a")
+    else:
+        handle = lock.open("a")
+    with handle:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         # Never replace another harness's pass, even if it does not use our lock.
         with marker.open("x") as stamp:
