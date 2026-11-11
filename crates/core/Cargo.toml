@@ -84,3 +84,7 @@ required-features = ["cuda"]
 [[example]]
 name = "residency_admit_bench"
 required-features = ["cuda"]
+
+[[example]]
+name = "kernel_lab"
+required-features = ["cuda"]

@@ -9,6 +9,7 @@
 #include "ignis_model.h"
 #include "ignis_step.h"
 #include "ignis_trellis_linear.h"
+#include "trellis_candidate.h"
 
 #include "rope_scaling.h"
 
@@ -475,6 +476,7 @@ struct ignis_model {
   // leaves its counters zero. Null on the NVFP4 body.
   std::unique_ptr<ninfer::DeviceBuffer> trellis_workspace_buffer;
   ignis_trellis_workspace trellis_workspace{};
+  std::shared_ptr<ignis::TrellisCandidate> trellis_candidate;
   uint64_t vram_bytes = 0;
   // ADR 0062: what of the bound tensors lives in mapped host memory.
   uint64_t host_mapped_bytes = 0;

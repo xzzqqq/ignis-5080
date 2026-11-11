@@ -54,6 +54,7 @@ pub mod host;
 pub mod hq_ring;
 pub mod identity;
 pub mod kv;
+pub mod kernel_lab;
 pub mod kv_format;
 pub mod lane_lines;
 pub mod locate;

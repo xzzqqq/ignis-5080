@@ -133,6 +133,12 @@ CUDA 修改重启后会重新加载模型，不是在保留显存状态下热替
 `make watch CUDA=0` 更适合快速检查服务逻辑。Linux 的 `dev-ui/run-ui` 联动尚未实现，
 前端可单独运行已有的 `make web-dev` 使用 Vite 热更新。
 
+## 常驻引擎实验
+
+Trellis 算子候选可使用[常驻实验入口](kernel-lab.md)：在一个隔离实验任务内加载模型一次，
+替换候选动态库并重建 CUDA Graph，依次进行层回放和完整前向比较。该入口不改变正式服务，
+跨任务仍保留队列隔离；最终收益用固定 coding-agent benchmark 确认。
+
 ## 检查与当前限制
 
 本地 Python 入口测试需要 Gitleaks 8.30.1+，运行时不需要网络或 GPU；push 测试
