@@ -22,6 +22,10 @@ run its GPU commands.
    source HEAD/snapshot/tree and local/remote result paths. Identify which
    working changes should be integrated. The main agent decides integration.
 
+For baseline/candidate comparisons, use separate Cargo target and CMake build
+directories. Verify the linked native CUDA library or kernel symbols for each
+arm; different server hashes alone do not establish different kernel code.
+
 For a service experiment use `make build`, `make start` redirected to a log,
 measure, then `make stop` inside the job. The unit cleans up descendants even
 on failure or cancellation. Never spawn another unit/container/SSH process

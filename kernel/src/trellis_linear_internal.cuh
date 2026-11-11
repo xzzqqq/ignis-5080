@@ -41,6 +41,7 @@ int32_t check_launch(const char *op);
 struct DeviceState {
   int sms = 0;               // 0: not prepared
   int decode_ctas[2][4] = {};  // resident CTAs per SM of the decode kernel, [K <= 4, any K][decode_class]
+  int mlp4_ctas = 0;         // T=8 MLP residency check; the grid covers all work units
   int prefill_ctas = 0;      // resident CTAs per SM of the prefill kernel
   uint32_t cap = 0;          // the debug SM cap, 0 for none
   uint32_t admit[kMaxSmIds / 32] = {};  // SM ids whose CTAs run when capped

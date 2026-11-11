@@ -30,6 +30,10 @@ one of these controls, identify it explicitly and report it as a separate
 comparison. Retain the existing sanity check and the independent exact 131,072
 input-token capacity check alongside subsequent performance results.
 
+The [T=8 MLP scheduling finding](../../findings/2026-11-11-rtx5080-t8-mlp-scheduling.md)
+records the output-partition and PDL optimization, its measured scope and
+separate incremental comparisons. It does not replace the reference medians.
+
 ## Run the fixed requests
 
 `ignis-bench coding-agent` replays three independent SWE-agent request snapshots

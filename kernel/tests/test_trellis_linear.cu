@@ -19,6 +19,8 @@
 //                in global mode (which refuses an allocation): the same bits every time.
 //   shared workspace  one workspace through a load's calls of five shapes in turn, both routes:
 //                each call's bits are its own fresh workspace's (GitHub #339).
+//   T=8 MLP     same-K gate/up at the real shape, plus token/bit-width/SM-cap fallbacks, against
+//                fp64; ten different calls share one workspace through five graph replays.
 //   rejects      the arguments the ops refuse.
 //
 // ADR 0006 / docs/agents/testing.md: no SKIP_RETURN_CODE; a missing GPU or fixture fails.
@@ -161,12 +163,13 @@ void check_linear(const std::string &label, const DeviceWeight &d, int tokens, c
 
 // h = silu(x G) * (x U): the bound composes the two outputs' through silu, plus the prefill's BF16
 // gate between its passes.
-void check_swiglu(const std::string &label, const DeviceWeight &g, const DeviceWeight &u, int tokens, const Workspace &ws,
-                  uint32_t stream) {
+std::vector<uint16_t> check_swiglu(const std::string &label, const DeviceWeight &g, const DeviceWeight &u, int tokens,
+                                 const Workspace &ws, uint32_t stream) {
   const int in = static_cast<int>(g.in), out = static_cast<int>(g.out);
   const std::vector<uint16_t> x = make_x(stream, tokens, in);
   DeviceBytes d_x(x.size() * 2), d_h(static_cast<size_t>(tokens) * out * 2);
   upload(d_x, x);
+  MOE_CUDA(cudaMemset(d_h.p, 0xff, d_h.bytes));
   TL_RC(ignis_trellis_linear_swiglu(&g.w, &u.w, d_x.p, tokens, d_h.p, out, &ws.ws, nullptr));
   MOE_CUDA(cudaDeviceSynchronize());
   const std::vector<uint16_t> h = download<uint16_t>(d_h.p, static_cast<size_t>(tokens) * out);
@@ -190,6 +193,7 @@ void check_swiglu(const std::string &label, const DeviceWeight &g, const DeviceW
   check(a.bad == 0, label + ": " + std::to_string(a.bad) + " outputs outside the tolerance (worst " +
                         std::to_string(a.worst) + " of the bound)");
   std::printf("  %-34s %5d tok: worst %.3f of the bound, rel rms %.2e\n", label.c_str(), tokens, a.worst, a.rel_rms);
+  return h;
 }
 
 const char *kName[] = {"k2", "k2p5", "k3", "k4", "k5", "k6"};
@@ -407,6 +411,83 @@ void set_cap(const char *value) {
   TL_RC(ignis_trellis_prepare());
 }
 
+// The mixed-K epilogue tests do not enter the 5080's T=8 MLP route. Check every selected K
+// against fp64, then alternate it with fallback calls without resetting their shared workspace.
+void mlp_t8_arm() {
+  constexpr uint32_t in = 5120, out = 17408;
+  int device = 0, sms = 0;
+  MOE_CUDA(cudaGetDevice(&device));
+  MOE_CUDA(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
+  const uint32_t k2[] = {4, 6, 8, 5};
+  DeviceWeight g[4], u[4];
+  set_cap("0");
+  for (int i = 0; i < 4; ++i) {
+    make_weight(g[i], k2[i], in, out, 100000 + 100 * i);
+    make_weight(u[i], k2[i], in, out, 100050 + 100 * i);
+  }
+  struct Call {
+    const char *name;
+    const DeviceWeight *gate, *up;
+    int tokens;
+  };
+  const Call calls[] = {{"MLP K2", &g[0], &u[0], 8},        {"MLP K3", &g[1], &u[1], 8},
+                        {"MLP K4", &g[2], &u[2], 8},        {"MLP K2.5 fallback", &g[3], &u[3], 8},
+                        {"MLP T1 fallback", &g[1], &u[1], 1}, {"MLP K4 swapped", &u[2], &g[2], 8},
+                        {"MLP K2 swapped", &u[0], &g[0], 8}, {"MLP mixed K3/K2", &g[1], &u[0], 8},
+                        {"MLP T16 fallback", &g[1], &u[1], 16}, {"MLP K3 swapped", &u[1], &g[1], 8}};
+  constexpr int count = sizeof(calls) / sizeof(calls[0]);
+  uint64_t bytes = 0;
+  for (const Call &c : calls) bytes = std::max(bytes, ignis_trellis_workspace_bytes(in, out, 2, c.tokens));
+  Workspace shared(bytes);
+  DeviceBytes x[count], y[count];
+  std::vector<uint16_t> expected[count];
+  cudaStream_t s;
+  MOE_CUDA(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking));
+  for (int i = 0; i < count; ++i) {
+    const Call &c = calls[i];
+    Workspace fresh(ignis_trellis_workspace_bytes(in, out, 2, c.tokens));
+    expected[i] = check_swiglu(c.name, *c.gate, *c.up, c.tokens, fresh, 101000 + i);
+    x[i] = DeviceBytes(static_cast<size_t>(c.tokens) * in * 2);
+    y[i] = DeviceBytes(static_cast<size_t>(c.tokens) * out * 2);
+    // upload waits for the pageable legacy-stream copy before the nonblocking stream reads it.
+    upload(x[i], make_x(101000 + i, c.tokens, in));
+    MOE_CUDA(cudaMemsetAsync(y[i].p, 0xff, y[i].bytes, s));
+    check(run_bits(*c.gate, c.up, c.tokens, shared, s, x[i], y[i]) == expected[i],
+          std::string(c.name) + ": shared eager output differs from its fp64-checked fresh workspace");
+  }
+  // A nonzero cap must still use the general route at each optimized bit width.
+  set_cap("36");
+  for (int i = 0; i < 3; ++i) {
+    const Call &c = calls[i];
+    const auto capped = check_swiglu(std::string(c.name) + " cap 36", *c.gate, *c.up, c.tokens, shared, 101000 + i);
+    // Both 5080 routes use one K split at this shape: the output partition keeps its fold order.
+    if (sms == 84) check(capped == expected[i], std::string(c.name) + ": differs from the unsplit capped route");
+  }
+  set_cap("0");
+  cudaGraph_t graph;
+  cudaGraphExec_t exec;
+  MOE_CUDA(cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal));
+  for (int i = 0; i < count; ++i) {
+    const Call &c = calls[i];
+    TL_RC(ignis_trellis_linear_swiglu(&c.gate->w, &c.up->w, x[i].p, c.tokens, y[i].p, out, &shared.ws, s));
+  }
+  MOE_CUDA(cudaStreamEndCapture(s, &graph));
+  MOE_CUDA(cudaGraphInstantiate(&exec, graph, 0));
+  for (int rep = 0; rep < 5; ++rep) {
+    for (DeviceBytes &d : y) MOE_CUDA(cudaMemsetAsync(d.p, 0xff, d.bytes, s));
+    MOE_CUDA(cudaGraphLaunch(exec, s));
+    MOE_CUDA(cudaStreamSynchronize(s));
+    for (int i = 0; i < count; ++i) {
+      check(download<uint16_t>(y[i].p, expected[i].size()) == expected[i],
+            std::string(calls[i].name) + ": shared graph replay " + std::to_string(rep) + " differs");
+    }
+  }
+  MOE_CUDA(cudaGraphExecDestroy(exec));
+  MOE_CUDA(cudaGraphDestroy(graph));
+  MOE_CUDA(cudaStreamDestroy(s));
+  std::printf("  T=8 MLP: same-K fp64, fallbacks, %d shared-workspace calls and 5 graph replays checked\n", count);
+}
+
 void determinism_arm() {
   DeviceWeight down, g, u;
   make_weight(down, 6, 17408, 5120, 70000);
@@ -541,6 +622,7 @@ int main() {
   shapes_arm();
   epilogues_arm();
   fp16_cap_arm();
+  mlp_t8_arm();
   determinism_arm();
   shared_workspace_arm();
   rejects_arm();

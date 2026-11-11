@@ -15,6 +15,12 @@ npm --prefix web test
 npm --prefix web run build
 ```
 
+On Linux, keep `TMPDIR` outside any Git checkout, on a filesystem that
+supports `O_DIRECT` and has more than 2 GiB free for the packer's safety margin.
+Artifact tests and the layer oracle use the normal reader for temporary
+containers; `/dev/shm` cannot serve those reads on this host. Build caches may
+use RAM.
+
 On remote Linux, after `python3 scripts/remote.py sync`:
 
 ```sh
