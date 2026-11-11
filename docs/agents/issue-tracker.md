@@ -1,70 +1,22 @@
-# Issue tracker: GitHub (gpillon/ignis)
+# Work records
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+The RTX 5080 fork takes work from the user's task. No GitHub issue, sub-issue,
+label or issue-number suffix is required to plan, implement, validate or commit
+it. This replaces the upstream issue workflow recorded in ADR 0070.
 
-## Conventions
+- Keep temporary plans, progress, experiment output and handoffs in `.scratch/`.
+- Keep specifications that need to survive the task in `docs/specs/`.
+- Put reusable conclusions in `docs/findings/` under its
+  [authoring convention](findings.md), and architectural decisions in `docs/adr/`.
+- Describe the delivered change and validation in the commit and final handoff.
+  A pull request, when used, carries its own description; it needs no issue.
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
-- **Read an issue**: `gh issue view <number> --json number,title,body,labels,comments`.
-- **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
-- **Make an issue a sub-issue of a parent**: `gh issue create --parent <parent> ...`, or `gh issue edit <parent> --add-sub-issue <child>` afterwards (`gh` 2.94+). Older `gh`: `gh api --method POST repos/<owner>/<repo>/issues/<parent>/sub_issues -F sub_issue_id=<child-db-id>` (database id, as in **Blocking** below). Without sub-issues, put `Part of #<parent>` at the top of the child body.
-- **Comment on an issue**: `gh issue comment <number> --body "..."`
-- **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
-- **Close**: `gh issue close <number> --comment "..."`
+When a skill asks for a ticket, use the task brief or linked specification.
+An instruction to publish to a tracker does not require creating an issue for
+this fork. Keep the result locally unless the user requests publication.
+Historical issue links remain useful source references; read them when needed,
+but do not create, comment on or close issues as an implicit workflow step.
 
-Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
-
-## Pull requests as a triage surface
-
-**PRs as a request surface: yes.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
-
-When set to `yes`, PRs run through the same labels and states as issues, using the `gh pr` equivalents:
-
-- **Read a PR**: `gh pr view <number> --comments` and `gh pr diff <number>` for the diff.
-- **List external PRs for triage**: `gh api --paginate 'repos/{owner}/{repo}/pulls?state=open' --jq '.[] | select(.author_association | IN("OWNER","MEMBER","COLLABORATOR") | not) | {number, title, author: .user.login, author_association, labels: [.labels[].name]}'`.
-- **Comment / label / close**: `gh pr comment`, `gh pr edit --add-label`/`--remove-label`, `gh pr close`.
-
-GitHub shares one number space across issues and PRs, so a bare `#42` may be either: resolve with `gh pr view 42` and fall back to `gh issue view 42`.
-
-## When a skill says "publish to the issue tracker"
-
-Create a GitHub issue.
-
-## When a skill says "fetch the relevant ticket"
-
-Read it as in **Read an issue** above.
-
-## Wayfinding operations
-
-Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
-
-- **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
-- **Child ticket**: an issue linked to the map as a GitHub sub-issue (see **Make an issue a sub-issue of a parent**). Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Once claimed, the ticket is assigned to the driving dev.
-- **Blocking**: GitHub's **native issue dependencies**, the canonical, UI-visible representation. Add an edge with `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`, where `<blocker-db-id>` is the blocker's numeric **database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`, _not_ the `#number` or `node_id`). GitHub reports `issue_dependencies_summary.blocked_by` (open blockers only, the live gate). Where dependencies aren't available, fall back to a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every blocker is closed.
-- **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
-- **Claim**: `gh issue edit <n> --add-assignee @me`, the session's first write.
-- **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
-
-## Issues from before 2026-10-25: the spec is a file
-
-Until 2026-10-25 a spec lived as a file under `docs/specs/<feature>/`, and its
-issue carried only a short body linking it (`**Spec:** [docs/specs/...](...)`).
-For those issues the linked file is the spec and the ticket's brief: read it
-after the issue body. `docs/specs/` is frozen: a new spec is an issue, and a
-spec still in flight (speech/07 and speech/08, #362 and #361) stays a file
-until its ticket closes.
-
-## Closing work
-
-Commits cite the ticket they deliver as `(#<n>)`. The coordinating session
-closes a ticket with `gh issue close <n> --comment "..."` naming the commit on
-`main` that delivers it, and comments on the ticket when work starts and when
-it merges. Implementer agents never comment on or close an issue. A ticket whose
-acceptance is the owner's (a live check, a GPU gate the owner runs) stays open
-until the owner says so.
-
-## Auth
-
-Before pushing: push over HTTPS with `gh` as `gpillon`. The token comes from
-the repo-local credential helper `.git/config` names and stays in its file,
-never in a URL or a committed file.
+For commit and merge messages, follow [Coding standards](../../CODING_STANDARDS.md).
+Use the configured Git remote and credentials when a push is authorized; the
+upstream repository and account are not defaults for this fork.

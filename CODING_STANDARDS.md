@@ -78,8 +78,8 @@ lines.
 - `/teach` runs in a workspace outside the repo: in the repo it would write its
   own `GLOSSARY.md`, mission file and lessons beside the project's.
 - A prototype lives on a throwaway `prototype/<name>` branch, pushed and never
-  merged (ADR 0070), exempt from the test and user-guide rules. The issue it
-  answers links the branch and records the verdict; the decision it validates
+  merged (ADR 0070), exempt from the test and user-guide rules. The task notes
+  link the branch and record the verdict; the decision it validates
   reaches `main` as ordinary work, with its test and its guide update.
 
 ## What the review leaves out
@@ -103,6 +103,6 @@ messages. Run `make ci` before merging; the CPU workflow also runs
 
 ## Commits
 
-End commit messages with their issue number, for example `(#347)`. Describe
-the change in merge messages. Do not add a `Co-Authored-By` trailer.
-Release messages use `ignis X.Y.Z` without an issue number.
+Describe the change in commit and merge messages. No issue number or issue
+suffix is required; historical references may remain when useful. Do not add
+a `Co-Authored-By` trailer. Release messages use `ignis X.Y.Z`.

@@ -1,5 +1,10 @@
 # A spec is a GitHub issue and its tickets are sub-issues
 
+The RTX 5080 fork no longer requires issue tracking (2026-11-12). Its current
+[work-record convention](../agents/issue-tracker.md) replaces this ADR's issue,
+sub-issue and label workflow. The original decision below remains historical
+context; its other conventions still apply where the fork retains them.
+
 The first `/setup-matt-pocock-skills` ran on 2026-09-02, before the GitHub
 remote existed, and chose the local-markdown tracker (379c2ece); 25 minutes
 later only issue status moved to GitHub (47b6c68a), that evening the specs

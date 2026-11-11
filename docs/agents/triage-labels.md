@@ -1,5 +1,9 @@
 # Triage Labels
 
+Historical upstream label mapping. This fork does not require issue tracking
+or triage labels; see [work records](issue-tracker.md). The conventions below
+apply only when the user explicitly requests work on an existing issue.
+
 The skills speak in terms of five canonical triage roles. This file maps those roles to the actual label strings used in this repo's issue tracker.
 
 | Label in mattpocock/skills | Label in our tracker | Meaning                                  |

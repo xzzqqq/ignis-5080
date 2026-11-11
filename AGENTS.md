@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file is for agents working **on** ignis: its code, its guide, its issues.
+This file is for agents working **on** ignis: its code, its guide, its development.
 An agent here for a user of ignis (to explain it, install it, or connect a
 client to it) wants [the agent path](docs/user/paths/agent.md) instead.
 
@@ -45,6 +45,16 @@ listed in [Remote development](docs/user/contributing/remote-dev.md).
 Single-context: root `GLOSSARY.md` and `docs/adr/`. See `docs/agents/domain.md`.
 
 ## Repo conventions
+
+### Work records
+
+Work starts from the user's task; no GitHub issue or issue number is required.
+Keep temporary plans and handoffs in `.scratch/`, durable specifications in
+`docs/specs/`, and reusable findings in `docs/findings/`. Commit messages
+describe the change without requiring an issue suffix. Historical issue links
+remain evidence, not instructions to create or update issues. This fork's
+workflow replaces ADR 0070's issue-tracking requirements; see
+`docs/agents/issue-tracker.md`.
 
 ### Scratch
 

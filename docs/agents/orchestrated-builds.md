@@ -1,21 +1,21 @@
 # Orchestrated builds
 
-How a coordinating session builds a spec's tickets with implementer agents
+How a coordinating session builds a task with implementer agents
 working in parallel (`/implement-spec`), and this repo's answer to each choice
 the skill leaves open.
 
 ## Worktrees
 
 The integration branch and each implementer's branch get their own worktree,
-one per ticket, every implementer branch starting from the integration branch.
+one per subtask, every implementer branch starting from the integration branch.
 Each worktree builds into its own target directory: two worktrees on one
 `CARGO_TARGET_DIR` link each other's workspace crates, with no error unless a
 signature happens to break.
 
 ## Agents
 
-Each ticket gets a fresh implementer whose brief points at the spec, the
-ticket and any shared notes, which live in the coordinator's `.scratch/`. An
+Each subtask gets a fresh implementer whose brief points at the user's request,
+any specification and shared notes in the coordinator's `.scratch/`. An
 implementer is stopped once it reports; follow-up work goes to a new agent with
 a short handoff in the scratchpad, never back to the finished one. At most
 three agents run at once, reviews included.
@@ -39,12 +39,12 @@ the branch and deletes `ci/<spec>` once the owner has merged.
 
 There is no pull request. Each implementer's branch merges into the
 integration branch, the coordinator reports that branch, and the owner merges
-it into `main` locally; nothing is pushed until the owner says so. Tickets
-close as `docs/agents/issue-tracker.md` says under "Closing work".
+it into `main` locally; nothing is pushed until the owner says so. Record the
+result and validation in the task handoff; no issue needs to be created or closed.
 
 An implementer merges the integration branch into its own before it reports,
-with a message its brief gives it, such as `Merge 374-integration into the T2
-branch before the report (#377)`: the commit-message hook refuses git's
+with a message its brief gives it, such as `Merge integration changes into the
+model-download branch`: the commit-message hook refuses git's
 default one.
 
 ## Cleanup

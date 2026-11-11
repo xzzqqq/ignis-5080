@@ -1,15 +1,13 @@
 #!/bin/sh
 # The commit message conventions, checked at every commit
 # (CODING_STANDARDS.md, "Commits"):
-# a message ends with the issue it belongs to, `(#347)`; a merge says what it
-# brings in like any other commit, never git's default "Merge branch 'x'";
-# and no commit carries a Co-Authored-By trailer. The one exception is the
-# release commit mk/version.sh prints, `ignis X.Y.Z`. A clone turns it on with
+# a nonempty message describes the change, without requiring an issue number;
+# a merge says what it brings in, never git's default "Merge branch 'x'";
+# and no commit carries a Co-Authored-By trailer. A clone turns it on with
 # `make setup` (core.hooksPath); `make commit-msg-selftest` is its test.
 
 msg=$(sed '/^#/d' "$1")
 first=$(printf '%s\n' "$msg" | sed -n '/[^[:space:]]/{p;q;}')
-last=$(printf '%s\n' "$msg" | sed '/^[[:space:]]*$/d' | tail -n 1)
 
 fail() {
     printf 'commit-msg: %s\n' "$1" >&2
@@ -21,14 +19,11 @@ if printf '%s\n' "$msg" | grep -qi '^co-authored-by:'; then
     fail "a commit carries no Co-Authored-By trailer"
 fi
 
-if [ "$first" = "$last" ] && printf '%s\n' "$first" | grep -Eq '^ignis [0-9]+\.[0-9]+\.[0-9]+$'; then
-    exit 0
-fi
+[ -n "$first" ] || fail "describe the change in a nonempty message"
 
 case $first in
     "Merge branch '"*|"Merge remote-tracking branch '"*|"Merge commit '"*|"Merge tag '"*)
-        fail "git's default merge message: say what the merge brings in, in a sentence ending with the issue, (#347)" ;;
+        fail "git's default merge message: say what the merge brings in" ;;
 esac
 
-printf '%s\n' "$last" | grep -Eq '\(#[0-9]+\)[[:space:]]*$' ||
-    fail "the message ends with the issue it belongs to, e.g. (#347)"
+exit 0

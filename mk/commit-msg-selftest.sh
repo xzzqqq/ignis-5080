@@ -31,16 +31,21 @@ expect accept "trailing blank lines and git's comment lines" \
 
 "
 expect accept "a merge that says what it brings in" \
-    "Merge #374: the server downloads and removes models from the Server view (#374)"
+    "Merge model downloads and removal from the Server view"
 expect accept "a catch-up merge with a message of its own" \
-    "Merge 374-integration into the T2 branch before the report (#377)"
+    "Merge the integration changes into the model-download branch"
 expect accept "the release commit mk/version.sh prints" \
     "ignis 0.9.0"
 
-expect refuse "no issue at the end" \
+expect accept "a message without an issue" \
     "The server downloads a catalog entry in the background"
-expect refuse "an issue named mid-message only" \
+expect accept "a body without an issue" \
+    "$(printf 'Use static MLP task mapping\n\nEach CTA computes one output group.\n')"
+expect accept "an optional historical issue reference" \
     "Follows #376 with the cancel route"
+expect refuse "an empty message" ""
+expect refuse "only whitespace and git comments" \
+    "$(printf '\n  \n# Please enter the commit message\n')"
 expect refuse "git's default merge message" \
     "Merge branch '374-integration' into 374-t2"
 expect refuse "git's default merge message with an issue appended" \
@@ -51,7 +56,7 @@ expect refuse "a Co-Authored-By trailer" \
     "$(printf 'The change and its reason (#376)\n\nCo-Authored-By: Someone <someone@example.com>\n')"
 expect refuse "a Co-Authored-By trailer in lower case" \
     "$(printf 'The change and its reason (#376)\n\nco-authored-by: Someone <someone@example.com>\n')"
-expect refuse "a release-shaped subject with more after it" \
+expect accept "a release-shaped subject with an ordinary body" \
     "$(printf 'ignis 0.9.0\n\nand a body with no issue\n')"
 
 exit $failed

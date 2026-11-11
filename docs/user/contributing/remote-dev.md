@@ -11,6 +11,10 @@ sidebar:
 服务。Laptop 负责编辑、CPU 检查、提交和分析；CUDA 构建、GPU 执行及依赖 Linux
 的检查在远端进行。上游 5090 的运行结果不代表此 fork 已完成 5080 验证。
 
+开发任务和提交不要求关联 GitHub issue。临时计划与交接记录放在 `.scratch/`，
+需要长期维护的规格放在 `docs/specs/`，可复用结论按 `docs/findings/` 的规范保存。
+提交信息直接说明改动；历史 issue 引用可保留，无需为提交创建 issue。
+
 Laptop 和远端需要 Python 3.10+、Git；Laptop 还需 OpenSSH 客户端。
 `scripts/remote.py` 只使用标准库，远端命令通过 Bash 执行。
 在仓库根目录初始化私有配置：

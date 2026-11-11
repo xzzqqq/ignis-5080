@@ -35,8 +35,8 @@ and include the other evidence in the document.
 
 | Content | Authoritative location |
 |---|---|
-| Work status and work to be done | GitHub issue |
-| Spec, and its tickets' acceptance criteria | the spec's GitHub issue and its sub-issues (before 2026-10-25, a file under `docs/specs/`) |
+| Work status and work to be done | the active task and its `.scratch/` notes |
+| Durable specification and acceptance criteria | `docs/specs/` |
 | Architectural decision | `docs/adr/` |
 | Byte-level, ABI or wire-format contract that code cites as normative | `docs/formats/` |
 | Domain term or concept | root `GLOSSARY.md` |
@@ -63,7 +63,7 @@ Every finding uses this format:
 - Observed: YYYY-MM-DD
 - Last verified: YYYY-MM-DD
 - Scope: component / subsystem
-- Related: issue, ADR, spec, finding, or `none`
+- Related: ADR, spec, finding, historical issue, or `none`
 - Superseded by: link or `none`
 
 ## Question
@@ -82,9 +82,9 @@ Every finding uses this format:
 Use `Evidence` for observations, identifiable sources, measurements, commands,
 and other verifiable results. In `Finding`, distinguish observed facts from
 inferences explicitly. Use `Limits and unknowns` to state what the evidence
-does not establish. `Follow-ups` may link future work, while GitHub remains the
-source of truth for its status. Keep raw logs and voluminous output in
-`.scratch/` and reference them when useful.
+does not establish. `Follow-ups` may link a specification or task notes;
+the finding does not track execution status or require an issue. Keep raw logs
+and voluminous output in `.scratch/` and reference them when useful.
 
 A profiler capture is not raw material you can commit. An Nsight Systems
 `.nsys-rep` (and its `.sqlite`) records the profiled process's **environment**,
@@ -123,13 +123,13 @@ invalidates or replaces the conclusion does.
 
 ## Promotion
 
-A finding may lead to an ADR, a spec, a GitHub issue, an update
+A finding may lead to an ADR, a spec, an update
 to `GLOSSARY.md`, or a subsequent finding. Link the finding and promoted artifact
 in both directions when possible.
 
 The finding remains the evidence and historical context. The promoted artifact
 becomes authoritative for its own concern: an ADR for a decision, a spec for
-what to build, a GitHub issue for work status, and `GLOSSARY.md` for
+what to build, task notes for work status, and `GLOSSARY.md` for
 domain terminology.
 
 ## Authoring procedure
