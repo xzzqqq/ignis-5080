@@ -190,7 +190,7 @@ its diagnostic timings are not the existing service benchmark's TPS.
 
 | Level | Target feedback |
 |---|---|
-| Captured local replay | Replay selected actual Trellis calls from the baseline's benchmark execution, initially MLP gate/up and down. Keep their real inputs, initial ADD destination, reference outputs and provenance; reuse resident weights. |
+| Captured local replay | Replay selected actual Trellis calls from the baseline's benchmark execution, covering the existing linear/SwiGLU interface across MLP, GQA/GDN projections and the output head. Keep their real inputs, initial ADD destination, reference outputs and provenance; reuse resident weights. |
 | Full forward | Rerun the benchmark's original model inputs through all layers using the candidate's own activations, generated tokens and state. Record logits, tokens, termination and speculative counters with engine timings. |
 
 Compilation, ABI/workspace admission and numerical checks remain prerequisites,
@@ -207,9 +207,12 @@ or be forced along the baseline's output trajectory.
 
 Preserve exact-output checks, configured warmup/sample counts, bracketing
 controls and raw samples. Arithmetic changes need a separately justified
-numerical oracle. Sample identity includes the model, baseline, fixture,
-preparation/configuration and actual call; changed identities require a fresh
-capture. The implementation plan replaces the earlier synthetic/fresh-state
+numerical oracle. Persist inputs and reference outputs as a manifest plus tensor files for reuse
+across sessions. Bind weights by stable tensor/view identity, never saved GPU
+addresses. Sample identity includes the model, baseline, fixture,
+preparation/configuration and actual call; incompatible identities require a
+fresh capture. Initially retain all calls in the chosen target scope and
+measure storage cost before introducing sampling. The implementation plan replaces the earlier synthetic/fresh-state
 layer probe as the default fast level. Existing core layer APIs remain usable
 by their current callers.
 
