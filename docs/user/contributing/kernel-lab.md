@@ -3,6 +3,15 @@ title: "Resident kernel experiments"
 description: "Test multiple Trellis candidates with one resident model load."
 ---
 
+## Implementation status
+
+The commands below describe the implemented finite-batch driver and low-level
+Rust JSONL engine. The revised [single-writer design](../../specs/continual-experiments/README.md)
+proposes a foreground interactive extension that builds and evaluates each
+new edit in the same session, without a queue or candidate-delivery service.
+That extension is not implemented; there is no `--interactive` or `evaluate`
+command yet. Compilation and measurement rules remain the same in the proposal.
+
 ## Scope
 
 The `kernel_lab` example loads the 27B artifact once and accepts serial JSONL
@@ -43,11 +52,13 @@ The workflow available today is:
    for the next batch; this currently creates a fresh session. Promote selected
    candidates to the full correctness and service checks.
 
-The desired edit → compile → hot-load → measure → edit loop in one continuing
-session still needs candidate delivery and a session controller. The example's
-JSONL stdin is a low-level serial primitive; the queue has no remote attachment
-or live candidate inbox, and the shipped driver takes a fixed list. Do not
-edit a running job's tracked source or overwrite a loaded `.so`.
+The revised edit → compile → hot-load → measure → edit loop uses one foreground
+owner and the existing serial JSONL engine. It needs an interactive extension
+to the driver, not a shared session service. Today the shipped driver still
+takes a fixed list, and the queue has no remote attachment or live candidate
+input. Do not edit a running frozen job's tracked source or overwrite a loaded
+`.so`; the proposed direct workflow will use a mutable checkout outside the
+queue.
 
 Each candidate still pays compilation, hash/contract checks, graph recapture,
 warmup and measurement. Changing engine/model/load settings, a CUDA failure,

@@ -40,10 +40,14 @@ there is no live delivery into a running job or session shared across agents.
 The runner rejects modifications to its frozen tracked source. See the
 [lab guide](../user/contributing/kernel-lab.md) for executable commands.
 
-The target is parallel preparation in independent worktrees with one controller
-serializing the full candidate measurement on the GPU. That controller and
-live delivery are not implemented. Use the existing queue's source isolation,
-timeouts and cleanup; never leave a resident engine outside its owning job.
+The revised [single-writer design](../specs/continual-experiments/README.md)
+removes the proposed shared session and candidate-delivery service. It calls
+for a foreground interactive driver using `remote.py exec`, one mutable
+checkout and one engine, independently of this queue. That driver extension
+is not implemented yet. This page remains the procedure for delegated/frozen
+queue jobs: retain their source isolation, timeouts and descendant cleanup.
+Do not run the future mutable workflow inside such a job.
+
 End an experiment with its supported/rejected/inconclusive conclusion and
 record required checks that failed or were not run. Final service validation
 runs after the lab releases the card.

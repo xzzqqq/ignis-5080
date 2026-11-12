@@ -1,207 +1,251 @@
-# Resident experiments for the fixed 27B model
+# Single-writer resident kernel experiments
 
-## Problem and source
+Design revision: 2026-11-12. This replaces the earlier target of a shared
+resident engine receiving candidates from multiple agents or queue jobs.
+The interactive workflow below is proposed, not implemented. The existing
+Trellis reload primitive and finite batch driver remain the implementation.
 
-A GPU job currently freezes/transfers source, waits for the GPU lease,
-configures/builds the native leaf and Rust binary, starts a new CUDA context,
-loads weights, allocates state, captures graphs, warms up, then measures.
-Queue time, compilation, readiness, warmup and measurement must be reported
-separately. A total job duration is not an engine-startup measurement.
+## Goal and assumptions
 
-[Together Compiler](https://www.together.ai/blog/together-compiler-continual-compilation-for-ai-inference)
-(2026-11-04) retains engine state while replacing candidate computation and
-uses progressively more representative measurements. Those two ideas fit this
-fork. Its fleet-wide parallelism search is outside our single-GPU problem.
+Keep the current compilation and measurement protocol, while removing the
+coordination machinery unnecessary for one optimization thread. Success means
+the same trustworthy feedback with fewer components and lifecycle rules. It
+does not depend on a faster compiler, fewer samples or weaker numerical gates.
+
+One agent edits one Laptop worktree. One dedicated Linux checkout receives its
+changes. One foreground driver owns one resident engine and the RTX 5080.
+The agent submits one evaluation at a time and waits for its result before
+editing or synchronizing again. GPU utilization is an observation; shortening
+the hypothesis-to-result loop is the objective.
+
+## What we take from Together Compiler
+
+The [blog](https://www.together.ai/blog/together-compiler-continual-compilation-for-ai-inference)
+uses persistent engines to avoid repeated initialization, and measurement
+tiers to balance iteration speed with realistic inputs. It also uses multiple
+agents to supply candidates and a cost model for distributed configurations.
+Our design inference is that the first two mechanisms remain useful with one
+writer. The fixed model and single GPU do not require the latter mechanisms.
+
+## Architecture
+
+Reuse three existing pieces:
+
+- `scripts/remote.py`: synchronization and the foreground SSH entry point.
+- `scripts/kernel_lab.py`: compilation/comparison orchestration and one
+  controlling stdin/stdout stream; add an interactive loop to this script.
+- The Rust `kernel_lab` example: the loaded model, serial JSONL operations and
+  the existing model-local Trellis replacement API.
+
+The Python driver directly owns the Rust child. It is not a daemon, task
+broker or multi-client service. The SSH connection stays open during editing
+and evaluation; the agent retains that foreground process's input/output
+handle. No socket service, candidate inbox, polling worker, job database or
+new RPC layer is needed.
+
+```mermaid
+flowchart LR
+    A[Edit kernel on Laptop] --> B[remote.py sync]
+    B --> C[Evaluate current source]
+    C --> D[Compile, hot-load, measure]
+    D --> A
+```
+
+The same Rust engine stays alive across this loop. Source synchronization
+updates the development checkout; it does not rebuild or replace that engine.
+A second attempted session fails the host-wide GPU lock immediately. It does
+not wait in a queue. Continue to check `make gpu-status` before launching GPU
+work and before changing GPU workloads.
 
 ## Experiment purpose and lifecycle
 
-An experiment answers a bounded performance question, for example: “Does a
-T=8 MLP scheduling change reduce full decode latency without changing the
-numerical result?” Record the question, baseline/source identity, allowed
-change scope, workload and metric, numerical acceptance rule, time/candidate
-budget, and stopping rule in `.scratch/` before starting. A question can admit
-many candidate implementations. Close it with a supported, rejected or
-inconclusive conclusion and the evidence; a fast layer alone does not settle
-a full-decode question.
+An experiment is a bounded question with a baseline, workload/metric,
+numerical acceptance rule, allowed changes and stopping rule. Record those in
+`.scratch/` and close the question with evidence and a supported, rejected or
+inconclusive conclusion. It needs no new runtime object or database entry.
 
-The [glossary](../../../GLOSSARY.md) distinguishes four units:
+Only two operational units matter in the normal loop:
 
-| Unit | Lifetime and ownership |
+| Unit | Lifetime |
 |---|---|
-| Experiment | The research question, owned by the agent coordinating its conclusion. It can span several jobs, sessions and final service checks. |
-| GPU job | A frozen queue submission. It owns the execution timeout, source isolation, GPU lease and result directory. The existing `remote.py experiment` command creates this unit. |
-| Resident session | One loaded engine process within a job. Its engine binary, artifact and load settings stay fixed. A job can start multiple sessions sequentially, each with its own setup. |
-| Candidate | One immutable source/library variant. Loading it creates a new engine generation on success; generation is a session-local counter, not the candidate's durable identity. |
+| Resident session | One driver/engine lifetime with fixed host binary, artifact and load settings. Setup happens once; stopping or recovering ends it. |
+| Evaluation | One synchronous build/check/reload/measure/restore operation on one immutable candidate. Its result is recorded before the next evaluation. |
 
-The intended lifecycle is:
+A candidate is a file plus provenance, not a scheduled job. The existing
+`remote.py experiment` queue remains a separate tool for delegated or isolated
+jobs; it is not a dependency of this workflow. Do not run the mutable
+interactive mode inside a frozen queue job: that runner correctly refuses
+changes to its submitted checkout.
 
-1. Define the question and controls; prepare the engine and initial candidates.
-2. Acquire the GPU lease, check the card, load the fixed model and create a
-   session. Establish the baseline for its measurement cases.
-3. Iterate: edit a development worktree, freeze the candidate, compile a new
-   library, check its contract, hot-load it, warm up and run the required
-   measurement levels, save the result, and restore the baseline. Use that
-   result to choose the next candidate. The model stays loaded throughout
-   compatible iterations.
-4. End the session when the candidate batch finishes, the budget expires,
-   cancellation is requested, the engine must change, or a GPU failure requires
-   recovery. Destroy the engine and release the lease. Do not leave an idle
-   engine holding the card indefinitely while agents think or edit.
-5. Validate promising candidates with the full GPU profile and rebuilt service
-   benchmark, then record the experiment's conclusion. Full service checks
-   need their own exclusive card use; stop the lab before running them.
+### Setup
 
-Step 3's feedback-driven delivery of newly edited candidates is the target
-workflow. The current queue and batch driver implement only a predeclared
-candidate batch; the availability table below is normative about that limit.
-These are workflow terms, not new CLI commands or request-schema fields.
+Starting the interactive driver performs setup:
 
-“Setup once” means once per resident session, not necessarily once per research
-experiment. Candidate compilation, library hash/ABI/workspace checks, graph
-recapture, warmup and numerical/performance measurements still happen for each
-candidate. A configuration change or recovery starts a new session and pays
-setup again. Full workspace checks and the full GPU profile are acceptance
-work, not mandatory repetitions in every compatible candidate's inner loop;
-select the checks required by the change and keep final acceptance intact.
+1. Acquire the existing host-wide exclusive GPU lock and verify the card is
+   free. Hold the lock until the engine and its children have exited.
+2. Pin the baseline engine binary, its source/build identity, artifact identity,
+   settings and measurement plan in the session output directory. Verify the
+   read-only model once; there is no queue layer repeating its hash checks.
+3. Load the model, reserve its state/workspaces, capture graphs and establish
+   numerical references for the planned cases. Keep weights and allocations
+   resident thereafter.
 
-## Current capabilities and target work mode
+The baseline binary is immutable for the session and reusable for recovery.
+A candidate crash must not cause a restart to rebuild the baseline from the
+currently edited candidate source. Rebuilding the host or choosing a new
+baseline is an explicit new session, with a new recorded identity.
 
-| Capability | Current implementation |
+### Evaluate current source
+
+Expose one ordinary command that includes reload and measurement. The agent
+does not need to separately manage candidate admission, activation, timing and
+rollback. Proposed input, not an existing CLI feature:
+
+```json
+{"op":"evaluate","through":"layer"}
+{"op":"evaluate","through":"forward"}
+{"op":"stop"}
+```
+
+The plan and its case definitions are fixed at setup; `through` selects the
+existing measurement levels, not new inputs, tolerances or timing rules.
+Unchanged source can reuse its already compiled candidate for a deeper check.
+
+For each evaluation the driver:
+
+1. Checks that runtime-source changes are confined to the documented Trellis
+   edit set. A host/ABI/configuration change is refused with the changed paths
+   and a request to start a new session; it must not be silently ignored.
+2. Saves the small candidate input set (the three translation units and their
+   required headers), compiler/flags and hashes, then invokes the existing
+   candidate builder. It does not freeze or create a whole Git worktree.
+   Save the source bytes so later edits do not erase what was measured.
+3. Uses a new immutable library path; never overwrites a loaded `.so`.
+4. Runs the current bracketing baseline, candidate hash/ABI/workspace checks,
+   graph recapture, numerical gate, warmup and samples, then restores and
+   rechecks the baseline. Reuse the batch driver's measurement functions.
+5. Writes the result and returns feedback. The next edit starts after this
+   response. There is no outstanding candidate list to reconcile.
+
+Compilation remains part of evaluation. This design keeps the existing
+builder and cache behavior; incremental object caching or compiler parallelism
+is an independent optimization, not a prerequisite for simplifying control.
+
+### Stop and failure
+
+Normal stop or EOF closes the child and releases the GPU. The foreground
+driver owns cleanup of its subprocess group on interruption or a command
+failure. A lost SSH connection ends the interactive session; no reconnect,
+background continuation or automatic replay is promised. A later setup must
+confirm the previous GPU process has exited before acquiring the card.
+
+Compile, checksum, ABI or workspace refusal leaves the baseline usable.
+Numerical rejection restores the baseline. Keep the existing transactional
+capture rollback. CUDA execution failure, timeout or uncertain process state
+terminates the session; rerun setup against the pinned baseline and repeat the
+baseline checks. Preserve partial logs without declaring the attempt passed.
+This avoids durable task recovery and cross-client cancellation protocols.
+
+End the session when the question/budget is exhausted or another workload
+needs the card. Stop it before a full GPU profile or service benchmark. No
+scheduler decides when another agent should inherit its model.
+
+## Hot-loading scope
+
+Keep the tested linear/SwiGLU function table and `ignis_trellis_candidate`
+implementation. Stable weights, model handles, stream and reserved workspace
+belong to the host. The plugin owns only code. Replacement still requires an
+empty sequence pool; all decode and verify graphs are recaptured, and old code
+stays alive until its graphs are destroyed.
+
+| Change | Action |
 |---|---|
-| Agents edit and submit from independent worktrees | Supported; the queue freezes each submitted source and executes GPU jobs serially. |
-| One session tests multiple immutable libraries | Supported; `scripts/kernel_lab.py` accepts repeated `--candidate` arguments and one fixed measurement plan. |
-| Engine accepts serial reload commands while alive | Supported by the example's JSONL stdin primitive until EOF. It needs one controlling process. |
-| Read feedback, edit, then deliver a new candidate to that running queued job | Not implemented by the queue/driver. The batch candidate list is fixed at invocation; no candidate inbox or remote stdin attachment exists. |
-| Multiple agents submit candidates to one shared resident session | Not implemented. There is no multi-client session coordinator. |
-| Reuse a model between separate queue jobs | Not implemented. The driver closes its engine; job completion requires descendant cleanup and GPU release. |
-| Compile candidates in parallel without holding the GPU lease | Target behavior. Current queue jobs hold the lease across all their steps, including builds. |
+| Trellis implementation within the three plugin units and their admitted implementation headers, preserving the public ABI and weight layout and fitting the existing workspace | Evaluate a newly compiled library in the same session. |
+| Public ABI descriptors, host/runtime code, attention or another operator outside that edit set | Rebuild the host and start a new session. |
+| Artifact, quantization/layout, KV format, context/chunk/lanes, speculation or workspace capacity | Start a new session with explicit settings. |
+| Measurement workload, reference or acceptance rule | Record a new plan and establish its controls; do not mix its results into the previous comparison. |
 
-The target mode retains independent worktrees and parallel candidate
-preparation. A single controller owns a bounded resident session and serializes
-candidate admission, reload, warmup, measurement and baseline restoration as
-one unit. Each result must identify the originating source snapshot, candidate
-binary, engine, artifact, settings and measurement plan. A failed or uncertain
-attempt remains visible; recovery starts a new session and re-establishes its
-baseline before further comparisons.
+The initial hot-edit set is explicit: `kernel/src/trellis_linear.cu`,
+`trellis_linear_decode.cu`, `trellis_linear_prefill.cu`,
+`trellis_linear_internal.cuh` and `trellis_decode.cuh` in the same directory.
+Other shared headers and exported ABI declarations require a new setup. This
+is a small fixed list, not a plugin registry or arbitrary code-loader policy.
 
-Until that controller exists, prepare a finite candidate batch in one frozen
-job, inspect its results, then submit a new job for the next adaptive batch.
-Do not edit the running job's tracked source: `scripts/experiments/runner.py`
-checks it against the submitted snapshot and rejects such changes. Laptop
-worktree edits do not update that snapshot. The future delivery path must
-freeze new candidates separately while leaving the resident engine's source
-and configuration fixed; it must not bypass queue isolation or GPU ownership.
+The host-source fingerprint excludes that edit set and non-runtime files such
+as notes. Public ABI headers remain fixed. The candidate input
+archive includes required headers even when they are not editable, making the
+compiled source reproducible. A library is trusted native code; the checks
+catch accidental incompatibilities, not malicious behavior.
 
-## Boundary
+## Measurement with one engine
 
-Keep the model, weights, stream, KV/GDN pool, scheduler and memory ownership in
-Ignis. Replace the two Trellis entry points used by `trellis_body`: linear and
-SwiGLU. A library contains just the three existing Trellis translation units
-and a versioned function table. This covers the current decode MLP search and
-other Trellis projections without exposing the model's C++ layout to plugins.
+The fixed 27B artifact fits the 5080. Use one full-model resident load for both
+local and full-forward measurements, executing only the chosen layer for a
+local probe. Separate few-layer loaders or a pool of engines would add state
+ownership without improving this loop's per-candidate initialization.
 
-Replacing the whole Rust engine would require a new state-transfer and ABI
-contract. Replacing the whole C++ leaf would also couple old model handles to
-new internal layouts. Loading individual cubins would require a second launch
-path for the existing CUDA-runtime wrappers, including PDL. The two existing
-Trellis functions already take device views and caller-owned workspace, so
-this boundary needs no model-state migration.
-
-The experiment engine is a Rust example using the normal model/step ABI. It
-has a serial JSONL control channel, no HTTP route and no production deployment
-action. A replacement is model-local. The default service uses built-in code.
-Changing Rust scheduling, attention, KV format, quantization, model topology,
-weights, or the workspace budget still requires a cold engine. This is an
-explicitly bounded implementation, not arbitrary forward-pass replacement.
-
-The replacement scope is narrower than the experiment's research scope:
-
-| Change | Session action |
+| Level | Existing feedback and interpretation |
 |---|---|
-| Trellis linear/SwiGLU kernel implementation, preserving the public ABI, weight layout and numerical contract, fitting the existing workspace | Build a new immutable library and hot-load it at an empty-pool boundary. Recapture all decode/verify graphs and validate outputs. |
-| Prompt, residual or output budget within the loaded envelope | Define a separate measurement case/reference. Keep each baseline/candidate comparison on the same case. The batch driver's plan is fixed for its run. |
-| Model/weights, KV format, configured context/chunk/lanes, speculation or workspace capacity | Start a new session with explicit settings; hot loading cannot change these reservations. |
-| Rust engine/scheduler, attention or another operator outside the plugin, or an incompatible ABI/layout | Rebuild the engine and start a new session. The candidate builder only compiles its three Trellis units; other source edits do not reach the resident engine. |
-| CUDA execution error or uncertain device state | End the session and recover in a fresh process. Preserve the failed attempt and recheck the baseline. |
+| Contract/operator checks | Compilation, ABI/workspace admission and the applicable Trellis numerical tests. They precede interpreting speed. |
+| Layer | Replay the selected GDN/GQA layer using an identified BF16 residual and fresh sequence state. Keep input provenance; a synthetic input or position-zero replay is only a local diagnostic. |
+| Full forward | Actual token inputs through all layers, relevant lane/context cases and speculation controls. Record logits, emitted tokens, round widths and timings. |
+| Service acceptance | Stop the lab, rebuild the production binary, then run the canonical GPU profile and fixed coding-agent benchmark with required capacity/canary/lifecycle checks. |
 
-Reload requires an empty sequence pool on its owning model thread. It checks
-the ABI and every actual model shape/width against the reserved workspace,
-synchronizes the stream, loads and prepares the candidate, and captures new
-decode and verify graphs. Old graphs and their library stay alive until the
-replacement succeeds. Missing symbols, ABI/workspace refusals or incomplete
-capture retain the old generation. Resetting all workspace bytes prevents
-candidate scratch from contaminating the next arm. CUDA execution failures
-can poison the context; terminate that session and start a fresh one.
+This keeps the current fidelity ladder. Fast probes help reject bad directions;
+full forward checks whether they survive real model execution. Service results
+remain the production performance denominator. No layer speedup is promoted
+by itself, and fixed-output-budget lab timings are not the EOS-honoring service
+benchmark.
 
-A native plugin is trusted executable code. ABI validation catches accidental
-incompatibilities; it is not a sandbox or proof of numerical correctness.
-The caller never overwrites a loaded library. Content-addressed builds record
-source/header hashes, compiler version, flags and library SHA-256. Source and
-artifact identity remain the remote experiment queue's responsibility.
+Preserve the current exact-output gate, configured warmups/sample count,
+bracketing controls and raw samples. Arithmetic changes need a separately
+justified numerical oracle; do not loosen the gate to make a candidate pass.
+The layer command currently requires an input file and fresh state. Automatic
+real-activation capture and long-context state replay are not added by this
+control redesign. Use real full-forward cases to cover that fidelity gap.
 
-## Measurement levels
+## What complexity is removed
 
-| Level | Measurement | Purpose and limit |
-|---|---|---|
-| 0: contract and operator | CPU request/ABI checks, candidate compilation, existing Trellis numerical GPU tests, workspace admission | Reject malformed and numerically wrong kernels before expensive runs. Use BF16/f64 oracles; random/synthetic inputs alone do not establish model behavior. |
-| 1: layer | Resident GDN/GQA layer with supplied BF16 residual, fresh sequence state, widths 1/8/16 and prefill widths | Cheap integration feedback for projections, activation layout and residuals. Record input hash/provenance. A position-zero replay does not reproduce a long-context recurrent state or cache pressure. |
-| 2: forward | Resident full 64-layer prefill/decode, actual token arrays, speculation off and DFlash2, one/two lanes | Detect graph, state, speculative and full-model regressions. Record logits hashes, output tokens, per-round widths/times and acceptance effects. Fixed-output-budget timing is diagnostic, not the service benchmark. |
-| 3: service | Rebuilt production binary, frozen coding-agent requests and settings, canary/capacity and lifecycle checks | Confirm actual latency and correctness before integration. Include Vision/tools/cancellation/reload when affected. Only this level can support a production performance claim. |
+| Previous direction | Single-writer design |
+|---|---|
+| Queue job per adaptive batch and a new source checkout | One mutable development checkout and a small immutable input copy per evaluation. |
+| Candidate delivery service for running jobs | One foreground stdin/stdout stream owned by the agent. |
+| Shared resident engine across agents/jobs | One engine directly owned by the current driver. |
+| Scheduling, pending jobs, fairness and task cancellation states | One blocking evaluation at a time; stop the whole session on fatal failure. |
+| Whole-job restart and repeated model setup | Keep the engine resident until an explicit session boundary. |
+| Source/result identity, numerical checks and graph lifetime rules | Retained: these establish valid feedback even with a single writer. |
 
-The layer and forward levels share one resident full-model load. This fixed
-artifact fits the card, so a separate few-layer loader would add ownership and
-binding complexity without improving per-candidate startup. The layer command
-executes only its selected layer; it does not reduce the initial weight load.
+The old queue can remain for its existing users. Do not extend it, make the
+interactive path depend on it, or couple this change to deleting its code.
+There is no requirement to fill every idle GPU interval with another agent.
 
-The supplied driver runs level 1 before level 2, stops a candidate at the first
-numerical mismatch and restores built-in code. One warmup and three measured
-samples are defaults, configurable in the experiment CLI. Built-in controls
-bracket each candidate. Raw samples and drift ratios are retained; the driver
-does not automatically choose or deploy a winner.
+## Implementation delta and acceptance
 
-The initial gate requires exact layer output, prefill-logit hashes and decoded
-tokens. This intentionally rejects some numerically valid arithmetic changes.
-Such changes need a named numerical oracle/tolerance and the existing full GPU
-profile, not a switch that disables checks. An exact token match by itself is
-insufficient because it can hide large logit changes.
+Implemented today: the Rust JSONL engine, Trellis library builder, ABI and
+workspace admission, graph replacement/rollback, layer/forward operations and
+finite-list comparison driver. Their measured behavior is recorded in the
+[finding](../../findings/2026-11-12-resident-kernel-experiments.md).
 
-## What fixing the model removes
+The remaining work is narrow:
 
-The artifact fixes tensor shapes, K distributions, layer types (48 GDN and 16
-GQA), hidden width, vocabulary and weight layout. The device fixes SM120a.
-These become the compatibility envelope and replay corpus, eliminating model
-architecture discovery, graph partition search, distributed parallelism and
-multi-platform dispatch from this implementation.
+1. Extend the Python driver with foreground interactive input and direct GPU
+   lock/child lifetime ownership. Keep `remote.py exec` as the remote entry;
+   no new network service or queue command is needed.
+2. Add evaluate-current-source, the explicit edit boundary, pinned baseline
+   and small input copies. Reuse the builder, reload API and comparison code.
+3. Test the adaptive loop and document its implemented command syntax.
 
-Traffic remains variable: context length, prefill chunk tails, lane count,
-DFlash2 acceptance, prompt reuse and Vision change the work. The fixed model
-therefore reduces the search space; it does not justify benchmarking only one
-synthetic T=8 matrix or treating a layer speedup as an end-to-end speedup.
+Acceptance must demonstrate: two edits chosen successively from feedback run
+in the same engine PID without reloading weights; the new candidate actually
+executes; a second session is refused; each failure retains baseline or exits
+cleanly; EOF/interruption releases the card; host changes demand a restart;
+and recovery keeps the original baseline identity. CPU tests and applicable
+CUDA/profile checks still apply to the implementation.
 
-## Resource and promotion policy
+Compare the interactive and existing batch paths with the same candidate,
+inputs, oracle, warmups and samples. Report compile, reload and measurement
+separately and verify that control simplification adds no model setup to the
+inner loop. No new latency claim is made before that measurement.
 
-One 5080 means one active engine. Run a finite candidate batch inside one frozen
-`remote.py experiment` job and its inherited GPU lease; do not run a persistent
-engine beside serving or escape the queue's cgroup. A session can test several
-libraries while amortizing the load. Separate queue jobs still start cold.
-Reusing a resident engine across separately submitted queue jobs is deferred:
-it would change source isolation, failure recovery and lease ownership.
-
-Use the existing fixed coding-agent baseline as the level-3 denominator.
-Measure experiment-throughput gains separately from inference gains. This
-change adds infrastructure and makes no model-throughput improvement claim.
-
-## Acceptance
-
-- Workspace CPU tests, Python tests and CUDA all-targets compilation pass.
-- On a single idle RTX 5080, one process loads the real artifact and runs
-  built-in → candidate → built-in with identical outputs and unchanged model
-  and pool allocations, with speculation off and on.
-- ABI, checksum, workspace, active-sequence and capture failures do not advance
-  generation or corrupt the old engine.
-- A changed computation is observed after replacement; stale CUDA graphs cannot
-  silently make the same-code parity test pass.
-- Startup and each replacement are timed separately, and all failed attempts
-  remain in the evidence record.
-
-See the [usage guide](../../user/contributing/kernel-lab.md) for commands.
+The [current usage guide](../../user/contributing/kernel-lab.md) documents the
+available batch workflow. Its commands do not yet implement this proposal.
