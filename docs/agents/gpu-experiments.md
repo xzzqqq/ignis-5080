@@ -41,12 +41,14 @@ The runner rejects modifications to its frozen tracked source. See the
 [lab guide](../user/contributing/kernel-lab.md) for executable commands.
 
 The revised [single-writer design](../specs/continual-experiments/README.md)
-removes the proposed shared session and candidate-delivery service. It calls
-for a foreground interactive driver using `remote.py exec`, one mutable
-checkout and one engine, independently of this queue. That driver extension
-is not implemented yet. This page remains the procedure for delegated/frozen
-queue jobs: retain their source isolation, timeouts and descendant cleanup.
-Do not run the future mutable workflow inside such a job.
+proposes `scripts/lab.py setup/replay/forward/stop`: independent local commands
+that wrap sync/exec, with one supervised remote engine reached over a local
+Unix socket. The four-command implementation is pending. It replaces the
+previous foreground interactive proposal and is independent of this queue.
+This page remains the procedure for delegated/frozen jobs: retain their source
+isolation, timeouts and cleanup. Do not run the future mutable workflow inside
+such a job. See the [implementation plan](../specs/continual-experiments/implementation-plan.md)
+for command and failure contracts.
 
 End an experiment with its supported/rejected/inconclusive conclusion and
 record required checks that failed or were not run. Final service validation

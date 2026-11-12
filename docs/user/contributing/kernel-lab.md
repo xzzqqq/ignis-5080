@@ -5,16 +5,30 @@ description: "Test multiple Trellis candidates with one resident model load."
 
 ## Implementation status
 
-The commands below describe the implemented finite-batch driver and low-level
-Rust JSONL engine. The revised [single-writer design](../../specs/continual-experiments/README.md)
-proposes a foreground interactive extension that builds and evaluates each
-new edit in the same session, without a queue or candidate-delivery service.
-That extension is not implemented; there is no `--interactive` or `evaluate`
-command yet. The [implementation plan](../../specs/continual-experiments/implementation-plan.md)
-also replaces the default zero-state layer probe with captured real Trellis
-calls from the coding-agent fixtures, and adapts full forward to those inputs.
-That capture/replay path is not implemented. Service benchmark acceptance is
-outside the new feature; the commands below still describe the older tools.
+The commands under Build, Start and control, and Ordered comparisons describe
+the implemented finite-batch driver and low-level Rust JSONL engine.
+
+The revised [design](../../specs/continual-experiments/README.md) and
+[implementation plan](../../specs/continual-experiments/implementation-plan.md)
+propose four independent local commands with automatic sync and remote calls:
+
+```sh
+python3 scripts/lab.py setup
+python3 scripts/lab.py replay
+python3 scripts/lab.py forward
+python3 scripts/lab.py stop
+```
+
+These commands are not implemented yet; `scripts/lab.py` does not exist.
+Setup will start a background owner/engine and prepare or load a persistent
+benchmark-derived replay corpus. Replay/forward will sync and build the current
+source automatically, evaluate it and restore baseline. Stop will require no
+sync or successful build. Ordinary command exit will leave the engine alive;
+the user will not hold an interactive SSH/stdin handle.
+
+Real Trellis capture/replay and benchmark generation adaptation are also still
+planned. Service benchmark acceptance is outside the new feature. The existing
+commands below do not provide the new four-command lifecycle.
 
 ## Scope
 
@@ -56,19 +70,18 @@ The workflow available today is:
    for the next batch; this currently creates a fresh session. Promote selected
    candidates to the full correctness and service checks.
 
-The revised edit → compile → hot-load → measure → edit loop uses one foreground
-owner and the existing serial JSONL engine. It needs an interactive extension
-to the driver, not a shared session service. Today the shipped driver still
-takes a fixed list, and the queue has no remote attachment or live candidate
-input. Do not edit a running frozen job's tracked source or overwrite a loaded
-`.so`; the proposed direct workflow will use a mutable checkout outside the
-queue.
+The proposed loop is setup once, edit locally, invoke replay/forward, then stop.
+Each command will wrap `remote.py` internally; no manual sync or JSONL session
+management will be required. A remote Unix socket and one owner process keep
+the model loaded between commands. No shared multi-agent session or queue is
+part of that path. The current finite-batch workflow above is unchanged until
+this implementation lands.
 
-Each candidate still pays compilation, hash/contract checks, graph recapture,
-warmup and measurement. Changing engine/model/load settings, a CUDA failure,
-EOF, cancellation or timeout ends the session; restarting repeats setup.
-Keep the same workload and numerical rule for a comparison. Kernel speedups
-at one level still need confirmation at the next relevant level.
+In the current direct JSONL runner, EOF closes the engine. That is an internal
+child-lifetime behavior in the proposed design, not the effect of an ordinary
+four-command client disconnect. Each candidate still pays compilation,
+contract checks, graph recapture, warmup and measurement. Compare the same
+workload/numerical rule, and use full forward to confirm local gains.
 
 ## Build
 
