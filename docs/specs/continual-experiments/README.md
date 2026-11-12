@@ -2,7 +2,9 @@
 
 Design revision: 2026-11-12. This replaces the earlier target of a shared
 resident engine receiving candidates from multiple agents or queue jobs.
-The interactive workflow below is proposed, not implemented. The existing
+The interactive workflow below is proposed, not implemented. The
+[implementation plan](implementation-plan.md) records the audited gaps and
+latest benchmark-derived capture/replay scope. The existing
 Trellis reload primitive and finite batch driver remain the implementation.
 
 ## Goal and assumptions
@@ -102,7 +104,7 @@ does not need to separately manage candidate admission, activation, timing and
 rollback. Proposed input, not an existing CLI feature:
 
 ```json
-{"op":"evaluate","through":"layer"}
+{"op":"evaluate","through":"replay"}
 {"op":"evaluate","through":"forward"}
 {"op":"stop"}
 ```
@@ -147,8 +149,9 @@ baseline checks. Preserve partial logs without declaring the attempt passed.
 This avoids durable task recovery and cross-client cancellation protocols.
 
 End the session when the question/budget is exhausted or another workload
-needs the card. Stop it before a full GPU profile or service benchmark. No
-scheduler decides when another agent should inherit its model.
+needs the card. Separate GPU validation needs the lab to release the card.
+Service acceptance is outside this feature's scope. No scheduler decides when
+another agent should inherit its model.
 
 ## Hot-loading scope
 
@@ -179,30 +182,40 @@ catch accidental incompatibilities, not malicious behavior.
 
 ## Measurement with one engine
 
-The fixed 27B artifact fits the 5080. Use one full-model resident load for both
-local and full-forward measurements, executing only the chosen layer for a
-local probe. Separate few-layer loaders or a pool of engines would add state
-ownership without improving this loop's per-candidate initialization.
+Use the three existing coding-agent benchmark fixtures as the source for both
+levels. Prepare their exact model inputs with the existing request/template/
+tokenizer path, without starting an HTTP service. The current fixed-budget lab
+runner still needs adaptation for EOS, reasoning and speculative controls;
+its diagnostic timings are not the existing service benchmark's TPS.
 
-| Level | Existing feedback and interpretation |
+| Level | Target feedback |
 |---|---|
-| Contract/operator checks | Compilation, ABI/workspace admission and the applicable Trellis numerical tests. They precede interpreting speed. |
-| Layer | Replay the selected GDN/GQA layer using an identified BF16 residual and fresh sequence state. Keep input provenance; a synthetic input or position-zero replay is only a local diagnostic. |
-| Full forward | Actual token inputs through all layers, relevant lane/context cases and speculation controls. Record logits, emitted tokens, round widths and timings. |
-| Service acceptance | Stop the lab, rebuild the production binary, then run the canonical GPU profile and fixed coding-agent benchmark with required capacity/canary/lifecycle checks. |
+| Captured local replay | Replay selected actual Trellis calls from the baseline's benchmark execution, initially MLP gate/up and down. Keep their real inputs, initial ADD destination, reference outputs and provenance; reuse resident weights. |
+| Full forward | Rerun the benchmark's original model inputs through all layers using the candidate's own activations, generated tokens and state. Record logits, tokens, termination and speculative counters with engine timings. |
 
-This keeps the current fidelity ladder. Fast probes help reject bad directions;
-full forward checks whether they survive real model execution. Service results
-remain the production performance denominator. No layer speedup is promoted
-by itself, and fixed-output-budget lab timings are not the EOS-honoring service
-benchmark.
+Compilation, ABI/workspace admission and numerical checks remain prerequisites,
+not a third engine. The same complete model stays resident for both levels.
+No independent few-layer loader, KV/GDN history snapshot system or general
+subgraph compiler is required for these stateless Trellis calls.
 
-Preserve the current exact-output gate, configured warmups/sample count,
-bracketing controls and raw samples. Arithmetic changes need a separately
-justified numerical oracle; do not loosen the gate to make a candidate pass.
-The layer command currently requires an input file and fresh state. Automatic
-real-activation capture and long-context state replay are not added by this
-control redesign. Use real full-forward cases to cover that fidelity gap.
+Capture actual graph execution, not just host calls while constructing a graph.
+Use bounded recording buffers, then remove capture operations before timing.
+Reset mutable buffers outside each local timing window. Local replay still has
+different cache/context conditions; its timing cannot be summed into a claimed
+full-model speedup. Full forward must not consume recorded intermediate values
+or be forced along the baseline's output trajectory.
+
+Preserve exact-output checks, configured warmup/sample counts, bracketing
+controls and raw samples. Arithmetic changes need a separately justified
+numerical oracle. Sample identity includes the model, baseline, fixture,
+preparation/configuration and actual call; changed identities require a fresh
+capture. The implementation plan replaces the earlier synthetic/fresh-state
+layer probe as the default fast level. Existing core layer APIs remain usable
+by their current callers.
+
+HTTP/service benchmarks and their capacity/canary acceptance are outside this
+feature. Repository-required implementation tests remain required; they do not
+become another user-facing measurement level.
 
 ## What complexity is removed
 
@@ -226,14 +239,11 @@ workspace admission, graph replacement/rollback, layer/forward operations and
 finite-list comparison driver. Their measured behavior is recorded in the
 [finding](../../findings/2026-11-12-resident-kernel-experiments.md).
 
-The remaining work is narrow:
-
-1. Extend the Python driver with foreground interactive input and direct GPU
-   lock/child lifetime ownership. Keep `remote.py exec` as the remote entry;
-   no new network service or queue command is needed.
-2. Add evaluate-current-source, the explicit edit boundary, pinned baseline
-   and small input copies. Reuse the builder, reload API and comparison code.
-3. Test the adaptive loop and document its implemented command syntax.
+The implementation now needs three substantive additions: benchmark input/
+generation adaptation, a foreground evaluation loop, and bounded actual-call
+capture/replay. Follow P1–P4 in the [implementation plan](implementation-plan.md),
+then remove the old default batch/synthetic-layer workflow. The reload ABI,
+builder and graph rollback are reused.
 
 Acceptance must demonstrate: two edits chosen successively from feedback run
 in the same engine PID without reloading weights; the new candidate actually

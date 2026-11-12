@@ -10,7 +10,11 @@ Rust JSONL engine. The revised [single-writer design](../../specs/continual-expe
 proposes a foreground interactive extension that builds and evaluates each
 new edit in the same session, without a queue or candidate-delivery service.
 That extension is not implemented; there is no `--interactive` or `evaluate`
-command yet. Compilation and measurement rules remain the same in the proposal.
+command yet. The [implementation plan](../../specs/continual-experiments/implementation-plan.md)
+also replaces the default zero-state layer probe with captured real Trellis
+calls from the coding-agent fixtures, and adapts full forward to those inputs.
+That capture/replay path is not implemented. Service benchmark acceptance is
+outside the new feature; the commands below still describe the older tools.
 
 ## Scope
 
