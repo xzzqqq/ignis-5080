@@ -1,6 +1,6 @@
 ---
 title: "Resident kernel experiments"
-description: "Compile and test Trellis candidates while the fixed model stays loaded."
+description: "Test multiple Trellis candidates with one resident model load."
 ---
 
 ## Scope
@@ -16,8 +16,44 @@ CUDA builds and execution run on remote Linux. Start from an independent
 worktree and use the [experiment queue](../../agents/gpu-experiments.md).
 Place the following commands inside one experiment step so the engine keeps
 the job's GPU lease. Run `make gpu-status` before GPU execution and verify
-that only this experiment owns the card. The queue stops the whole campaign
-on timeout, cancellation or worker failure.
+that only this job owns the card. Timeout or cancellation stops the job's
+descendants. An SSH disconnect or worker interruption does not itself stop an
+independently running job: inspect `status`/`result` and let the worker reconcile
+it before retrying. An uncertain attempt is never automatically replayed.
+
+## Work mode and lifecycle
+
+An experiment is the optimization question; a queue job is one frozen
+execution; a resident session is one loaded engine; a candidate is one
+immutable library. Model setup is paid once per session. The experiment can
+span multiple sessions and final service checks. See the
+[lifecycle and availability contract](../../specs/continual-experiments/README.md#experiment-purpose-and-lifecycle).
+
+The workflow available today is:
+
+1. State the question, baseline, metric, allowed changes, numerical gate and
+   budget in `.scratch/`. Prepare a finite batch of candidate sources.
+2. Submit a frozen queue job that builds those libraries and invokes
+   `scripts/kernel_lab.py` once with their `--candidate` paths. The libraries
+   must exist before the driver starts; it does not compile or watch sources.
+3. The driver loads the model once, tests the candidate list in order with
+   warmups and bracketing controls, then closes the engine. A larger batch
+   amortizes the same setup across its candidates.
+4. Inspect the results and edit the Laptop worktree. Submit another frozen job
+   for the next batch; this currently creates a fresh session. Promote selected
+   candidates to the full correctness and service checks.
+
+The desired edit → compile → hot-load → measure → edit loop in one continuing
+session still needs candidate delivery and a session controller. The example's
+JSONL stdin is a low-level serial primitive; the queue has no remote attachment
+or live candidate inbox, and the shipped driver takes a fixed list. Do not
+edit a running job's tracked source or overwrite a loaded `.so`.
+
+Each candidate still pays compilation, hash/contract checks, graph recapture,
+warmup and measurement. Changing engine/model/load settings, a CUDA failure,
+EOF, cancellation or timeout ends the session; restarting repeats setup.
+Keep the same workload and numerical rule for a comparison. Kernel speedups
+at one level still need confirmation at the next relevant level.
 
 ## Build
 
