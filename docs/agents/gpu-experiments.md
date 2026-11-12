@@ -41,10 +41,12 @@ The runner rejects modifications to its frozen tracked source. See the
 [lab guide](../user/contributing/kernel-lab.md) for executable commands.
 
 The revised [single-writer design](../specs/continual-experiments/README.md)
-proposes `scripts/lab.py setup/replay/forward/stop`: independent local commands
+provides `scripts/lab.py setup/replay/forward/stop`: independent local commands
 that wrap sync/exec, with one supervised remote engine reached over a local
-Unix socket. The four-command implementation is pending. It replaces the
-previous foreground interactive proposal and is independent of this queue.
+Unix socket. Each command wraps sync and remote execution. One transient
+systemd user unit supervises the resident owner and its children; there is no
+automatic restart. This replaces the foreground interactive proposal and is
+independent of this queue.
 This page remains the procedure for delegated/frozen jobs: retain their source
 isolation, timeouts and cleanup. Do not run the future mutable workflow inside
 such a job. See the [implementation plan](../specs/continual-experiments/implementation-plan.md)

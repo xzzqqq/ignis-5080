@@ -3,8 +3,9 @@
 Design revision: 2026-11-12. The target is four independent local commands with
 automatic synchronization and one supervised remote resident engine. This
 supersedes the foreground interactive/long-lived SSH proposal. The commands
-and benchmark capture/replay are not implemented yet; the existing Trellis
-reload primitive, builder and finite-batch driver remain available.
+and benchmark capture/replay are implemented. The Trellis reload primitive
+and builder are reused; the former finite-batch driver now supplies only the
+private engine client for the resident owner.
 
 The [implementation plan](implementation-plan.md) defines command behavior,
 failure handling, data contracts, implementation order and acceptance.
@@ -30,7 +31,7 @@ configuration search do not become requirements of this design.
 
 ## Entry points and architecture
 
-Proposed commands, not currently executable:
+Commands (first setup takes a local settings file; see the usage guide):
 
 ```sh
 python3 scripts/lab.py setup
@@ -47,12 +48,14 @@ python3 scripts/lab.py stop
 | stop | Stop the identified owner/engine/process group and release the card, without sync or requiring compilable source. Keep corpus and results. |
 
 The local `lab.py` wrapper calls existing `remote.py sync/exec` internally.
-It does not implement another SSH or source-transfer stack. The remote owner
-reuses `scripts/kernel_lab.py`'s Session, build/comparison and result logic and
-directly supervises the Rust engine. A private remote Unix socket connects
+It does not implement another SSH or source-transfer stack. The remote owner in `scripts/lab_support/host.py` reuses
+`scripts/kernel_lab.py`'s Session and the candidate builder, and owns the
+comparison/result logic and Rust child. A private remote Unix socket connects
 short-lived command clients to that owner. The engine's existing JSONL remains
-an internal channel. No public TCP/HTTP interface, candidate inbox, job
-database, scheduler or durable task queue is introduced.
+an internal channel. One transient systemd user unit owns each session's process group, so stopping
+or losing the owner also cleans up its children. There is no automatic unit
+restart. No public TCP/HTTP interface, candidate inbox, job database, scheduler
+or durable task queue is introduced.
 
 ```mermaid
 flowchart LR
@@ -84,7 +87,7 @@ engine and prepares the corpus. First-time recording has its own cost; later
 setup can load existing files. Record identity checks, compilation, model load,
 capture and corpus loading separately. Setup after a fault reuses the pinned
 baseline rather than silently rebuilding it from edited candidate code.
-Selecting a new baseline is explicit: the proposed `setup --new-baseline`
+Selecting a new baseline is explicit: `setup --new-baseline`
 requires the previous session to be stopped. Repeated setup for a matching live owner
 reports its state instead of synchronizing or replacing it.
 
@@ -163,8 +166,9 @@ or record range); report that coverage and hold it constant across candidates.
 Do not silently sample or assume replaying the entire corpus must be faster
 than full forward. Bound capture memory and stream data to disk. Capture graph execution, not host
 construction calls; do not overwrite earlier call data before saving it.
-Recording can use explicit bounded groups if necessary, preserving coverage
-and baseline trajectory. Remove recording nodes before timing clean graphs.
+Insufficient pinned memory or disk budget is refused; choose an explicit
+capture scope or budget. Automatic grouped recording is not implemented.
+Remove recording nodes before timing clean graphs.
 
 Replay uses the current candidate function table. Restore mutable buffers and
 workspace outside timing; create local timing graphs after candidate load and
@@ -180,9 +184,9 @@ maintaining two competing local measurement implementations.
 
 ## Implementation and acceptance boundary
 
-Reuse the builder, Rust JSONL process, C ABI, workspace checks and graph
-replacement. Add the four-command wrapper/local socket supervision, benchmark
-adaptation and real-call capture/replay, following P1–P4 of the
+The implementation reuses the builder, Rust JSONL process, C ABI, workspace
+checks and graph replacement. The four-command wrapper/local socket
+supervision, benchmark adaptation and capture/replay implement P1–P4 of the
 [implementation plan](implementation-plan.md). Do not add a new compiler cache,
 a general plugin registry, background data management or automatic recovery.
 
@@ -196,7 +200,7 @@ old reload-only timings.
 
 Repository-required implementation tests remain mandatory. HTTP/service
 benchmarks and their capacity/canary acceptance are outside this feature.
-See the [current usage guide](../../user/contributing/kernel-lab.md) for the
-implemented batch tools and the
+See the [usage guide](../../user/contributing/kernel-lab.md) for configuration,
+four-command operation and regression commands and the
 [measurement finding](../../findings/2026-11-12-resident-kernel-experiments.md)
 for evidence about the existing reload primitive.

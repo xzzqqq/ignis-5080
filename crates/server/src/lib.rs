@@ -866,3 +866,6 @@ pub enum Served {
         phase: &'static str,
     },
 }
+
+/// Offline benchmark input preparation for the resident kernel lab.
+pub mod lab_inputs;

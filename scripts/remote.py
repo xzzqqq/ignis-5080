@@ -32,11 +32,13 @@ def load_config(path: Path) -> dict[str, str]:
     return config
 
 
-def ssh_command(config: dict[str, str], command: list[str]) -> list[str]:
+def ssh_command(config: dict[str, str], command: list[str], activate_env: bool = True) -> list[str]:
     if not command or not command[0] or any("\0" in arg for arg in command):
         raise ValueError("exec requires a command without NUL bytes")
     # SSH passes one string to the remote shell; quote both cwd and every argument.
     activate = 'set -e; if [ -f .remote.env ]; then source .remote.env; fi; exec "$@"'
+    if not activate_env:
+        activate = 'exec "$@"'
     remote = "cd " + shlex.quote(config["repo"]) + " && exec " + shlex.join(
         ["bash", "--noprofile", "--norc", "-c", activate, "ignis-remote", *command])
     return ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
@@ -54,8 +56,10 @@ def config_path(root: Path) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, help="Explicit private host/repo configuration")
     actions = parser.add_subparsers(dest="action", required=True)
     execute = actions.add_parser("exec", help="Run in the existing checkout; does not sync source or retry")
+    execute.add_argument("--no-env", action="store_true", help="Control/cleanup only: do not load .remote.env")
     execute.add_argument("command", nargs=argparse.REMAINDER, help="-- command [arguments ...]")
     synchronize = actions.add_parser("sync", help="Sync committed and uncommitted source; preserve remote caches")
     synchronize.add_argument("--dry-run", action="store_true", help="Report compressed transfer size without applying")
@@ -70,14 +74,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "exec" and not command:
         parser.error("exec requires -- command [arguments ...]")
     try:
-        config = load_config(config_path(ROOT))
+        config = load_config(args.config or config_path(ROOT))
         if args.action == "experiment":
             from experiments.client import main as experiments
             return experiments(ROOT, config, ssh_command, args.arguments)
         if args.action == "sync":
             from remote_sync import sync
             return sync(ROOT, config, ssh_command, args.dry_run)
-        result = subprocess.run(ssh_command(config, command))
+        result = subprocess.run(ssh_command(config, command, False) if args.no_env else ssh_command(config, command))
         return result.returncode if result.returncode >= 0 else 128 - result.returncode
     except ValueError as error:
         print(f"remote: {error}", file=sys.stderr)

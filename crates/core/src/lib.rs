@@ -144,3 +144,6 @@ pub use types::{
     RequestClass, RequestId, RequestIds, RequestInput, RequestState, SchedEvent, SpecCounters, SubmitError,
     TokenId,
 };
+
+#[cfg(feature = "cuda")]
+pub mod lab_trace;

@@ -1,7 +1,10 @@
 # 实施计划：四命令驱动的常驻热加载
 
-状态：计划，尚未实现。代码底座为 `c8137d1f`；后续设计修订不代表新入口已可用。
-本文取代前台交互式控制方案，是实施顺序和命令行为的权威计划。
+状态：P1–P4 已实现，验证记录随实现保存。代码底座为 `c8137d1f`。
+本文保留实施顺序和命令契约；实际配置与运行方式见用户指南。实现使用每会话一个
+临时 systemd user unit 管理 owner/引擎子进程清理，不启用自动重启或实验队列。
+图捕获使用有界缓冲区，预算不足明确拒绝；自动分组录制未实现，需显式缩小捕获
+范围或调整预算，不能把不完整数据集当作成功结果。
 
 ## 1. 最终入口与范围
 
@@ -15,7 +18,7 @@ python3 scripts/lab.py forward
 python3 scripts/lab.py stop
 ```
 
-拟新增的 `scripts/lab.py` 在内部调用现有 `scripts/remote.py sync/exec`，复用
+`scripts/lab.py` 在内部调用现有 `scripts/remote.py sync/exec`，复用
 连接配置、源码同步及错误处理；不另写 SSH/传输实现。一次性模型路径、引擎配置、
 数据目录和捕获范围由 setup 参数/本地配置提供，随后冻结在会话中。
 `.remote.json` 继续只负责现有 host/repo 配置，不混入测量参数。
@@ -41,7 +44,7 @@ python3 scripts/lab.py stop
 
 同一 owner 的 setup 若发现已有匹配会话，只报告现有 ready/busy 和最近结果，
 不隐式同步重建或改变基线。不同 owner/config 的活跃会话明确拒绝。发生 CUDA
-故障后，默认 setup 复用保留的 baseline 二进制；拟定的 `setup --new-baseline`
+故障后，默认 setup 复用保留的 baseline 二进制；`setup --new-baseline`
 只在旧会话已停止后，从当前源码显式建立新基线。活跃会话下拒绝此选项，不隐式
 重启。不能把当前 kernel 候选静默变成恢复后的基线。
 

@@ -161,3 +161,7 @@ acceptance and Vision still vary and require separate measurements.
 The [specification](../specs/continual-experiments/README.md) defines the
 replacement and measurement contracts. The [guide](../user/contributing/kernel-lab.md)
 contains repeatable build, replay and fault-injection commands.
+
+The [subsequent four-command and benchmark-replay measurement](2026-11-12-benchmark-kernel-replay.md)
+replaces the original zero-state layer workflow with persisted operator inputs.
+The startup figures above describe the original harness, not corpus preparation.
