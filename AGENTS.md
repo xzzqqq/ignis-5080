@@ -84,14 +84,36 @@ repo's disagree: ADR 0070 lists where the repo differs.
 
 ### Testing
 
-Every code change ships with a test, and the task is done only when
-`cargo test` passes workspace-wide. Before writing a test or reporting a code
-change done: `docs/agents/testing.md`.
+During optimization, run checks for the changed path, not the full suite
+after every candidate. Before reporting completion or merging, follow
+[testing](docs/agents/testing.md). Every shipped code change needs a meaningful
+test, and `cargo test` must pass workspace-wide.
 
 Before launching **anything** on the GPU (the profile, a bench run, a gate
 leg, one `--ignored` test): check with `make gpu-status` that nothing else
 holds the card, from any worktree or agent session. The 5080 fits one run at
 a time, and the loser dies with no diagnostic.
+
+### Kernel correctness
+
+- Define the contract before optimizing: computation, supported inputs, state
+  changes, reference and numerical checks. Floating-point differences within
+  established tolerances are allowed.
+- Check the same inputs and weights against an independent reference. Review
+  the kernel logic as well as test results.
+- Keep acceptance criteria fixed. Do not weaken checks, narrow coverage,
+  replace expected results with candidate output, or special-case benchmark
+  data to make a candidate pass.
+- Experiment, add checks and diagnose failures autonomously. If acceptance
+  requires relaxing the contract, allowing additional numerical or quality
+  loss, or setting a tolerance where none applies, escalate promptly with
+  measurements, rationale and a recommendation. Obtain human approval before
+  accepting that candidate; independent work may continue. Approval covers
+  the agreed contract and scope, so later implementations within it need no
+  new approval.
+- Investigate failures before calling them floating-point noise. Report
+  failed, skipped and unavailable checks. Performance gains cannot compensate
+  for failed correctness checks.
 
 ### User documentation
 

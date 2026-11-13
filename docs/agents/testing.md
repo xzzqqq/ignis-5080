@@ -1,7 +1,8 @@
 # Testing
 
-Add a meaningful test for every code change and pass the workspace CPU
-suite before reporting completion. Record GPU results separately, including
+Use this guide for final validation before reporting completion or merging.
+Ship a meaningful test for every code change and pass the workspace CPU
+suite. Record GPU results separately, including
 failed checks, missing fixtures, skipped tests and unavailable hardware.
 
 ## CPU
