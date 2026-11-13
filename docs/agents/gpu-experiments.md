@@ -30,10 +30,9 @@ defines experiment, job, session and candidate lifetimes.
    source HEAD/snapshot/tree and local/remote result paths. Identify which
    working changes should be integrated. The main agent decides integration.
 
-For single-writer kernel iteration with a resident model, use
-[Kernel Lab](../user/contributing/kernel-lab.md) independently of this queue.
-Do not run its mutable session inside a frozen queue job. This page covers
-delegated jobs and their source isolation, timeouts and cleanup.
+When one agent repeatedly edits Trellis kernels, use
+[Kernel Lab](../user/contributing/kernel-lab.md). Run it outside the queue;
+its source updates are incompatible with frozen jobs.
 
 End an experiment with its supported/rejected/inconclusive conclusion and
 record required checks that failed or were not run. Final service validation

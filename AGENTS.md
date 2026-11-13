@@ -30,7 +30,7 @@ connection config is the repository-root `.remote.json`, which is not committed;
 credential-free template is [.remote.example.json](.remote.example.json).
 SSH connection details are managed in `~/.ssh/config`.
 
-For single-writer kernel iteration with a resident model, use [Kernel Lab](docs/user/contributing/kernel-lab.md).
+When one agent repeatedly edits Trellis kernels, use [Kernel Lab](docs/user/contributing/kernel-lab.md).
 
 Delegated GPU experiments use `python3 scripts/remote.py experiment`, not
 `sync` over the shared checkout. Each subagent submits its own frozen
