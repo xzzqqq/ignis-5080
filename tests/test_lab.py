@@ -130,6 +130,63 @@ class LabTests(unittest.TestCase):
             self.assertFalse(result['passed'])
             self.assertIn('error',result)
 
+    def test_start_exits_when_stopped_or_replaced(self):
+        for terminal in ('stopped','replaced','missing'):
+            with self.subTest(terminal=terminal),tempfile.TemporaryDirectory() as t:
+                root=Path(t)
+                payload=dict(config={'artifact':'/model','data_dir':str(root/'data')},
+                    source={},new_baseline=True)
+                state_file=root/'.scratch/lab/state.json'
+                def launch(*args,**kwargs):
+                    state=common.read(state_file)
+                    if terminal=='missing':state_file.unlink()
+                    else:
+                        if terminal=='stopped':state['status']='stopped'
+                        else:state.update(session='replacement',status='ready')
+                        common.atomic(state_file,state)
+                expected='cancelled' if terminal=='stopped' else 'replaced|missing'
+                with patch.object(host,'status',return_value=None),patch.object(host,'source_identity',return_value={}),patch.object(host.shutil,'copy2'),patch.object(host.subprocess,'check_output',return_value='yes'),patch.object(host.subprocess,'run',side_effect=launch) as run,patch.object(host.time,'sleep',side_effect=AssertionError('must not keep waiting')):
+                    with self.assertRaisesRegex(ValueError,expected):
+                        host.start(root,'owner-a',payload)
+                    self.assertEqual(run.call_count,1)
+
+    def test_cancelled_setup_releases_command_lock_for_restart(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);receipt,target=self.fixture(root)
+            with patch.object(client,'ROOT',root),patch.object(client,'probe',return_value=None),patch.object(client,'source_identity',return_value={}),patch.object(client.subprocess,'run'),patch.object(client,'call',side_effect=[ValueError('setup cancelled'),{'status':'ready'}]) as call:
+                with self.assertRaises(SystemExit) as error:client.main(['setup'])
+                self.assertEqual(error.exception.code,2)
+                client.main(['setup'])
+                self.assertEqual(call.call_count,2)
+
+    def test_failed_candidate_forward_still_checks_restored_full_model(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import build_trellis_candidate
+        for restored in (True,False):
+            with self.subTest(restored=restored),tempfile.TemporaryDirectory() as t:
+                root=Path(t);run_dir=root/'run';run_dir.mkdir()
+                files={}
+                for n in build_trellis_candidate.SOURCES:
+                    p=root/'kernel/src'/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('test')
+                    files[str(p.relative_to(root))]=common.digest(p)
+                state=dict(config={'data_dir':str(root/'data')},directory=str(run_dir),source=files,config_hash='cfg')
+                service=host.Owner(root,state);service.corpus=root/'corpus'
+                service.engine=SimpleNamespace(process=SimpleNamespace(pid=123),reload=Mock(return_value={'ok':True}))
+                service.publish=Mock();service.local=Mock(return_value={'passed':True})
+                service.forward=Mock(side_effect=[{'passed':True},{'passed':False},{'passed':restored}])
+                with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(host,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate'}):
+                    if restored:service.evaluate({'source':files,'operation':'failure'},'forward')
+                    else:
+                        with self.assertRaisesRegex(RuntimeError,'baseline forward changed'):
+                            service.evaluate({'source':files,'operation':'failure'},'forward')
+                self.assertEqual([c.args[1] for c in service.forward.call_args_list],['before','candidate','after'])
+                self.assertEqual(service.engine.reload.call_args_list[-1].args,('builtin',))
+                result=common.read(run_dir/'results/failure/result.json')
+                self.assertTrue(result['finished']);self.assertFalse(result['passed'])
+                self.assertEqual(result['after_forward']['passed'],restored)
+                self.assertEqual(any(c.kwargs.get('status')=='ready' for c in service.publish.call_args_list),restored)
+
     def test_forward_comparison_checks_speculative_progress(self):
         base=dict(tokens=[1,2],input_tokens=4,finish_reason='length',stop_token=None,
                   logits_sha256='hash',rounds=[dict(emitted=2,extent=7,ms=10)])

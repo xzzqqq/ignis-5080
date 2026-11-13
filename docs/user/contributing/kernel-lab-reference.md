@@ -84,6 +84,8 @@ compatible data.
 restoring it. Each sample restores mutable buffers and workspace outside
 CUDA-event timing. All comparisons use the same view, warmup and sample counts.
 `forward` also measures baseline full runs before and after the candidate.
+The final baseline run is required even if the candidate fails numerical checks;
+failure of that restoration check ends the session.
 It starts a new sequence for each request and never injects recorded activations
 or forces baseline output tokens. C1 means sequential requests; two configured
 lanes remain available in the model.
@@ -92,6 +94,8 @@ A command exiting normally leaves the engine resident; no open terminal is
 required. Concurrent evaluations are refused rather than queued. `stop` uses
 the recorded target and pinned control code without syncing or rebuilding,
 and confirms that the owned GPU process has disappeared.
+Stopping during setup cancels the waiting command and releases its command lock,
+so another setup can start without waiting for the setup timeout.
 
 ## Source, baseline and recovery
 

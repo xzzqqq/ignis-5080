@@ -262,7 +262,7 @@ class Owner:
                     raise RuntimeError('baseline restoration failed: '+str(e)) from e
             report['after']=self.local(d,'after')
             if not report['after']['passed']:raise RuntimeError('baseline restoration failed')
-            if action=='forward' and report['passed']:
+            if action=='forward':
                 report['after_forward']=self.forward(d,'after')
                 if not report['after_forward']['passed']:raise RuntimeError('baseline forward changed')
         except ValueError as e:
@@ -323,6 +323,9 @@ def start(root,owner,payload):
     deadline=time.monotonic()+float(cfg.get('setup_timeout_s',3600))
     while time.monotonic()<deadline:
         state=read(root/'.scratch/lab/state.json')
+        if not state or state.get('session')!=session:
+            raise ValueError('setup session replaced or missing')
+        if state['status']=='stopped':raise ValueError('setup cancelled: session stopped')
         if state['status']=='ready':return state
         if state['status']=='failed':raise ValueError(state.get('error','setup failed'))
         time.sleep(.2)
