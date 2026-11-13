@@ -26,9 +26,9 @@ void require_activation(const ninfer::Tensor &x, uint32_t in, const char *op) {
   }
 }
 
-void check(int32_t rc, const char *op) {
+void check(const ignis_model &model, int32_t rc, const char *op) {
   if (rc != 0) {
-    throw std::runtime_error(std::string(op) + ": " + ignis_trellis_last_error());
+    throw std::runtime_error(std::string(op) + ": " + (model.trellis_candidate ? model.trellis_candidate->api->last_error() : ignis_trellis_last_error()));
   }
 }
 
@@ -37,9 +37,12 @@ void check(int32_t rc, const char *op) {
 void linear(const ignis_model &model, const ignis_trellis_weight &w, const ninfer::Tensor &x, void *y,
             uint32_t ldy, uint32_t epilogue, cudaStream_t stream) {
   require_activation(x, w.in, "trellis linear");
-  check(ignis_trellis_linear(&w, x.data, static_cast<uint32_t>(x.ne[1]), y, ldy, epilogue,
+  void *ticket = ignis::lab_before(model,w,nullptr,x.data,static_cast<uint32_t>(x.ne[1]),y,ldy,epilogue,stream);
+  const auto call = model.trellis_candidate ? model.trellis_candidate->api->linear : ignis_trellis_linear;
+  check(model, call(&w, x.data, static_cast<uint32_t>(x.ne[1]), y, ldy, epilogue,
                              &model.trellis_workspace, stream),
         "trellis linear");
+  ignis::lab_after(model,ticket,y,stream);
 }
 
 void swiglu(const ignis_model &model, const ignis_trellis_weight &gate, const ignis_trellis_weight &up,
@@ -49,9 +52,12 @@ void swiglu(const ignis_model &model, const ignis_trellis_weight &gate, const ig
       !h.is_contiguous()) {
     throw std::invalid_argument("trellis swiglu: the output is not a BF16 [out, T] matrix");
   }
-  check(ignis_trellis_linear_swiglu(&gate, &up, x.data, static_cast<uint32_t>(x.ne[1]), h.data, gate.out,
+  void *ticket = ignis::lab_before(model,gate,&up,x.data,static_cast<uint32_t>(x.ne[1]),h.data,gate.out,0,stream);
+  const auto call = model.trellis_candidate ? model.trellis_candidate->api->swiglu : ignis_trellis_linear_swiglu;
+  check(model, call(&gate, &up, x.data, static_cast<uint32_t>(x.ne[1]), h.data, gate.out,
                                     &model.trellis_workspace, stream),
         "trellis swiglu");
+  ignis::lab_after(model,ticket,h.data,stream);
 }
 
 cudaError_t split_query_gate(const void *interleaved, int32_t heads, int32_t head_dim, int32_t tokens, void *query,

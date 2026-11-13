@@ -87,6 +87,22 @@ class RemoteTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.repo / "executed").exists())
 
+    def test_control_can_skip_broken_private_environment(self):
+        (self.repo / ".remote.env").write_text("false\n")
+        command = remote.ssh_command(self.config, [sys.executable, "-c", "print('cleanup')"], False)
+        result = subprocess.run(["sh", "-c", command[-1]], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "cleanup\n")
+
+    def test_explicit_recorded_config_does_not_use_current_checkout_config(self):
+        other = self.root / "recorded.json"
+        other.write_text(json.dumps(self.config))
+        self.path.write_text("broken")
+        with patch.object(remote, "ROOT", self.root), patch.object(remote.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(remote.main(["--config", str(other), "exec", "--no-env", "--", "true"]), 0)
+            run.assert_called_once_with(remote.ssh_command(self.config, ["true"], False))
+
     def test_cli_preserves_failures_without_retry(self):
         for code in [0, 7, 255, -15]:
             with self.subTest(code=code), patch.object(remote, "ROOT", self.root), \

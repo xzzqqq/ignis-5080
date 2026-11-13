@@ -54,6 +54,7 @@ pub mod host;
 pub mod hq_ring;
 pub mod identity;
 pub mod kv;
+pub mod kernel_lab;
 pub mod kv_format;
 pub mod lane_lines;
 pub mod locate;
@@ -143,3 +144,6 @@ pub use types::{
     RequestClass, RequestId, RequestIds, RequestInput, RequestState, SchedEvent, SpecCounters, SubmitError,
     TokenId,
 };
+
+#[cfg(feature = "cuda")]
+pub mod lab_trace;

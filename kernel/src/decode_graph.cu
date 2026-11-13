@@ -280,6 +280,7 @@ namespace {
 int32_t capture_verify_graph_width(ignis_model *model, ignis_seq_pool *pool, uint32_t width,
                                    cudaGraphExec_t *out_exec) {
   *out_exec = nullptr;
+  ignis::lab_graph_begin(model, true, width);
   cudaError_t err = cudaStreamBeginCapture(model->stream, cudaStreamCaptureModeThreadLocal);
   if (err != cudaSuccess) {
     set_error(std::string("ignis_verify_graph_capture: cudaStreamBeginCapture failed: ") +
@@ -321,6 +322,7 @@ int32_t capture_verify_graph_width(ignis_model *model, ignis_seq_pool *pool, uin
 int32_t capture_decode_graph_width(ignis_model *model, ignis_seq_pool *pool, uint32_t width,
                                    cudaGraphExec_t *out_exec) {
   *out_exec = nullptr;
+  ignis::lab_graph_begin(model, false, width);
   const auto vocab = static_cast<std::int32_t>(model->vocab);
   const auto batch = static_cast<std::int32_t>(width);
 

@@ -951,6 +951,7 @@ int32_t run_program_chunk(ignis_model *model, ignis_seq_pool *pool, ignis_seq *s
   const auto T = static_cast<std::int32_t>(num_tokens);
   // The chunk's own columns the drafter taps: [tap_first, T).
   const std::uint64_t chunk_start = seq->position;
+  ignis::lab_prefill_position(model,chunk_start);
   const std::int32_t tap_first =
       dflash2_tap_from > chunk_start
           ? static_cast<std::int32_t>(std::min<std::uint64_t>(dflash2_tap_from - chunk_start, num_tokens))

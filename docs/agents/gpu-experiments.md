@@ -5,6 +5,12 @@ The subagent owns its worktree, request and analysis loop. Use `python3 scripts/
 sync a candidate over the shared remote checkout or ask the main agent to
 run its GPU commands.
 
+Before submitting, state the research question, baseline/source identity,
+allowed change scope, workload/metric, numerical gate, budget and stopping
+rule in `.scratch/`. One question can require several queue jobs. The
+[resident experiment contract](../specs/continual-experiments/README.md#experiment-purpose-and-lifecycle)
+defines experiment, job, session and candidate lifetimes.
+
 1. Check `python3 scripts/remote.py experiment status`. Install the worker
    once if absent; upgrades require an empty queue.
 2. Write `.scratch/request.json` with a unique id, question, timeout, argv
@@ -15,14 +21,24 @@ run its GPU commands.
    from the subagent worktree. It freezes working changes without committing.
 4. Use `result`, `wait --timeout 60`, `fetch` and `cancel` with the returned id.
    After a lost submission reply use `retry <id>`, which reuses the saved
-   submission. A new candidate or configuration gets a new id.
+   submission. A changed submission payload/source/configuration gets a new
+   job id. One frozen payload may include several candidate libraries, each
+   identified separately by its source and binary hashes.
 5. Inspect artifacts and logs, revise and repeat. Command success alone is
    not a correctness or performance verdict. Record skipped/failed checks.
 6. Return the conclusion, observations, evidence, known limits, job ids,
    source HEAD/snapshot/tree and local/remote result paths. Identify which
    working changes should be integrated. The main agent decides integration.
 
-For baseline/candidate comparisons, use separate Cargo target and CMake build
+When one agent repeatedly edits Trellis kernels, use
+[Kernel Lab](../user/contributing/kernel-lab.md). Run it outside the queue;
+its source updates are incompatible with frozen jobs.
+
+End an experiment with its supported/rejected/inconclusive conclusion and
+record required checks that failed or were not run. Final service validation
+runs after the lab releases the card.
+
+For comparisons using rebuilt binaries, use separate Cargo target and CMake build
 directories. Verify the linked native CUDA library or kernel symbols for each
 arm; different server hashes alone do not establish different kernel code.
 
