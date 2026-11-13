@@ -135,15 +135,8 @@ CUDA 修改重启后会重新加载模型，不是在保留显存状态下热替
 
 ## 常驻引擎实验
 
-单写者的 Trellis 优化使用[四命令入口](kernel-lab.md)：Laptop 执行 `scripts/lab.py`
-的 `setup/replay/forward/stop`，命令内部调用 remote.py 完成同步与远端操作。
-模型在远端常驻，通过 Unix socket 控制；一个临时 systemd user unit 管理本会话的
-子进程和退出清理。日常迭代不要求保持 SSH 终端，也不依赖实验队列。
-
-首次 setup 准备真实 coding-agent 输入并录制选定 Trellis 调用，后续可复用磁盘
-回放集。replay 测局部调用，forward 从原始输入重新运行全部模型；stop 不需要同步
-或构建成功。配置与 baseline 在会话内固定，超出热改范围需停止后显式建立新基线。
-服务性能验收保持独立，不是此工具的第三测量层级。
+单写者反复修改 Trellis kernel 时，使用 [Kernel Lab](kernel-lab.md)：四个本地命令
+封装同步和远端执行，保持模型常驻，提供算子回放与完整模型评估。
 
 ## 检查与当前限制
 

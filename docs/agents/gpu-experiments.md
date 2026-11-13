@@ -30,27 +30,10 @@ defines experiment, job, session and candidate lifetimes.
    source HEAD/snapshot/tree and local/remote result paths. Identify which
    working changes should be integrated. The main agent decides integration.
 
-For Trellis-only searches, the current hot-loading workflow is a finite batch:
-prepare candidate sources, submit a frozen job, build the libraries, then call
-`scripts/kernel_lab.py` once with multiple `--candidate` paths. Model setup is
-shared within that session. The driver still compiles no code itself, checks
-and warms each candidate separately, and closes the engine after the list.
-After inspecting feedback, a newly edited worktree needs a new submission;
-there is no live delivery into a running job or session shared across agents.
-The runner rejects modifications to its frozen tracked source. See the
-[lab guide](../user/contributing/kernel-lab.md) for executable commands.
-
-The revised [single-writer design](../specs/continual-experiments/README.md)
-provides `scripts/lab.py setup/replay/forward/stop`: independent local commands
-that wrap sync/exec, with one supervised remote engine reached over a local
-Unix socket. Each command wraps sync and remote execution. One transient
-systemd user unit supervises the resident owner and its children; there is no
-automatic restart. This replaces the foreground interactive proposal and is
-independent of this queue.
-This page remains the procedure for delegated/frozen jobs: retain their source
-isolation, timeouts and cleanup. Do not run the future mutable workflow inside
-such a job. See the [implementation plan](../specs/continual-experiments/implementation-plan.md)
-for command and failure contracts.
+For single-writer kernel iteration with a resident model, use
+[Kernel Lab](../user/contributing/kernel-lab.md) independently of this queue.
+Do not run its mutable session inside a frozen queue job. This page covers
+delegated jobs and their source isolation, timeouts and cleanup.
 
 End an experiment with its supported/rejected/inconclusive conclusion and
 record required checks that failed or were not run. Final service validation
