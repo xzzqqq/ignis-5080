@@ -27,6 +27,7 @@ Create an ignored local configuration, for example `.scratch/lab-settings.json`:
   "data_dir": "/large-disk/ignis-lab",
   "build_root": "/build-cache/ignis-lab",
   "build_jobs": 4,
+  "benchmark": "astropy__astropy-12907",
   "settings": {
     "max_context": 65536,
     "prefill_chunk": 1024,
@@ -80,15 +81,37 @@ First setup includes building the baseline, preparing inputs and recording;
 these costs are reported separately from inference. Later setup reuses
 compatible data.
 
-`replay` checks the baseline before loading the candidate and again after
-restoring it. Each sample restores mutable buffers and workspace outside
-CUDA-event timing. All comparisons use the same view, warmup and sample counts.
-`forward` also measures baseline full runs before and after the candidate.
-The final baseline run is required even if the candidate fails numerical checks;
-failure of that restoration check ends the session.
-It starts a new sequence for each request and never injects recorded activations
-or forces baseline output tokens. C1 means sequential requests; two configured
-lanes remain available in the model.
+`benchmark` fixes the request used by replay and quick forward. The default is
+`astropy__astropy-12907`; alternatives are `django__django-10097` and
+`sympy__sympy-11618`. Setup records only this request's selected operators,
+while preparing full-generation references for all three requests.
+
+Replay checks every record in the configured view once against its frozen
+output, in one batch request. It then measures the first record for each distinct
+weight/view, token count, stride and epilogue combination with `warmup` and
+`samples`. These representatives are fixed for the session. Repeated timing
+runs keep inputs on the GPU, restore mutable outputs/workspace outside timing,
+and compare outputs on the first execution. Raw timings and per-record speedups
+against setup's baseline are in the operation result. Baseline timings can drift;
+use full forward for a fresh comparison before accepting small improvements.
+
+Quick `forward` executes the chosen request once, without a separate warmup,
+through natural EOS or the original output cap. It reuses a passing replay only
+for the identical candidate in this session. Otherwise it runs replay first.
+`forward --full` runs all requests using configured warmups/samples and fresh
+baseline runs before and after the candidate. Its final baseline run also runs
+after candidate numerical rejection; a restoration check failure ends the session.
+Neither mode injects recorded activations or forces baseline output tokens.
+
+Replay and quick forward restore builtin code and clean graphs without rerunning
+the baseline workload. Successful reload confirms code/graph restoration, not
+full-model numerical revalidation. Fatal execution or restoration errors still
+end the session. Full mode retains full-model restoration validation.
+
+The builder caches each CUDA object by its source, compiler-reported transitive
+headers, toolchain and flags. T=8 MLP is a separate compilation unit; editing it
+reuses generic decode and prefill objects. Setup primes this cache. Candidate
+libraries remain immutable; results report per-object hits/times and link time.
 
 A command exiting normally leaves the engine resident; no open terminal is
 required. Concurrent evaluations are refused rather than queued. `stop` uses
@@ -99,8 +122,10 @@ so another setup can start without waiting for the setup timeout.
 
 ## Source, baseline and recovery
 
-Hot loading supports the three `trellis_linear*.cu` units plus
-`trellis_linear_internal.cuh` and `trellis_decode.cuh` in `kernel/src/`.
+Hot loading supports `trellis_linear.cu`, `trellis_linear_decode.cu`,
+`trellis_linear_prefill.cu`, `trellis_linear_mlp_t8.cu`,
+`trellis_linear_internal.cuh`, `trellis_decode.cuh` and
+`trellis_decode_helpers.cuh` in `kernel/src/`.
 Other runtime/build/ABI changes require a new baseline:
 
 ```sh

@@ -228,7 +228,9 @@ extern "C" int32_t ignis_lab_replay(ignis_model *m,const ignis_lab_weight_view *
     auto w=resolve(*m,*view);ignis_trellis_weight up{};if(upview)up=resolve(*m,*upview);
     if(ldy<w.out || ldy>IGNIS_TRELLIS_MAX_OUT)throw std::runtime_error("invalid replay stride");
     if(upview && (up.in!=w.in || up.out!=w.out))throw std::runtime_error("invalid swiglu pair");
-    Device dx(2ull*tokens*w.in),dy(2ull*tokens*ldy);
+    Device dx(2ull*tokens*w.in),dy(2ull*tokens*ldy),di(2ull*tokens*w.out);
+    ck(cudaMemcpyAsync(dx.p,x,2ull*tokens*w.in,cudaMemcpyHostToDevice,m->stream));
+    ck(cudaMemcpyAsync(di.p,initial,2ull*tokens*w.out,cudaMemcpyHostToDevice,m->stream));
     std::vector<uint16_t> result(uint64_t(tokens)*w.out);
     auto issue=[&](){
       const auto *api=m->trellis_candidate?m->trellis_candidate->api:nullptr;
@@ -237,9 +239,8 @@ extern "C" int32_t ignis_lab_replay(ignis_model *m,const ignis_lab_weight_view *
       if(rc)throw std::runtime_error(api?api->last_error():ignis_trellis_last_error());
     };
     auto reset=[&](){
-      ck(cudaMemcpyAsync(dx.p,x,2ull*tokens*w.in,cudaMemcpyHostToDevice,m->stream));
       ck(cudaMemsetAsync(dy.p,0,2ull*tokens*ldy,m->stream));
-      ck(cudaMemcpy2DAsync(dy.p,ldy*2,initial,w.out*2,w.out*2,tokens,cudaMemcpyHostToDevice,m->stream));
+      ck(cudaMemcpy2DAsync(dy.p,ldy*2,di.p,w.out*2,w.out*2,tokens,cudaMemcpyDeviceToDevice,m->stream));
       ck(cudaMemsetAsync(m->trellis_workspace.base,0,m->trellis_workspace.bytes,m->stream));
       ck(cudaStreamSynchronize(m->stream));
     };
@@ -252,6 +253,7 @@ extern "C" int32_t ignis_lab_replay(ignis_model *m,const ignis_lab_weight_view *
       reset();ck(cudaEventRecord(a,m->stream));ck(cudaGraphLaunch(exec,m->stream));
       ck(cudaEventRecord(b,m->stream));ck(cudaEventSynchronize(b));
       float ms;ck(cudaEventElapsedTime(&ms,a,b));if(i>=warmup)times[i-warmup]=ms;
+      if(i!=0)continue;
       ck(cudaMemcpy2D(result.data(),w.out*2,dy.p,ldy*2,w.out*2,tokens,cudaMemcpyDeviceToHost));
       const auto *expected=static_cast<const uint16_t *>(reference);
       for(size_t j=0;j<result.size();++j) if(result[j]!=expected[j] || (result[j]&0x7f80)==0x7f80)++*mismatches;

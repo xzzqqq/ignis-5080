@@ -123,7 +123,7 @@ class LabTests(unittest.TestCase):
                 reload=Mock(side_effect=[{'ok':True},ValueError('capture restore failure')]))
             service.publish=Mock()
             service.local=Mock(return_value={'passed':True})
-            with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(host,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate'}):
+            with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(host,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate','identity':'candidate'}):
                 with self.assertRaises(RuntimeError):
                     service.evaluate({'source':files,'operation':'failure'},'replay')
             result=common.read(run_dir/'results/failure/result.json')
@@ -175,11 +175,11 @@ class LabTests(unittest.TestCase):
                 service.engine=SimpleNamespace(process=SimpleNamespace(pid=123),reload=Mock(return_value={'ok':True}))
                 service.publish=Mock();service.local=Mock(return_value={'passed':True})
                 service.forward=Mock(side_effect=[{'passed':True},{'passed':False},{'passed':restored}])
-                with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(host,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate'}):
-                    if restored:service.evaluate({'source':files,'operation':'failure'},'forward')
+                with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(host,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate','identity':'candidate'}):
+                    if restored:service.evaluate({'source':files,'operation':'failure','full':True},'forward')
                     else:
                         with self.assertRaisesRegex(RuntimeError,'baseline forward changed'):
-                            service.evaluate({'source':files,'operation':'failure'},'forward')
+                            service.evaluate({'source':files,'operation':'failure','full':True},'forward')
                 self.assertEqual([c.args[1] for c in service.forward.call_args_list],['before','candidate','after'])
                 self.assertEqual(service.engine.reload.call_args_list[-1].args,('builtin',))
                 result=common.read(run_dir/'results/failure/result.json')
@@ -194,5 +194,63 @@ class LabTests(unittest.TestCase):
         self.assertTrue(host.case_agrees(base,other))
         other['rounds'][0]['extent']=3
         self.assertFalse(host.case_agrees(base,other))
+
+    def test_replay_checks_all_inputs_once_and_times_fixed_representatives(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t)
+            service=host.Owner(root,dict(config={'warmup':1,'samples':3},directory=t))
+            service.corpus=root
+            service.record_cache=[dict(id=i,weight={'name':'gate'},tokens=8,ldy=128,epilogue=0) for i in range(5)]
+            calls=[]
+            def reply(request):
+                calls.append(request)
+                return dict(ok=True,result=[dict(record=r['id'],passed=True,samples_ms=[1.0]) for r in request['records']])
+            service.engine=SimpleNamespace(call=Mock(side_effect=reply))
+            result=service.local(root,'candidate')
+            self.assertTrue(result['passed'])
+            self.assertEqual((len(calls[0]['records']),calls[0]['warmup'],calls[0]['samples']),(5,0,1))
+            self.assertEqual((len(calls[1]['records']),calls[1]['warmup'],calls[1]['samples']),(1,1,3))
+
+    def test_quick_forward_reuses_only_same_candidate_without_baseline_runs(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import build_trellis_candidate
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);files={}
+            for n in build_trellis_candidate.SOURCES:
+                p=root/'kernel/src'/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('test')
+                files[str(p.relative_to(root))]=common.digest(p)
+            service=host.Owner(root,dict(config={'data_dir':str(root/'data')},directory=t,source=files,config_hash='cfg'))
+            service.corpus=root/'corpus';service.publish=Mock()
+            service.engine=SimpleNamespace(process=SimpleNamespace(pid=123),reload=Mock(return_value={'ok':True}))
+            service.local=Mock(return_value={'passed':True});service.forward=Mock(return_value={'passed':True})
+            with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(host,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate','identity':'a'}) as build:
+                service.evaluate({'source':files,'operation':'replay'},'replay')
+                service.evaluate({'source':files,'operation':'forward'},'forward')
+                self.assertEqual(service.local.call_count,1)
+                build.return_value={'path':'/other','identity':'b'}
+                service.evaluate({'source':files,'operation':'changed'},'forward')
+                self.assertEqual(service.local.call_count,2)
+            self.assertEqual([c.args[1] for c in service.local.call_args_list],['candidate','candidate'])
+            self.assertEqual([c.args[1] for c in service.forward.call_args_list],['candidate','candidate'])
+            self.assertTrue(all(c.kwargs=={'full':False} for c in service.forward.call_args_list))
+
+    def test_fast_forward_uses_selected_request_once_full_uses_all(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t)
+            service=host.Owner(root,dict(config={'warmup':1,'samples':2},directory=t))
+            service.cases=[dict(id=n) for n in ('a','b','c')];service.quick_case=service.cases[1]
+            references=[dict(c,tokens=[1],rounds=[],prefill_ms=2,decode_ms=3) for c in service.cases]
+            service.manifest={'references':references}
+            service.engine=SimpleNamespace(call=Mock(side_effect=lambda req:dict(ok=True,result=next(r for r in references if r['id']==req['case']['id']))))
+            self.assertTrue(service.forward(root,'quick')['passed'])
+            self.assertEqual([c.args[0]['case']['id'] for c in service.engine.call.call_args_list],['b'])
+            service.engine.call.reset_mock()
+            self.assertTrue(service.forward(root,'full',full=True)['passed'])
+            self.assertEqual(service.engine.call.call_count,9)
 
 if __name__=='__main__':unittest.main()

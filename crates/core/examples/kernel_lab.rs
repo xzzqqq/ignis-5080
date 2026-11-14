@@ -96,6 +96,19 @@ fn main() -> Result<()> {
                     Ok(json!({"recording":true}))
                 },
                 "capture_stop" => {ignis_core::lab_trace::stop(&mut model,&mut pool)?;recording=false;Ok(json!({"recording":false}))},
+                "replay_batch" => {
+                    let data=Path::new(v["data"].as_str().ok_or("missing data path")?);
+                    let records=v["records"].as_array().ok_or("missing records")?;
+                    let mut rows=Vec::new();
+                    for record in records {
+                        let row=ignis_core::lab_trace::replay(&mut model,data,record,
+                            integer(&v,"warmup",0)?,integer(&v,"samples",1)?)?;
+                        let passed=row["passed"]==true;
+                        rows.push(row);
+                        if !passed {break;}
+                    }
+                    Ok(json!(rows))
+                },
                 "replay" => Ok(ignis_core::lab_trace::replay(&mut model,Path::new(v["data"].as_str().ok_or("missing data path")?),
                     &v["record"],integer(&v,"warmup",1)?,integer(&v,"samples",3)?)?),
                 "benchmark" => {
@@ -116,7 +129,7 @@ fn main() -> Result<()> {
                 emit(json!({"ok":false,"id":v["id"],"generation":generation,"wall_s":start.elapsed().as_secs_f64(),"error":e.to_string()}));
                 // Execution failures may leave a poisoned CUDA context. The
                 // campaign must restart instead of timing later candidates.
-                if matches!(v["op"].as_str(), Some("benchmark" | "capture_start" | "capture_stop" | "replay")) { return Err(e); }
+                if matches!(v["op"].as_str(), Some("replay_batch" | "benchmark" | "capture_start" | "capture_stop" | "replay")) { return Err(e); }
             },
         }
     }

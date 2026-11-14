@@ -13,9 +13,9 @@ failure handling, data contracts, implementation order and acceptance.
 ## Goal and assumptions
 
 One agent edits one Laptop worktree; one dedicated remote checkout receives
-its source. Keep the existing numerical gates, warmup/sample rules and baseline
-controls. Simplify the control/lifecycle around them, without depending on a
-faster compiler, fewer samples or a weaker oracle.
+its source. Keep the existing numerical gates and full-mode baseline
+controls. Quick feedback reduces repeated work while keeping numerical
+criteria fixed and making its selected workload explicit.
 
 The user invokes one command at a time and waits for feedback before editing
 again. Busy/conflicting commands are refused, not queued. GPU utilization is
@@ -102,7 +102,7 @@ outside these assumptions.
 Each accepted evaluation records its identity, uses the shared numerical and
 bracketing-control functions, restores baseline, then publishes its completed
 result. Numerical failure still records failure; a local speedup alone does
-not establish a full-forward improvement. `forward` runs its local gate before
+not establish a full-forward improvement. `forward` runs or reuses the identical candidate’s passing local gate before
 executing the original model inputs.
 
 Stop uses recorded connection/process identity and a pinned cleanup path; it
@@ -145,7 +145,7 @@ native code; descriptor checks catch accidental incompatibility.
 
 | Level | Input and result |
 |---|---|
-| Local replay | Actual selected Trellis calls recorded from the three coding-agent benchmark fixtures: inputs, initial ADD target, reference output and call metadata. Run the current plugin against them. |
+| Local replay | Actual selected Trellis calls recorded from one explicitly selected coding-agent benchmark fixture: inputs, initial ADD target, reference output and call metadata. Run the current plugin against them. |
 | Full forward | Original prepared benchmark inputs, with candidate-generated activations, state and tokens through the full model. Report engine timing, termination and speculative behavior. |
 
 Reuse the request/template/tokenizer path and preserve relevant EOS, reasoning,
@@ -177,7 +177,12 @@ intermediates or be forced along the baseline output trajectory. Local replay
 has different cache conditions; its timings cannot be summed into a claimed
 whole-model speedup.
 
-Keep current numerical gates, warmups, raw samples and bracketing controls.
+Keep numerical gates and raw samples. Replay checks all selected inputs once
+and repeatedly times fixed representatives. Quick forward runs one selected
+request once; `forward --full` retains configured repetitions and baseline
+bracketing controls for all requests. Setup establishes baseline timing for
+quick feedback. Passing replay results can be reused only for the identical
+candidate within the same session.
 Arithmetic changes require an independently justified oracle. The old
 fresh-state `layer` probe is replaced as the default fast path, rather than
 maintaining two competing local measurement implementations.
