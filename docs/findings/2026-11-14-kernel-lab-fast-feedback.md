@@ -12,8 +12,8 @@
 
 CUDA objects are cached independently using compiler-reported transitive
 headers, toolchain identity and flags. T=8 MLP has its own compilation unit;
-its arithmetic and dispatch conditions are unchanged. Shared decode helpers
-remain shared, so edits to those helpers invalidate both dependent objects.
+its arithmetic and dispatch conditions are unchanged. Edits to shared decode
+helpers invalidate both dependent objects.
 
 Setup selects a fixed benchmark request (Astropy by default), records its
 selected operators, establishes baseline timings, and primes the object cache.
@@ -31,11 +31,10 @@ numerical rejection. Numerical criteria are unchanged.
 
 ## Measurement
 
-Exactly one replay and one quick forward were timed after implementation; no
-old-implementation timing run or full-mode performance run was requested.
-The candidate changed only a comment in the T=8 MLP source, to exercise an
-uncached incremental build without changing computation. This measures workflow
-latency, not kernel speedup or compiler latency for every possible edit.
+One replay and one quick forward were timed after implementation. The candidate
+changed only a comment in the T=8 MLP source, forcing an object rebuild while
+preserving computation. These measurements cover workflow latency for that edit.
+The previous implementation and full mode were not timed.
 
 Settings: the existing Qwen3.8-27B Trellis artifact on one RTX 5080, context
 65,536, prefill chunk 1,024, hq-e8-2b, DFlash2, two lanes with sequential requests.
@@ -58,9 +57,9 @@ Linear, generic decode and prefill objects hit cache. Replay checked 1,309
 records and timed seven representatives; every numerical check passed.
 Quick forward reused that replay result, matched frozen outputs and termination,
 and performed no full baseline reruns. The session was stopped afterward.
-These single observations establish the feedback time scale, not a statistical
-latency distribution. Earlier three-request/bracketed measurements use a
-different scope and are not a controlled speedup comparison.
+Each command was measured once. Earlier measurements used three requests and
+baseline runs before and after each candidate, so their timings are not directly
+comparable.
 
 ## Validation and limits
 
@@ -73,14 +72,14 @@ different scope and are not a controlled speedup comparison.
 - Native GPU capture/replay regression passed, including padded destinations,
   ADD resets, rejection of a faulty plugin and baseline restoration. The first
   attempt failed because the runner had not built `fault-4.so`; it passed after
-  that fixture was supplied. No numerical criterion was changed.
+  that fixture was supplied.
 - Full-mode behavior has CPU control-flow coverage; `forward --full` and the
   complete GPU profile were not rerun in this iteration.
-- Historical baseline timings may drift. Quick forward accepts only the selected
-  workload; full mode adds coverage across all requests and fresh baseline comparisons.
-- Correctness records still allocate their local buffers/graphs and read tensor
-  data per record. Batch IPC and the smaller measurement set remove repeated
-  work; this implementation does not cache the entire corpus in GPU memory.
+- Historical baseline timings may drift. Quick forward checks only the selected
+  request. Full mode provides all-request coverage and fresh comparisons for
+  acceptance checks.
+- Correctness replay still reads tensor data and allocates buffers and graphs
+  per record. The full corpus is not cached in GPU memory.
 
 Evidence: `.scratch/fast-{python-final,cargo,cuda-check,native-recheck,replay,forward}.log`;
 operation JSON files under `.scratch/lab/` with IDs

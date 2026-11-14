@@ -1,7 +1,7 @@
 # 实施计划：四命令驱动的常驻热加载
 
 状态：P1–P4 已实现，验证记录随实现保存。代码底座为 `c8137d1f`。
-本文保留初版实施顺序；快速反馈修订见 [设计](README.md) 和
+本文记录初版实施过程；当前行为见 [设计](README.md) 和
 [用户指南](../../user/contributing/kernel-lab.md)。实现使用每会话一个
 临时 systemd user unit 管理 owner/引擎子进程清理，不启用自动重启或实验队列。
 图捕获使用有界缓冲区，预算不足明确拒绝；自动分组录制未实现，需显式缩小捕获
@@ -40,9 +40,10 @@ python3 scripts/lab.py stop
 | stop | 根据已记录的会话目标核验进程身份 → 停止 owner/引擎及本次构建子进程 → 确认 GPU 资源释放 | 无需 sync、源码可编译或控制进程能正常响应；重复 stop 安全，保留结果和回放集 |
 
 同步/构建失败禁止继续使用旧候选进行本次测量。无源码变化时依靠现有增量同步
-和对象/候选缓存；同一会话中，forward 可复用同一候选已通过的 replay。
-日常 replay 和 forward 固定使用一条请求，移除前后完整 baseline 回放；
-`forward --full` 保留全部请求、配置的预热/采样及前后 baseline 对照。
+和对象文件、候选库缓存。同一会话内，forward 可复用同一候选已通过的 replay。
+日常默认使用单请求 replay 和 forward，不重复运行前后两遍完整 baseline。
+只有验收需要全部请求和新的 baseline 对照时，才使用 `forward --full`，
+按配置执行预热和采样。
 
 同一 owner 的 setup 若发现已有匹配会话，只报告现有 ready/busy 和最近结果，
 不隐式同步重建或改变基线。不同 owner/config 的活跃会话明确拒绝。发生 CUDA
