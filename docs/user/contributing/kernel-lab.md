@@ -24,12 +24,13 @@ For first-time setup, create `.scratch/lab-settings.json` using the
 | `python3 scripts/lab.py forward` | Run the selected request through full prefill and generation; reuse a passing replay for the same candidate. Add `--full` to evaluate all requests with fresh baseline controls. |
 | `python3 scripts/lab.py stop` | Stop the session and release the GPU; keep recordings, results and build caches. Also works during a busy evaluation. |
 
-## Expected workflow
+## Typical workflow
 
 Run `setup` once, then repeat **edit → replay** for quick local feedback.
-Run `forward` to accept an individual optimization. Run `forward --full` before
-integrating a round of optimizations, to check all requests and their combined
-effect. The request is fixed by `benchmark` at setup; it is never chosen randomly.
+Use `forward` for a quick full-model check on the request selected by `benchmark`
+at setup. Choose `forward --full` when you need coverage across all requests
+and fresh baseline comparisons. Either mode can be used at any point in an
+optimization loop.
 Continue editing or run `stop` when finished. Both evaluation commands restore
 the same baseline afterward, even when the candidate passes.
 

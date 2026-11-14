@@ -77,7 +77,7 @@ different scope and are not a controlled speedup comparison.
 - Full-mode behavior has CPU control-flow coverage; `forward --full` and the
   complete GPU profile were not rerun in this iteration.
 - Historical baseline timings may drift. Quick forward accepts only the selected
-  workload; use full mode for the combined workload before integration.
+  workload; full mode adds coverage across all requests and fresh baseline comparisons.
 - Correctness records still allocate their local buffers/graphs and read tensor
   data per record. Batch IPC and the smaller measurement set remove repeated
   work; this implementation does not cache the entire corpus in GPU memory.

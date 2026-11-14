@@ -93,7 +93,7 @@ weight/view, token count, stride and epilogue combination with `warmup` and
 runs keep inputs on the GPU, restore mutable outputs/workspace outside timing,
 and compare outputs on the first execution. Raw timings and per-record speedups
 against setup's baseline are in the operation result. Baseline timings can drift;
-use full forward for a fresh comparison before accepting small improvements.
+use `forward --full` when you need a fresh comparison, especially for small differences.
 
 Quick `forward` executes the chosen request once, without a separate warmup,
 through natural EOS or the original output cap. It reuses a passing replay only
