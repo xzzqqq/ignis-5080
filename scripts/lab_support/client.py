@@ -41,8 +41,10 @@ def summary(value, local_result=None):
         fields=('status','session','engine_pid','corpus','corpus_records','settings','last_result','error')
         return {k:value[k] for k in fields if k in value}
     fields=('passed','operation','action','engine_pid','wall_s','error','candidate','before','replay','after',
-            'diagnostic_output_tokens','warmup','samples','view','client_timings_s')
+            'diagnostic_output_tokens','warmup','samples','view','client_timings_s','full','performance')
     result={k:value[k] for k in fields if k in value}
+    if isinstance(result.get('replay'),dict):
+        result['replay']={k:v for k,v in result['replay'].items() if k!='timings'}
     result['local_result']=str(local_result) if local_result else None
     if value.get('forward',{}).get('cases'):
         result['forward']=[dict(id=c['id'],median_decode_ms=c['median_decode_ms'],
@@ -56,7 +58,9 @@ def main(argv=None):
     p.add_argument('action', choices=['setup', 'replay', 'forward', 'stop'])
     p.add_argument('--config', type=Path, help='Lab settings JSON (first setup only)')
     p.add_argument('--new-baseline', action='store_true')
+    p.add_argument('--full',action='store_true',help='Evaluate all benchmark requests (forward only)')
     args = p.parse_args(argv)
+    if args.full and args.action!='forward':p.error('--full requires forward')
     began=time.monotonic()
     local = ROOT / '.scratch/lab'
     local.mkdir(parents=True, exist_ok=True)
@@ -120,7 +124,7 @@ def main(argv=None):
                            stdout=sys.stderr,check=True)
             synced=time.monotonic()
             payload = dict(owner=receipt['owner'],config=receipt['config'],source=source,
-                           new_baseline=args.new_baseline,operation=uuid.uuid4().hex)
+                           new_baseline=args.new_baseline,operation=uuid.uuid4().hex,full=args.full)
             if args.action == 'setup':
                 state = call(target, ['/usr/bin/python3','scripts/lab_support/host.py','--root',
                     current['repo'],'start','--owner',receipt['owner']], payload, no_env=False)

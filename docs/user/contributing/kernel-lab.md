@@ -19,21 +19,23 @@ For first-time setup, create `.scratch/lab-settings.json` using the
 
 | Command | Purpose |
 | --- | --- |
-| `python3 scripts/lab.py setup --config .scratch/lab-settings.json` | Establish the baseline, load the model and record or reuse inputs and reference outputs for selected operators. |
-| `python3 scripts/lab.py replay` | Sync and compile the current kernel edits, hot-load them, and check recorded operator calls for correctness and timing. |
-| `python3 scripts/lab.py forward` | After replay checks pass, run the original benchmark prompts through full prefill and generation to compare correctness and model timings. |
+| `python3 scripts/lab.py setup --config .scratch/lab-settings.json` | Establish the baseline, load the model and record or reuse operator inputs from one fixed benchmark request. |
+| `python3 scripts/lab.py replay` | Sync, compile and hot-load kernel edits. Check each recorded input once, then time fixed representative calls. |
+| `python3 scripts/lab.py forward` | Run the selected request through full prefill and generation; reuse a passing replay for the same candidate. Add `--full` to evaluate all requests with fresh baseline controls. |
 | `python3 scripts/lab.py stop` | Stop the session and release the GPU; keep recordings, results and build caches. Also works during a busy evaluation. |
 
-## Expected workflow
+## Typical workflow
 
 Run `setup` once, then repeat **edit → replay** for quick local feedback.
-Run `forward` to evaluate a promising candidate in the complete model.
+Use `forward` by default for full-model feedback on the request selected by
+`benchmark` at setup. Reserve `forward --full` for acceptance checks that require
+all benchmark requests and fresh baseline comparisons.
 Continue editing or run `stop` when finished. Both evaluation commands restore
 the same baseline afterward, even when the candidate passes.
 
-Hot edits are limited to `kernel/src/trellis_linear*.cu`,
-`trellis_linear_internal.cuh` and `trellis_decode.cuh`. Other code or configuration
-changes require stopping and [creating a new baseline](kernel-lab-reference.md#source-baseline-and-recovery).
+Hot edits cover the linear, decode, prefill and T=8 MLP CUDA files and their
+[supported headers](kernel-lab-reference.md#source-baseline-and-recovery). Other
+code or configuration changes require stopping and [creating a new baseline](kernel-lab-reference.md#source-baseline-and-recovery).
 
 Inspect the full result linked by each command under `.scratch/lab/`.
 Report correctness, measured coverage and timings. Replay measures isolated

@@ -1,4 +1,6 @@
 //! Real graph/eager capture and replay through the current model-local plugin.
+//! IGNIS_TRELLIS_FAULT_DIR must contain fault-4.so, fault-7.so and fault-8.so,
+//! built from tests/fixtures/trellis_candidate_fault.cu with matching TEST_MODE.
 #![cfg(feature = "cuda")]
 use std::path::Path;
 use ignis_artifact::{bind_model_scope_27b, materialize, CudaDevice, DraftModule, Reader};
@@ -56,8 +58,9 @@ fn recorded_calls_replay_with_padding_add_and_replaced_code() {
     assert!(records.iter().any(|r|r["phase"]==0 && r["tokens"]==4));
     assert!(records.iter().any(|r|r["phase"]==2 && r["tokens"]==8));
     for r in &records {
-        let result=lab_trace::replay(&mut model,&dir.join("data.bin"),r,2,3).unwrap();
+        let result=lab_trace::replay_with_check(&mut model,&dir.join("data.bin"),r,2,3,lab_trace::ReplayCheck::EveryExecution).unwrap();
         assert_eq!(result["passed"],true,"record {}: {result}",r["id"]);
+        assert_eq!(result["executions_checked"],5);
         let mut padded=r.clone();padded["ldy"]=json!(r["ldy"].as_u64().unwrap()+128);
         assert_eq!(lab_trace::replay(&mut model,&dir.join("data.bin"),&padded,1,2).unwrap()["passed"],true,"padded output {}",r["id"]);
     }
@@ -72,5 +75,26 @@ fn recorded_calls_replay_with_padding_add_and_replaced_code() {
     unsafe{kernel_lab::reload(&mut model,&mut pool,None)}.unwrap();
     assert_eq!(observe(&model,&pool),expected);
     assert_eq!(lab_trace::replay(&mut model,&dir.join("data.bin"),nonzero,1,1).unwrap()["passed"],true);
+    // Synthetic zero inputs and outputs isolate the delayed fault from model numerics.
+    // Both fixtures return zero on launch 1, then a finite error / infinity on launch 2.
+    let mut probe=records.iter().find(|r|r["weight"]["name"]=="layer.0.down").unwrap().clone();
+    probe["offset"]=json!(0);
+    let zeros=dir.join("zeros.bin");
+    std::fs::write(&zeros,vec![0u8;probe["bytes"].as_u64().unwrap() as usize]).unwrap();
+    for mode in [7,8] {
+        let fault=Path::new(&fault_dir).join(format!("fault-{mode}.so"));
+        unsafe{kernel_lab::reload(&mut model,&mut pool,Some(&fault))}.unwrap();
+        let first=lab_trace::replay_with_check(&mut model,&zeros,&probe,2,3,
+            lab_trace::ReplayCheck::FirstExecution).unwrap();
+        assert_eq!(first["passed"],true,"first execution must match the reference");
+        assert_eq!(first["executions_checked"],1);
+        let every=lab_trace::replay_with_check(&mut model,&zeros,&probe,2,3,
+            lab_trace::ReplayCheck::EveryExecution).unwrap();
+        assert_eq!(every["passed"],false,"must catch delayed fault mode {mode}");
+        assert_eq!(every["executions_checked"],2);
+        assert_eq!(lab_trace::replay(&mut model,&zeros,&probe,2,3).unwrap()["passed"],false,
+            "default regression API must check every execution");
+        unsafe{kernel_lab::reload(&mut model,&mut pool,None)}.unwrap();
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }

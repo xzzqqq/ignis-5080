@@ -114,6 +114,8 @@ class Owner:
             if 'diagnostic_output_tokens' in cfg:
                 c['output_tokens']=int(cfg['diagnostic_output_tokens']);c['diagnostic']=True
                 if not 0<c['output_tokens']<=8192:raise ValueError('invalid diagnostic budget')
+        selected=cfg.get('benchmark','astropy__astropy-12907')
+        self.quick_case=next(c for c in self.cases if c['id']==selected)
         atomic(prepared,dict(version=1,cases=self.cases))
         settings=dict(max_context=65536,prefill_chunk=1024,lanes=2,kv_format='hq-e8-2b',speculation='dflash2')
         settings.update(cfg.get('settings',{}))
@@ -127,7 +129,7 @@ class Owner:
         self.engine=Session(baseline/'kernel_lab',Path(cfg['artifact']),self.directory/'settings.json',
                             self.directory,float(cfg.get('setup_timeout_s',3600)))
         atomic(self.directory/'engine.identity.json',identity(self.engine.process.pid))
-        corpus_identity=dict(version=1,engine=base['binaries']['kernel_lab'],artifact=digest(cfg['artifact']),
+        corpus_identity=dict(version=2,benchmark=selected,engine=base['binaries']['kernel_lab'],artifact=digest(cfg['artifact']),
             prepared=digest(prepared),settings=settings,machine=machine,
             capture_names=cfg.get('capture_names',[]),
             environment={k:os.environ.get(k) for k in ('IGNIS_TRELLIS_SM_CAP','CUDA_VISIBLE_DEVICES')})
@@ -141,7 +143,7 @@ class Owner:
             pin=int(cfg.get('capture_pin_bytes',1<<30));disk=int(cfg.get('capture_disk_bytes',512<<30))
             if pin<=0 or disk<=0:raise ValueError('capture budgets must be positive')
             minimum=checked(self.engine.call(dict(op='capture_minimum',names=','.join(cfg.get('capture_names',[])),
-                tokens=sum(len(c['tokens']) for c in self.cases),requests=len(self.cases))))['prefill_bytes_lower_bound']
+                tokens=len(self.quick_case['tokens']),requests=1)))['prefill_bytes_lower_bound']
             atomic(self.directory/'capture-storage.json',dict(prefill_bytes_lower_bound=minimum,limit=disk,
                 available=shutil.disk_usage(staging).free))
             if minimum>disk or minimum>shutil.disk_usage(staging).free:
@@ -149,14 +151,14 @@ class Owner:
             checked(self.engine.call(dict(op='capture_start',path=str(staging),pin_bytes=pin,disk_bytes=disk,
                                           names=','.join(cfg.get('capture_names',[])))))
             references=[]
-            for c in self.cases:
+            for c in [self.quick_case]:
                 references.append(checked(self.engine.call(dict(op='benchmark',case=c))))
             checked(self.engine.call(dict(op='capture_stop')))
             records=sum(1 for _ in (staging/'records.jsonl').open())
             if not records:raise ValueError('capture produced no calls')
             # Prove recording did not change the trajectory, with clean graphs.
             clean=[checked(self.engine.call(dict(op='benchmark',case=c))) for c in self.cases]
-            if not all(case_agrees(a,b) for a,b in zip(references,clean)):
+            if not all(case_agrees(a,b) for a,b in zip(references,[r for r in clean if r['id']==selected])):
                 raise ValueError('recording changed baseline trajectory')
             manifest=dict(identity=corpus_identity,complete=True,records=records,references=clean,
                 files={n:digest(staging/n) for n in ('data.bin','records.jsonl')})
@@ -166,7 +168,14 @@ class Owner:
         current=[checked(self.engine.call(dict(op='benchmark',case=c))) for c in self.cases]
         if not all(case_agrees(a,b) for a,b in zip(manifest['references'],current)):
             raise ValueError('loaded corpus baseline differs from current engine')
-        self.publish(status='starting',engine_pid=self.engine.process.pid,corpus=str(corpus),
+        self.baseline_forward=current
+        self.record_cache=list(self.records())
+        self.baseline_replay=self.local(self.directory,'baseline')
+        if not self.baseline_replay['passed']:raise ValueError('baseline replay failed')
+        # Prime the object cache at setup, before the editing loop.
+        self.baseline_candidate=build_candidate(self.root,Path(cfg['data_dir'])/'candidates',str(Path(os.environ['CUDA_HOME'])/'bin/nvcc'))
+        self.validated_candidate=None
+        self.publish(status='starting',benchmark=selected,baseline_replay=self.baseline_replay,baseline_forward=current,engine_pid=self.engine.process.pid,corpus=str(corpus),
             corpus_records=manifest['records'],settings=settings,ready=self.engine.ready)
 
     def records(self):
@@ -180,31 +189,43 @@ class Owner:
             yield r
 
     def local(self, directory, label):
-        total=0.0;count=0;passed=True
-        with (directory/(label+'-replay.jsonl')).open('w') as log:
-            for r in self.records():
-                result=checked(self.engine.call(dict(op='replay',data=str(self.corpus/'data.bin'),record=r,
-                    warmup=int(self.config.get('warmup',1)),samples=int(self.config.get('samples',3)))))
-                log.write(json.dumps(result)+'\n');log.flush();count+=1
-                if not result['passed']:
-                    passed=False;break
-                total+=statistics.median(result['samples_ms'])
-        if not count:raise ValueError('measurement view selects no records')
-        return dict(passed=passed,records=count,sum_local_medians_ms=total,
-                    interpretation='local replay aggregate only; not predicted full-forward time')
+        records=self.record_cache if hasattr(self,'record_cache') else list(self.records())
+        if not records:raise ValueError('measurement view selects no records')
+        # Correctness covers every selected real input exactly once.
+        checked_rows=checked(self.engine.call(dict(op='replay_batch',data=str(self.corpus/'data.bin'),
+            records=records,warmup=0,samples=1)))
+        passed=all(r['passed'] for r in checked_rows)
+        atomic(directory/(label+'-correctness.json'),checked_rows)
+        representatives={}
+        for r in records:
+            group=key({k:r.get(k) for k in ('weight','up','tokens','ldy','epilogue')})
+            representatives.setdefault(group,r)
+        measured=[]
+        if passed:
+            measured=checked(self.engine.call(dict(op='replay_batch',data=str(self.corpus/'data.bin'),
+                records=list(representatives.values()),warmup=int(self.config.get('warmup',1)),
+                samples=int(self.config.get('samples',3)))))
+            passed=all(r['passed'] for r in measured)
+        atomic(directory/(label+'-timing.json'),measured)
+        return dict(passed=passed,records=len(checked_rows),performance_records=len(measured),timings=measured,
+                    interpretation='fixed representative calls; not full-model latency')
 
-    def forward(self,directory,label):
+    def forward(self,directory,label,full=False):
         output=[]
         for reference,c in zip(self.manifest['references'],self.cases):
+            if not full and c['id']!=self.quick_case['id']:continue
             rows=[]
-            for i in range(int(self.config.get('warmup',1))+int(self.config.get('samples',3))):
+            warmup=int(self.config.get('warmup',1)) if full else 0
+            samples=int(self.config.get('samples',3)) if full else 1
+            for i in range(warmup+samples):
                 value=checked(self.engine.call(dict(op='benchmark',case=c)))
                 if not case_agrees(reference,value):
                     return dict(passed=False,case=c['id'],mismatch=value)
-                if i>=int(self.config.get('warmup',1)):rows.append(value)
-            output.append(dict(id=c['id'],samples=rows,median_decode_ms=statistics.median(x['decode_ms'] for x in rows)))
+                if i>=warmup:rows.append(value)
+            output.append(dict(id=c['id'],samples=rows,median_prefill_ms=statistics.median(x['prefill_ms'] for x in rows),
+                median_decode_ms=statistics.median(x['decode_ms'] for x in rows)))
         atomic(directory/(label+'-forward.json'),output)
-        return dict(passed=True,cases=output)
+        return dict(passed=True,cases=output,full=full)
 
     def evaluate(self,payload,action):
         actual=source_identity(self.root)
@@ -243,27 +264,37 @@ class Owner:
             except Exception as e:
                 raise ValueError('candidate build failed: '+str(e)) from e
             report['candidate']=candidate
-            before=self.local(d,'before')
-            if not before['passed']:raise RuntimeError('baseline replay failed')
-            report['before']=before
-            if action=='forward':
-                report['before_forward']=self.forward(d,'before')
+            full=action=='forward' and bool(payload.get('full'))
+            report['full']=full
+            report['baseline_replay']=getattr(self,'baseline_replay',None)
+            report['baseline_forward']=getattr(self,'baseline_forward',None)
+            if full:
+                report['before_forward']=self.forward(d,'before',full=True)
                 if not report['before_forward']['passed']:raise RuntimeError('baseline forward failed')
             report['reload']=self.engine.reload(candidate['path'])
             try:
-                report['replay']=self.local(d,'candidate')
+                identity=candidate['identity']
+                if action=='forward' and getattr(self,'validated_candidate',None)==identity:
+                    report['replay']=dict(passed=True,reused=True,candidate=identity)
+                else:
+                    report['replay']=self.local(d,'candidate')
+                    self.validated_candidate=identity if report['replay']['passed'] else None
+                if report['replay'].get('timings'):
+                    baseline={r['record']:statistics.median(r['samples_ms']) for r in self.baseline_replay['timings']}
+                    report['performance']=[dict(record=r['record'],baseline_ms=baseline[r['record']],
+                        candidate_ms=statistics.median(r['samples_ms']),
+                        speedup=baseline[r['record']]/statistics.median(r['samples_ms']) if statistics.median(r['samples_ms'])>0 else None)
+                        for r in report['replay']['timings']]
                 report['passed']=report['replay']['passed']
                 if action=='forward' and report['passed']:
-                    report['forward']=self.forward(d,'candidate');report['passed']=report['forward']['passed']
+                    report['forward']=self.forward(d,'candidate',full=full)
+                    report['passed']=report['forward']['passed']
             finally:
-                try:
-                    report['restore']=self.engine.reload('builtin')
-                except Exception as e:
-                    raise RuntimeError('baseline restoration failed: '+str(e)) from e
-            report['after']=self.local(d,'after')
-            if not report['after']['passed']:raise RuntimeError('baseline restoration failed')
-            if action=='forward':
-                report['after_forward']=self.forward(d,'after')
+                try:report['restore']=self.engine.reload('builtin')
+                except Exception as e:raise RuntimeError('baseline restoration failed: '+str(e)) from e
+            if not report['passed']:self.validated_candidate=None
+            if full:
+                report['after_forward']=self.forward(d,'after',full=True)
                 if not report['after_forward']['passed']:raise RuntimeError('baseline forward changed')
         except ValueError as e:
             report.update(passed=False,error=str(e))

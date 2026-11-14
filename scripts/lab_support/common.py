@@ -11,7 +11,7 @@ import time
 import uuid
 
 HOT = {'kernel/src/' + x for x in ('trellis_linear.cu', 'trellis_linear_decode.cu',
-    'trellis_linear_prefill.cu', 'trellis_linear_internal.cuh', 'trellis_decode.cuh')}
+    'trellis_linear_prefill.cu', 'trellis_linear_internal.cuh', 'trellis_decode.cuh', 'trellis_linear_mlp_t8.cu', 'trellis_decode_helpers.cuh')}
 GPU_LOCK = Path('/tmp/ignis-gpu-profile.lock')
 
 
@@ -121,7 +121,7 @@ def status(root):
 def validate_config(cfg):
     allowed={'artifact','data_dir','build_root','build_jobs','settings','capture_names',
              'capture_pin_bytes','capture_disk_bytes','view','warmup','samples',
-             'timeout_s','setup_timeout_s','diagnostic_output_tokens'}
+             'timeout_s','setup_timeout_s','diagnostic_output_tokens','benchmark'}
     if not isinstance(cfg,dict) or set(cfg)-allowed:
         raise ValueError('unknown or malformed lab settings')
     for name in ('artifact','data_dir','build_root'):
@@ -137,6 +137,8 @@ def validate_config(cfg):
     for name in ('timeout_s','setup_timeout_s'):
         if name in cfg and (type(cfg[name]) not in (int,float) or not math.isfinite(cfg[name]) or cfg[name]<=0):
             raise ValueError(name+' must be finite and positive')
+    if cfg.get('benchmark','astropy__astropy-12907') not in ('astropy__astropy-12907','django__django-10097','sympy__sympy-11618'):
+        raise ValueError('unknown benchmark')
     settings=cfg.get('settings',{})
     if not isinstance(settings,dict) or set(settings)-{'max_context','prefill_chunk','lanes','kv_format','speculation'}:
         raise ValueError('unknown engine setting')

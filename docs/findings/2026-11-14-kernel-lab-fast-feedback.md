@@ -1,0 +1,103 @@
+# Kernel Lab separates incremental compilation, correctness and timing
+
+- Kind: experiment
+- Status: current
+- Observed: 2026-11-14
+- Last verified: 2026-11-14
+- Scope: RTX 5080, single-request Kernel Lab iteration
+- Related: [initial replay measurements](2026-11-12-benchmark-kernel-replay.md), [guide](../user/contributing/kernel-lab.md)
+- Superseded by: none
+
+## Change
+
+CUDA objects are cached independently using compiler-reported transitive
+headers, toolchain identity and flags. T=8 MLP has its own compilation unit;
+its arithmetic and dispatch conditions are unchanged. Edits to shared decode
+helpers invalidate both dependent objects.
+
+Setup selects a fixed benchmark request (Astropy by default), records its
+selected operators, establishes baseline timings, and primes the object cache.
+Replay checks each selected real input once against frozen outputs, then times
+a fixed representative per weight/view, token count, stride and epilogue.
+Repeated timing keeps inputs on device and restores mutable output/workspace
+outside the timed interval. Calls are sent to the engine in batches.
+
+Replay and quick forward no longer run full baseline workloads before and
+after candidates. Both still restore builtin code and graphs. Quick forward
+runs the selected request once and reuses a passing replay for the identical
+candidate within the session. `forward --full` retains all requests, configured
+repetitions and fresh baseline runs before/after the candidate, including after
+numerical rejection. Numerical criteria are unchanged.
+
+## Measurement
+
+One replay and one quick forward were timed after implementation. The candidate
+changed only a comment in the T=8 MLP source, forcing an object rebuild while
+preserving computation. These measurements cover workflow latency for that edit.
+The previous implementation and full mode were not timed.
+
+Settings: the existing Qwen3.8-27B Trellis artifact on one RTX 5080, context
+65,536, prefill chunk 1,024, hq-e8-2b, DFlash2, two lanes with sequential requests.
+The selected request is `astropy__astropy-12907`: 19,954 prompt tokens and 913
+output tokens, ending at primary EOS. Capture names are `layer.0.gate/down/qkv`,
+`layer.3.q/k/output` and `head`; replay selects T=8. Performance representatives
+use one warmup and three measured samples. Quick forward uses one complete run.
+
+| Measurement | Seconds |
+| --- | ---: |
+| Replay client total | 9.684 |
+| Replay preflight / sync / remote request | 1.274 / 1.881 / 6.529 |
+| Candidate build, including dependency checks and link | 3.888 |
+| Changed T=8 MLP object | 3.065 |
+| Candidate link | 0.126 |
+| Quick forward client total | 17.818 |
+| Quick forward prefill / decode | 8.608 / 4.512 |
+
+Linear, generic decode and prefill objects hit cache. Replay checked 1,309
+records and timed seven representatives; every numerical check passed.
+Quick forward reused that replay result, matched frozen outputs and termination,
+and performed no full baseline reruns. The session was stopped afterward.
+Each command was measured once. Earlier measurements used three requests and
+baseline runs before and after each candidate, so their timings are not directly
+comparable.
+
+## Validation and limits
+
+- Local Python suite: 83 tests, nine skipped (seven Linux-only, two opt-in GPU).
+  Tests cover per-object source/dependency invalidation, unrelated headers,
+  immutable library checks, selected-request execution, representative timing,
+  same-candidate replay reuse and full-mode recovery after rejection.
+- Local workspace Rust: 3,068 passed, six existing ignores.
+- CUDA workspace/all-target compilation passed.
+- Native GPU capture/replay regression passed, including padded destinations,
+  rejection of a faulty plugin and baseline restoration. The original quick-check
+  implementation checked only the first execution, so this run did not establish
+  repeated ADD correctness. The first
+  attempt failed because the runner had not built `fault-4.so`; it passed after
+  that fixture was supplied.
+- Full-mode behavior has CPU control-flow coverage; `forward --full` and the
+  complete GPU profile were not rerun in this iteration.
+- Historical baseline timings may drift. Quick forward checks only the selected
+  request. Full mode provides all-request coverage and fresh comparisons for
+  acceptance checks.
+- Correctness replay still reads tensor data and allocates buffers and graphs
+  per record. The full corpus is not cached in GPU memory.
+
+Evidence: `.scratch/fast-{python-final,cargo,cuda-check,native-recheck,replay,forward}.log`;
+operation JSON files under `.scratch/lab/` with IDs
+`2e05775ab3ee44ec934773a22ae4c575` (replay) and
+`1b5a47d2cea34c699cc83219bc085019` (forward). Remote pinned baselines, corpora and
+operation results remain in the configured data directory.
+
+## Review correction (2026-11-15)
+
+The shared replay function originally checked only the first execution for all
+callers, weakening the repeated-execution GPU regression. The API now defaults
+to `EveryExecution`; only the fast batch path opts into `FirstExecution`.
+Regression assertions check all five executions for two warmups and three
+samples. Two fault fixtures count actual graph executions on the GPU and
+produce a wrong finite value or infinity after the first correct result.
+The tests require first-only checking to pass and every-execution checking to
+reject both faults on execution two. The native GPU regression passed with
+these assertions on 2026-11-15. The performance measurements above precede
+this correction; no new latency measurements were taken.

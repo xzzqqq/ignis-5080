@@ -179,6 +179,8 @@ struct PrefillParams {
 };
 
 int32_t launch_rotate(const RotateParams &p, cudaStream_t stream);
+int32_t prepare_mlp_t8(DeviceState *state);
+cudaError_t launch_mlp_t8(cudaLaunchConfig_t &cfg, const DecodeParams &p);
 int32_t launch_decode(const DeviceState &st, const DecodeParams &p, cudaStream_t stream);
 int32_t launch_prefill(const DeviceState &st, const PrefillParams &p, cudaStream_t stream);
 

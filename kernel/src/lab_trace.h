@@ -24,7 +24,8 @@ struct ignis_lab_weight_view {
   uint64_t trellis_offset, suh_offset, svh_offset;
   uint32_t k2, in, out, tile_stride;
 };
+enum ignis_lab_replay_check : uint32_t { IGNIS_LAB_CHECK_FIRST = 0, IGNIS_LAB_CHECK_EVERY = 1 };
 int32_t ignis_lab_replay(ignis_model *, const ignis_lab_weight_view *, const ignis_lab_weight_view *,
     uint32_t tokens, uint32_t ldy, uint32_t epilogue, const void *x, const void *initial,
-    const void *reference, uint32_t warmup, uint32_t samples, float *times_ms, uint64_t *mismatches);
+    const void *reference, uint32_t warmup, uint32_t samples, uint32_t check, float *times_ms, uint64_t *mismatches, uint32_t *checked);
 }

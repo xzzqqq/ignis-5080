@@ -20,8 +20,8 @@ unsafe extern "C" {
     fn ignis_lab_capture_minimum(m:*mut IgnisModel,names:*const c_char,tokens:u64,requests:u64,bytes:*mut u64)->i32;
     fn ignis_lab_trace_error()->*const c_char;
     fn ignis_lab_replay(m:*mut IgnisModel,w:*const View,up:*const View,t:u32,ldy:u32,epilogue:u32,
-        x:*const c_void,initial:*const c_void,reference:*const c_void,warmup:u32,samples:u32,
-        times:*mut f32,mismatches:*mut u64)->i32;
+        x:*const c_void,initial:*const c_void,reference:*const c_void,warmup:u32,samples:u32,check:u32,
+        times:*mut f32,mismatches:*mut u64,checked:*mut u32)->i32;
 }
 fn checked(rc:i32)->Result<(),String>{
     if rc==0 {Ok(())} else {Err(unsafe{CStr::from_ptr(ignis_lab_trace_error())}.to_string_lossy().into_owned())}
@@ -44,7 +44,16 @@ fn view(v:&Value,name:&CString)->Result<View,String>{Ok(View{name:name.as_ptr(),
     trellis_offset:number(v,"trellis_offset")?,suh_offset:number(v,"suh_offset")?,svh_offset:number(v,"svh_offset")?,
     k2:small(v,"k2")?,input:small(v,"in")?,output:small(v,"out")?,tile_stride:small(v,"tile_stride")?})}
 
+/// Regression callers check every execution, including warmups.
+#[derive(Clone, Copy, Debug)]
+#[repr(u32)]
+pub enum ReplayCheck { FirstExecution = 0, EveryExecution = 1 }
+
 pub fn replay(model:&mut Model,data:&Path,record:&Value,warmup:u32,samples:u32)->Result<Value,String>{
+    replay_with_check(model,data,record,warmup,samples,ReplayCheck::EveryExecution)
+}
+
+pub fn replay_with_check(model:&mut Model,data:&Path,record:&Value,warmup:u32,samples:u32,check:ReplayCheck)->Result<Value,String>{
     if samples==0 || samples>10000 || warmup>10000 {return Err("invalid sample counts".into());}
     let name=CString::new(record["weight"]["name"].as_str().ok_or("missing weight name")?).map_err(|e|e.to_string())?;
     let w=view(&record["weight"],&name)?;
@@ -61,11 +70,11 @@ pub fn replay(model:&mut Model,data:&Path,record:&Value,warmup:u32,samples:u32)-
     if offset.checked_add(bytes).ok_or("offset overflow")?>file.metadata().map_err(|e|e.to_string())?.len(){return Err("truncated trace data".into());}
     file.seek(SeekFrom::Start(offset)).map_err(|e|e.to_string())?;
     let mut buf=vec![0u8;bytes as usize];file.read_exact(&mut buf).map_err(|e|e.to_string())?;
-    let mut times=vec![0f32;samples as usize];let mut mismatches=0;
+    let mut times=vec![0f32;samples as usize];let mut mismatches=0;let mut executions_checked=0;
     checked(unsafe{ignis_lab_replay(model.handle(),&w,up.as_ref().map_or(std::ptr::null(),|v|v),t,ldy,
         small(record,"epilogue")?,buf.as_ptr().cast(),buf.as_ptr().add(nx as usize).cast(),
-        buf.as_ptr().add((nx+ny)as usize).cast(),warmup,samples,times.as_mut_ptr(),&mut mismatches)})?;
-    Ok(json!({"record":record["id"],"passed":mismatches==0,"mismatches":mismatches,"samples_ms":times}))
+        buf.as_ptr().add((nx+ny)as usize).cast(),warmup,samples,check as u32,times.as_mut_ptr(),&mut mismatches,&mut executions_checked)})?;
+    Ok(json!({"record":record["id"],"passed":mismatches==0,"mismatches":mismatches,"samples_ms":times,"executions_checked":executions_checked,"check":format!("{check:?}")}))
 }
 
 pub fn minimum(model:&Model,names:&str,tokens:u64,requests:u64)->Result<u64,String>{
