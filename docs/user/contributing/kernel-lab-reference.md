@@ -91,7 +91,9 @@ output, in one batch request. It then measures the first record for each distinc
 weight/view, token count, stride and epilogue combination with `warmup` and
 `samples`. These representatives are fixed for the session. Repeated timing
 runs keep inputs on the GPU, restore mutable outputs/workspace outside timing,
-and compare outputs on the first execution. Results include raw timings and
+and explicitly select `FirstExecution` output checks. Native regression callers
+default to `EveryExecution`, including warmups; results report the number of
+executions checked. Results include raw timings and
 speedups against the baseline measured at setup. These baseline timings can
 drift; confirm small differences with fresh comparisons during acceptance.
 

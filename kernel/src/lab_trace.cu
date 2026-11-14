@@ -219,10 +219,10 @@ extern "C" int32_t ignis_lab_capture_stop(ignis_model *m,ignis_seq_pool *p) {
 }
 extern "C" int32_t ignis_lab_replay(ignis_model *m,const ignis_lab_weight_view *view,const ignis_lab_weight_view *upview,
     uint32_t tokens,uint32_t ldy,uint32_t epilogue,const void *x,const void *initial,const void *reference,
-    uint32_t warmup,uint32_t samples,float *times,uint64_t *mismatches) {
+    uint32_t warmup,uint32_t samples,uint32_t check,float *times,uint64_t *mismatches,uint32_t *checked) {
   cudaGraph_t graph=nullptr;cudaGraphExec_t exec=nullptr;cudaEvent_t a=nullptr,b=nullptr;
   try {
-    if(!m || !view || !x || !initial || !reference || !times || !mismatches || !tokens ||
+    if(!m || !view || !x || !initial || !reference || !times || !mismatches || !checked || check>IGNIS_LAB_CHECK_EVERY || !tokens ||
        tokens>std::max(m->prefill_chunk_tokens,uint32_t(64)) || !samples || samples>10000 || warmup>10000 || epilogue>1)
       throw std::runtime_error("invalid replay arguments");
     auto w=resolve(*m,*view);ignis_trellis_weight up{};if(upview)up=resolve(*m,*upview);
@@ -248,12 +248,13 @@ extern "C" int32_t ignis_lab_replay(ignis_model *m,const ignis_lab_weight_view *
     ck(cudaStreamBeginCapture(m->stream,cudaStreamCaptureModeThreadLocal));
     try {issue();} catch(...) {cudaStreamEndCapture(m->stream,&graph);throw;}
     ck(cudaStreamEndCapture(m->stream,&graph));ck(cudaGraphInstantiate(&exec,graph,0));
-    ck(cudaEventCreate(&a));ck(cudaEventCreate(&b));*mismatches=0;
+    ck(cudaEventCreate(&a));ck(cudaEventCreate(&b));*mismatches=0;*checked=0;
     for(uint32_t i=0;i<warmup+samples;++i) {
       reset();ck(cudaEventRecord(a,m->stream));ck(cudaGraphLaunch(exec,m->stream));
       ck(cudaEventRecord(b,m->stream));ck(cudaEventSynchronize(b));
       float ms;ck(cudaEventElapsedTime(&ms,a,b));if(i>=warmup)times[i-warmup]=ms;
-      if(i!=0)continue;
+      if(check==IGNIS_LAB_CHECK_FIRST && i!=0)continue;
+      ++*checked;
       ck(cudaMemcpy2D(result.data(),w.out*2,dy.p,ldy*2,w.out*2,tokens,cudaMemcpyDeviceToHost));
       const auto *expected=static_cast<const uint16_t *>(reference);
       for(size_t j=0;j<result.size();++j) if(result[j]!=expected[j] || (result[j]&0x7f80)==0x7f80)++*mismatches;

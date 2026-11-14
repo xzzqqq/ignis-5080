@@ -101,8 +101,8 @@ fn main() -> Result<()> {
                     let records=v["records"].as_array().ok_or("missing records")?;
                     let mut rows=Vec::new();
                     for record in records {
-                        let row=ignis_core::lab_trace::replay(&mut model,data,record,
-                            integer(&v,"warmup",0)?,integer(&v,"samples",1)?)?;
+                        let row=ignis_core::lab_trace::replay_with_check(&mut model,data,record,
+                            integer(&v,"warmup",0)?,integer(&v,"samples",1)?,ignis_core::lab_trace::ReplayCheck::FirstExecution)?;
                         let passed=row["passed"]==true;
                         rows.push(row);
                         if !passed {break;}

@@ -70,7 +70,9 @@ comparable.
 - Local workspace Rust: 3,068 passed, six existing ignores.
 - CUDA workspace/all-target compilation passed.
 - Native GPU capture/replay regression passed, including padded destinations,
-  ADD resets, rejection of a faulty plugin and baseline restoration. The first
+  rejection of a faulty plugin and baseline restoration. The original quick-check
+  implementation checked only the first execution, so this run did not establish
+  repeated ADD correctness. The first
   attempt failed because the runner had not built `fault-4.so`; it passed after
   that fixture was supplied.
 - Full-mode behavior has CPU control-flow coverage; `forward --full` and the
@@ -86,3 +88,16 @@ operation JSON files under `.scratch/lab/` with IDs
 `2e05775ab3ee44ec934773a22ae4c575` (replay) and
 `1b5a47d2cea34c699cc83219bc085019` (forward). Remote pinned baselines, corpora and
 operation results remain in the configured data directory.
+
+## Review correction (2026-11-15)
+
+The shared replay function originally checked only the first execution for all
+callers, weakening the repeated-execution GPU regression. The API now defaults
+to `EveryExecution`; only the fast batch path opts into `FirstExecution`.
+Regression assertions check all five executions for two warmups and three
+samples. Two fault fixtures count actual graph executions on the GPU and
+produce a wrong finite value or infinity after the first correct result.
+The tests require first-only checking to pass and every-execution checking to
+reject both faults on execution two. The native GPU regression passed with
+these assertions on 2026-11-15. The performance measurements above precede
+this correction; no new latency measurements were taken.
