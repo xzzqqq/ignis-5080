@@ -5,7 +5,10 @@
 // m16n8k16 fragments.
 //
 // The fixed T=8 MLP uses a static grid with two 16-column tiles per warp.
-// Other shapes use a persistent launch taking work units by ticket. A unit is 128 output columns of one weight
+// Its 2/3-bit down ADD uses the usual eight-warps output partition and a separate reducer;
+// it keeps the generic four K splits. Both fixed-shape kernels live in trellis_linear_mlp_t8.cu.
+// Other uncapped shapes use a static work grid; capped shapes take work units by ticket.
+// A unit is 128 output columns of one weight
 // (one 16-column tile per warp) over one split of the inputs, a run of 128-input blocks:
 //
 //   per block   each warp's eight weight tiles are in registers two blocks ahead (every lane one

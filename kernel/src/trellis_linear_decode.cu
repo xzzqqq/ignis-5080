@@ -3,6 +3,27 @@
 namespace ignis_tl {
 namespace {
 template <int NG, bool kWide>
+__device__ __forceinline__ void decode_unit(const DecodeParams &p, const Smem &s, int ticket, int *last) {
+  const int split = ticket % p.splits;
+  const int rest = ticket / p.splits;
+  const int wsel = rest % p.weights;
+  const int cb = rest / p.weights;
+  dispatch_k2(p.w[wsel].k2, [&](auto k) {
+    constexpr int K2 = decltype(k)::value;
+    if constexpr (kWide || K2 < 10) unit<K2, NG>(p, s, wsel, cb, split, last);
+    else __trap();
+  });
+}
+
+template <int NG, bool kWide>
+__global__ void __launch_bounds__(kThreads, !kWide && NG <= 2 ? 2 : 1) decode_static_kernel(const __grid_constant__ DecodeParams p) {
+  extern __shared__ __align__(16) unsigned char smem_raw[];
+  __shared__ int last;
+  const Smem s = carve(smem_raw, p.tokens);
+  decode_unit<NG, kWide>(p, s, static_cast<int>(blockIdx.x), &last);
+}
+
+template <int NG, bool kWide>
 __global__ void __launch_bounds__(kThreads, !kWide && NG <= 2 ? 2 : 1) decode_kernel(const __grid_constant__ DecodeParams p) {
   extern __shared__ __align__(16) unsigned char smem_raw[];
   __shared__ int s_ticket, s_next, s_last;
@@ -15,23 +36,7 @@ __global__ void __launch_bounds__(kThreads, !kWide && NG <= 2 ? 2 : 1) decode_ke
       if (threadIdx.x == 0) s_next = static_cast<int>(atomicAdd(&p.counters[0], 1u));
       // Splits of one output block are consecutive tickets, and SwiGLU's gate and up of a block
       // are neighbours: the last arrival finds its partial sums fresh in the L2.
-      const int split = ticket % p.splits;
-      const int rest = ticket / p.splits;
-      const int wsel = rest % p.weights;
-      const int cb = rest / p.weights;
-      const int k2 = p.w[wsel].k2;
-      if constexpr (kWide) {
-        dispatch_k2(k2, [&](auto k) { unit<decltype(k)::value, NG>(p, s, wsel, cb, split, &s_last); });
-      } else {
-        dispatch_k2(k2, [&](auto k) {
-          constexpr int K2 = decltype(k)::value;
-          if constexpr (K2 < 10) {
-            unit<K2, NG>(p, s, wsel, cb, split, &s_last);
-          } else {
-            __trap();
-          }
-        });
-      }
+      decode_unit<NG, kWide>(p, s, ticket, &s_last);
       __syncthreads();
       if (threadIdx.x == 0) s_ticket = s_next;
       __syncthreads();
@@ -59,6 +64,14 @@ template <int NG, bool kWide> int32_t prepare_one(DeviceState *st, int cls) {
 }
 
 template <bool kWide> cudaError_t launch_one(cudaLaunchConfig_t &cfg, int cls, const DecodeParams &p) {
+  if (!p.capped) {
+    switch (cls) {
+    case 0: return cudaLaunchKernelEx(&cfg, decode_static_kernel<1, kWide>, p);
+    case 1: return cudaLaunchKernelEx(&cfg, decode_static_kernel<2, kWide>, p);
+    case 2: return cudaLaunchKernelEx(&cfg, decode_static_kernel<4, kWide>, p);
+    default: return cudaLaunchKernelEx(&cfg, decode_static_kernel<8, kWide>, p);
+    }
+  }
   switch (cls) {
   case 0: return cudaLaunchKernelEx(&cfg, decode_kernel<1, kWide>, p);
   case 1: return cudaLaunchKernelEx(&cfg, decode_kernel<2, kWide>, p);
@@ -83,7 +96,7 @@ int32_t launch_decode(const DeviceState &st, const DecodeParams &p, cudaStream_t
   const bool wide = p.w[0].k2 >= 10 || (p.weights == 2 && p.w[1].k2 >= 10);
   const int resident = st.decode_ctas[wide ? 1 : 0][cls] * st.sms;
   // Capped, every SM gets its full share of CTAs and the unadmitted ones leave.
-  const int grid = p.capped ? resident : (p.units < resident ? p.units : resident);
+  const int grid = p.capped ? resident : p.units;
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(grid);
   cfg.blockDim = dim3(kThreads);
@@ -97,8 +110,14 @@ int32_t launch_decode(const DeviceState &st, const DecodeParams &p, cudaStream_t
   const bool mlp4 = st.sms == 84 && !p.capped && p.tokens == 8 && p.in == 5120 && p.out == 17408 &&
                     p.epilogue == kSwiGlu && p.splits == 1 && !wide && p.w[0].k2 == p.w[1].k2 &&
                     (p.w[0].k2 == 4 || p.w[0].k2 == 6 || p.w[0].k2 == 8);
+  const bool down_t8 = st.sms == 84 && !p.capped && p.tokens == 8 && p.in == 17408 && p.out == 5120 &&
+                       p.weights == 1 && p.epilogue == kAdd && p.splits == 4 &&
+                       (p.w[0].k2 == 4 || p.w[0].k2 == 6);
   cudaError_t err;
-  if (mlp4) {
+  if (down_t8) {
+    cfg.blockDim = dim3(256);
+    err = launch_down_t8(cfg, p);
+  } else if (mlp4) {
     cfg.gridDim = dim3(p.units);
     cfg.blockDim = dim3(128);
     // Static work assignment does not pre-reserve another output group.
