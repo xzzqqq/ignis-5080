@@ -21,6 +21,9 @@
 //                each call's bits are its own fresh workspace's (GitHub #339).
 //   T=8 MLP     same-K gate/up at the real shape, plus token/bit-width/SM-cap fallbacks, against
 //                fp64; ten different calls share one workspace through five graph replays.
+//   T=8 down    2/3-bit ADD at 17,408 -> 5,120 against fp64 and the same-split capped
+//                fused route; padded shared-workspace graph replays alternate optimized calls
+//                with 4-bit, T1/T16 and STORE fallbacks, then return to capped execution.
 //   rejects      the arguments the ops refuse.
 //
 // ADR 0006 / docs/agents/testing.md: no SKIP_RETURN_CODE; a missing GPU or fixture fails.
@@ -132,8 +135,8 @@ void note(int tokens, double worst) {
 }
 
 // y = x W through `epilogue` on `tokens` tokens, against the reference, with residual r when ADD.
-void check_linear(const std::string &label, const DeviceWeight &d, int tokens, const Workspace &ws, uint32_t epilogue,
-                  uint32_t stream) {
+std::vector<uint16_t> check_linear(const std::string &label, const DeviceWeight &d, int tokens, const Workspace &ws,
+                                   uint32_t epilogue, uint32_t stream) {
   const int in = static_cast<int>(d.in), out = static_cast<int>(d.out);
   const std::vector<uint16_t> x = make_x(stream, tokens, in);
   std::vector<uint16_t> r(static_cast<size_t>(tokens) * out, 0);
@@ -159,6 +162,7 @@ void check_linear(const std::string &label, const DeviceWeight &d, int tokens, c
   check(a.bad == 0, label + ": " + std::to_string(a.bad) + " outputs outside the tolerance (first at " +
                         std::to_string(a.first_bad) + ", worst " + std::to_string(a.worst) + " of the bound)");
   std::printf("  %-34s %5d tok: worst %.3f of the bound, rel rms %.2e\n", label.c_str(), tokens, a.worst, a.rel_rms);
+  return y;
 }
 
 // h = silu(x G) * (x U): the bound composes the two outputs' through silu, plus the prefill's BF16
@@ -591,6 +595,104 @@ void shared_workspace_arm() {
   }
 }
 
+// Check the real selected ADD path against fp64, then hold padded graph calls bitwise
+// to both that result and the unchanged capped fused route with identical K splits.
+void down_t8_arm() {
+  constexpr uint32_t in = 17408, out = 5120, ldy = out + 16;
+  DeviceWeight down[3];
+  for (int k = 0; k < 3; ++k) make_weight(down[k], 4 + 2 * k, in, out, 110000 + k * 100);
+  struct Call {
+    const char *name;
+    const DeviceWeight *weight;
+    int tokens;
+    uint32_t epilogue;
+  };
+  const Call calls[] = {{"down K2 ADD", &down[0], 8, IGNIS_TRELLIS_ADD},
+                        {"down K3 ADD", &down[1], 8, IGNIS_TRELLIS_ADD},
+                        {"down K4 fallback", &down[2], 8, IGNIS_TRELLIS_ADD},
+                        {"down T1 fallback", &down[0], 1, IGNIS_TRELLIS_ADD},
+                        {"down T16 fallback", &down[1], 16, IGNIS_TRELLIS_ADD},
+                        {"down STORE fallback", &down[0], 8, IGNIS_TRELLIS_STORE}};
+  constexpr int count = sizeof(calls) / sizeof(calls[0]);
+  set_cap("0");
+  uint64_t bytes = 0;
+  for (const Call &c : calls) bytes = std::max(bytes, ignis_trellis_workspace_bytes(in, out, 1, c.tokens));
+  Workspace shared(bytes);
+  DeviceBytes x[count], y[count];
+  std::vector<uint16_t> initial[count], expected[count];
+  cudaStream_t stream;
+  MOE_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+  for (int i = 0; i < count; ++i) {
+    const Call &c = calls[i];
+    const uint32_t seed = 111000 + i;
+    Workspace fresh(ignis_trellis_workspace_bytes(in, out, 1, c.tokens));
+    const auto compact = check_linear(c.name, *c.weight, c.tokens, fresh, c.epilogue, seed);
+    x[i] = DeviceBytes(static_cast<size_t>(c.tokens) * in * 2);
+    y[i] = DeviceBytes(static_cast<size_t>(c.tokens) * ldy * 2);
+    upload(x[i], make_x(seed, c.tokens, in));
+    initial[i].assign(static_cast<size_t>(c.tokens) * ldy, 0x7fc0u);
+    expected[i] = initial[i];
+    for (int t = 0; t < c.tokens; ++t) {
+      for (uint32_t col = 0; col < out; ++col) {
+        const size_t item = static_cast<size_t>(t) * out + col;
+        initial[i][static_cast<size_t>(t) * ldy + col] = c.epilogue == IGNIS_TRELLIS_ADD
+            ? moe_test::f32_to_bf16(moe_test::hash_uniform(seed + 7, item, 0.8f)) : 0;
+        expected[i][static_cast<size_t>(t) * ldy + col] = compact[item];
+      }
+    }
+  }
+  auto launch = [&](int i) {
+    const Call &c = calls[i];
+    TL_RC(ignis_trellis_linear(&c.weight->w, x[i].p, c.tokens, y[i].p, ldy, c.epilogue, &shared.ws, stream));
+  };
+  // A full-card SM cap preserves occupancy and splits while disabling the specialized path.
+  int device = 0, sms = 0;
+  MOE_CUDA(cudaGetDevice(&device));
+  MOE_CUDA(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
+  const std::string full_cap = std::to_string(sms);
+  set_cap(full_cap.c_str());
+  for (int i = 0; i < count; ++i) {
+    upload(y[i], initial[i]);
+    launch(i);
+    MOE_CUDA(cudaStreamSynchronize(stream));
+    check(download<uint16_t>(y[i].p, expected[i].size()) == expected[i],
+          std::string(calls[i].name) + ": padded fused control with identical K splits differs");
+  }
+  // A smaller cap can change K splits, so it is checked against fp64 rather than exact bits.
+  set_cap("36");
+  for (int i = 0; i < 2; ++i)
+    check_linear(std::string(calls[i].name) + " cap36 fallback", *calls[i].weight, calls[i].tokens,
+                 shared, calls[i].epilogue, 111000 + i);
+  set_cap("0");
+  cudaGraph_t graph;
+  cudaGraphExec_t exec;
+  MOE_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+  for (int i = 0; i < count; ++i) launch(i);
+  MOE_CUDA(cudaStreamEndCapture(stream, &graph));
+  MOE_CUDA(cudaGraphInstantiate(&exec, graph, 0));
+  for (int rep = 0; rep < 5; ++rep) {
+    for (int i = 0; i < count; ++i) upload(y[i], initial[i]);
+    MOE_CUDA(cudaGraphLaunch(exec, stream));
+    MOE_CUDA(cudaStreamSynchronize(stream));
+    for (int i = 0; i < count; ++i)
+      check(download<uint16_t>(y[i].p, expected[i].size()) == expected[i],
+            std::string(calls[i].name) + ": padded shared graph replay " + std::to_string(rep) + " differs");
+  }
+  MOE_CUDA(cudaGraphExecDestroy(exec));
+  MOE_CUDA(cudaGraphDestroy(graph));
+  set_cap(full_cap.c_str());
+  for (int i = 0; i < 2; ++i) {
+    upload(y[i], initial[i]);
+    launch(i);
+    MOE_CUDA(cudaStreamSynchronize(stream));
+    check(download<uint16_t>(y[i].p, expected[i].size()) == expected[i],
+          std::string(calls[i].name) + ": capped arrival reuse after separate-reduction graph differs");
+  }
+  set_cap("0");
+  MOE_CUDA(cudaStreamDestroy(stream));
+  std::printf("  T=8 down: fp64, same-split fused controls, padded output and 5 shared-workspace graph replays checked\n");
+}
+
 void rejects_arm() {
   DeviceWeight d;
   make_weight(d, 6, 256, 128, 80000);
@@ -625,6 +727,7 @@ int main() {
   mlp_t8_arm();
   determinism_arm();
   shared_workspace_arm();
+  down_t8_arm();
   rejects_arm();
   std::printf("worst share of the bound: decode %.3f, prefill %.3f\n", g_worst_decode, g_worst_prefill);
   if (moe_test::g_failed != 0) {
