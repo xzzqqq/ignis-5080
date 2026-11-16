@@ -1,46 +1,73 @@
 ---
 title: "Kernel Lab"
-description: "Iterate on kernels with a resident model, local replay and full-model evaluation."
+description: "Explore kernel edits with a resident model, real operator inputs and full-model feedback."
 ---
 
-Use Kernel Lab when one agent is repeatedly editing Trellis kernels against a
-fixed model and benchmark. The model stays on the remote GPU between commands.
-Run commands from the Laptop worktree; they handle source sync and remote
-execution through `scripts/remote.py`. Only one agent can use the session and GPU
-at a time.
+Use Kernel Lab when one agent repeatedly edits Trellis kernels against a fixed
+model and benchmark request. Run commands from the Laptop worktree; they handle
+sync and remote execution through `scripts/remote.py`. The model stays on the
+remote GPU. One agent owns the session and GPU at a time.
 
 Hot loading covers Trellis linear/SwiGLU operations: GDN/GQA projections, MLP
 and the output head. Attention, GDN state updates and normalization remain fixed.
 
-## Four commands
+Create `.scratch/lab-settings.json` from the
+[configuration example](kernel-lab-reference.md#configure-once), then run:
 
-For first-time setup, create `.scratch/lab-settings.json` using the
-[configuration example](kernel-lab-reference.md#configure-once).
+```sh
+python3 scripts/lab.py setup --config .scratch/lab-settings.json
+python3 scripts/lab.py replay --operator layer.0.down --tokens-per-call 8
+```
 
-| Command | Purpose |
-| --- | --- |
-| `python3 scripts/lab.py setup --config .scratch/lab-settings.json` | Establish the baseline, load the model and record or reuse operator inputs from one fixed benchmark request. |
-| `python3 scripts/lab.py replay` | Sync, compile and hot-load kernel edits. Check each recorded input once, then time fixed representative calls. |
-| `python3 scripts/lab.py forward` | Run the selected request through full prefill and generation; reuse a passing replay for the same candidate. Add `--full` to evaluate all requests with fresh baseline controls. |
-| `python3 scripts/lab.py stop` | Stop the session and release the GPU; keep recordings, results and build caches. Also works during a busy evaluation. |
+Setup fixes the model, configuration and request. Select operators and token
+counts per command. The first use of a scope records its real inputs; later
+commands reuse compatible cached recordings. Recording costs are separate from
+operator timing.
 
-## Typical workflow
+Repeat **edit → replay** for quick exploration. Replay reports timing and output
+errors against the recorded baseline. Numerical differences do not block timing;
+this is exploratory feedback, not strict correctness acceptance. Report the error
+measurements along with speedups. Acceptance still needs the independent
+correctness checks required by the repository.
 
-Run `setup` once, then repeat **edit → replay** for quick local feedback.
-Use `forward` by default for full-model feedback on the request selected by
-`benchmark` at setup. Reserve `forward --full` for acceptance checks that require
-all benchmark requests and fresh baseline comparisons.
-Continue editing or run `stop` when finished. Both evaluation commands restore
-the same baseline afterward, even when the candidate passes.
+Save useful candidates and compare them on the same selected inputs:
 
-Hot edits cover the linear, decode, prefill and T=8 MLP CUDA files and their
-[supported headers](kernel-lab-reference.md#source-baseline-and-recovery). Other
-code or configuration changes require stopping and [creating a new baseline](kernel-lab-reference.md#source-baseline-and-recovery).
+```sh
+python3 scripts/lab.py replay --operator layer.0.down --tokens-per-call 8 --save-as before
+# Edit the supported CUDA sources.
+python3 scripts/lab.py replay --operator layer.0.down --tokens-per-call 8 --save-as after
+python3 scripts/lab.py candidates
+python3 scripts/lab.py compare --baseline before --candidate current --operator layer.0.down --tokens-per-call 8
+```
 
-Inspect the full result linked by each command under `.scratch/lab/`.
-Report correctness, measured coverage and timings. Replay measures isolated
-operators; forward measures the complete model, excluding HTTP service overhead.
+`current` builds the current source; saved names select immutable candidate
+libraries. `builtin` selects the session's pinned baseline. Inspect the result
+linked by each command under `.scratch/lab/` for identities, coverage, raw samples
+and errors.
 
-For capture scope, storage budgets, failure recovery and measurement details,
-consult the [reference](kernel-lab-reference.md). The
-[design](../../specs/continual-experiments/README.md) explains implementation decisions.
+Use `forward` for feedback on the selected full request. It reports the
+candidate's own generation and engine times. Add `--full` for all requests,
+configured repetitions and baseline controls. Replay timings describe isolated
+operators and cannot establish full-model speedups.
+
+To inspect GPU kernel launches for a selected operator:
+
+```sh
+python3 scripts/lab.py profile --candidate current --operator layer.0.down --tokens-per-call 8
+```
+
+Profiling uses Nsight Systems when available at setup and retains the resident
+engine. It reports kernel names, counts and durations, kernel span, gaps and
+overlap, with a timeline and raw report. Profiling adds instrumentation overhead;
+use ordinary replay for latency comparisons. See the
+[profiling details](kernel-lab-reference.md#operator-profiling) for prerequisites
+and the meaning of each number.
+
+Finish with `python3 scripts/lab.py stop`. It releases the GPU and keeps results,
+saved candidates, recordings and build caches. Both evaluation and profiling
+restore builtin code afterward. Unsupported source or configuration changes
+require stopping and [creating a new baseline](kernel-lab-reference.md#source-baseline-and-recovery).
+
+The [reference](kernel-lab-reference.md) covers configuration, coverage,
+measurement and recovery. The [design](../../specs/continual-experiments/README.md)
+explains the implementation boundaries.

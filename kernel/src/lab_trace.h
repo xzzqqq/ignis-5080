@@ -17,6 +17,8 @@ int32_t ignis_lab_capture_start(ignis_model *, ignis_seq_pool *, const char *, u
 int32_t ignis_lab_capture_stop(ignis_model *, ignis_seq_pool *);
 int32_t ignis_lab_trace_context(ignis_model *, uint32_t request, uint32_t phase, uint64_t position);
 int32_t ignis_lab_trace_flush(ignis_model *);
+int32_t ignis_lab_profiler_start();
+int32_t ignis_lab_profiler_stop();
 const char *ignis_lab_trace_error();
 int32_t ignis_lab_capture_minimum(ignis_model *, const char *, uint64_t tokens, uint64_t requests, uint64_t *bytes);
 struct ignis_lab_weight_view {
@@ -24,7 +26,23 @@ struct ignis_lab_weight_view {
   uint64_t trellis_offset, suh_offset, svh_offset;
   uint32_t k2, in, out, tile_stride;
 };
-enum ignis_lab_replay_check : uint32_t { IGNIS_LAB_CHECK_FIRST = 0, IGNIS_LAB_CHECK_EVERY = 1 };
+enum ignis_lab_replay_check : uint32_t {
+  IGNIS_LAB_CHECK_FIRST = 0, IGNIS_LAB_CHECK_EVERY = 1, IGNIS_LAB_CHECK_EXPLORATION = 2
+};
+struct ignis_lab_diagnostics {
+  uint64_t mismatches, total_elements, finite_elements;
+  uint64_t reference_nan, reference_inf, actual_nan, actual_inf;
+  double max_abs_error, squared_error, squared_reference;
+};
+// Empty token filters preserve the original all-token capture behavior.
+int32_t ignis_lab_capture_start_filtered(ignis_model *, ignis_seq_pool *, const char *, uint64_t, uint64_t,
+    const char *, const uint32_t *token_filter, uint32_t token_filter_count);
+int32_t ignis_lab_capture_minimum_filtered(ignis_model *, const char *, uint64_t tokens, uint64_t requests,
+    const uint32_t *token_filter, uint32_t token_filter_count, uint64_t *bytes);
+int32_t ignis_lab_replay_diagnostics(ignis_model *, const ignis_lab_weight_view *, const ignis_lab_weight_view *,
+    uint32_t tokens, uint32_t ldy, uint32_t epilogue, const void *x, const void *initial,
+    const void *reference, uint32_t warmup, uint32_t samples, uint32_t check, float *times_ms,
+    uint64_t *mismatches, uint32_t *checked, ignis_lab_diagnostics *diagnostics);
 int32_t ignis_lab_replay(ignis_model *, const ignis_lab_weight_view *, const ignis_lab_weight_view *,
     uint32_t tokens, uint32_t ldy, uint32_t epilogue, const void *x, const void *initial,
     const void *reference, uint32_t warmup, uint32_t samples, uint32_t check, float *times_ms, uint64_t *mismatches, uint32_t *checked);

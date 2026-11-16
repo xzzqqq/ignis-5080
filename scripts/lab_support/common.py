@@ -150,16 +150,8 @@ def validate_config(cfg):
         raise ValueError('unsupported engine geometry')
     if settings.get('kv_format','hq-e8-2b') not in ('bf16','hq-e8-2b') or settings.get('speculation','dflash2') not in ('off','dflash2'):
         raise ValueError('unsupported KV format or speculation')
-    view=cfg.get('view',{})
-    if not isinstance(view,dict) or set(view)-{'names','tokens','ids'}:
-        raise ValueError('unknown replay view field')
-    for values in (cfg.get('capture_names',[]),view.get('names',[])):
-        if not isinstance(values,list) or any(not isinstance(v,str) or not v or ',' in v for v in values):
-            raise ValueError('weight names must be a list of nonempty names')
-    for name in ('tokens','ids'):
-        values=view.get(name,[])
-        if not isinstance(values,list) or any(type(v) is not int or v<(1 if name=='tokens' else 0) for v in values):
-            raise ValueError('invalid view '+name)
+    if 'capture_names' in cfg or 'view' in cfg:
+        raise ValueError('capture_names/view are retired; remove them and use replay --operator/--tokens-per-call')
 
 
 class LabTimeout(TimeoutError):

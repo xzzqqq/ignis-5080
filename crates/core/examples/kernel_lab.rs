@@ -20,6 +20,16 @@ fn emit(v: Value) { println!("{v}"); io::stdout().flush().unwrap(); }
 fn integer(v: &Value, name: &str, default: u32) -> Result<u32> {
     match v.get(name) { None => Ok(default), Some(x) => Ok(u32::try_from(x.as_u64().ok_or("expected unsigned integer")?)?) }
 }
+fn token_filter(v: &Value) -> Result<Vec<u32>> {
+    let Some(value)=v.get("tokens_per_call") else {return Ok(Vec::new());};
+    let items=value.as_array().ok_or("tokens_per_call must be an array")?;
+    if items.len()>8192 {return Err("tokens_per_call has too many entries".into());}
+    items.iter().map(|x| {
+        let token=u32::try_from(x.as_u64().ok_or("tokens_per_call must contain unsigned integers")?)?;
+        if token==0 || token>8192 {return Err("tokens_per_call entries must be in 1..=8192".into());}
+        Ok(token)
+    }).collect()
+}
 fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 
 struct Settings { context: u32, chunk: u32, lanes: u32, spec: Option<Speculation> }
@@ -72,6 +82,8 @@ fn main() -> Result<()> {
         let v: Value = match serde_json::from_str(&line?) { Ok(v) => v, Err(e) => { emit(json!({"ok":false,"error":e.to_string()})); continue; } };
         let result = (|| -> Result<Value> {
             match v["op"].as_str().ok_or("missing op")? {
+                "profiler_start" => {ignis_core::lab_trace::profiler_start()?;Ok(json!({"profiling":true}))},
+                "profiler_stop" => {ignis_core::lab_trace::profiler_stop()?;Ok(json!({"profiling":false}))},
                 "reload" => {
                     let path = v["path"].as_str().ok_or("path must be builtin or an absolute library path")?;
                     let (candidate, sha) = if path == "builtin" { (None, None) } else {
@@ -85,13 +97,13 @@ fn main() -> Result<()> {
                     generation += 1;
                     Ok(json!({"candidate":path,"sha256":sha}))
                 },
-                "capture_minimum" => Ok(json!({"prefill_bytes_lower_bound":ignis_core::lab_trace::minimum(&model,
+                "capture_minimum" => Ok(json!({"prefill_bytes_lower_bound":ignis_core::lab_trace::minimum_filtered(&model,
                     v["names"].as_str().unwrap_or(""),v["tokens"].as_u64().ok_or("missing tokens")?,
-                    v["requests"].as_u64().ok_or("missing requests")?)?})),
+                    v["requests"].as_u64().ok_or("missing requests")?,&token_filter(&v)?)?})),
                 "capture_start" => {
                     let path=Path::new(v["path"].as_str().ok_or("missing capture path")?);
-                    ignis_core::lab_trace::start(&mut model,&mut pool,path,
-                        v["pin_bytes"].as_u64().ok_or("missing pin budget")?,v["disk_bytes"].as_u64().ok_or("missing disk budget")?,v["names"].as_str().unwrap_or(""))?;
+                    ignis_core::lab_trace::start_filtered(&mut model,&mut pool,path,
+                        v["pin_bytes"].as_u64().ok_or("missing pin budget")?,v["disk_bytes"].as_u64().ok_or("missing disk budget")?,v["names"].as_str().unwrap_or(""),&token_filter(&v)?)?;
                     recording = true;
                     Ok(json!({"recording":true}))
                 },
@@ -100,17 +112,28 @@ fn main() -> Result<()> {
                     let data=Path::new(v["data"].as_str().ok_or("missing data path")?);
                     let records=v["records"].as_array().ok_or("missing records")?;
                     let mut rows=Vec::new();
+                    let exploratory=v["exploratory"].as_bool().unwrap_or(false);
                     for record in records {
                         let row=ignis_core::lab_trace::replay_with_check(&mut model,data,record,
-                            integer(&v,"warmup",0)?,integer(&v,"samples",1)?,ignis_core::lab_trace::ReplayCheck::FirstExecution)?;
+                            integer(&v,"warmup",0)?,integer(&v,"samples",1)?,if exploratory {
+                                ignis_core::lab_trace::ReplayCheck::Exploration
+                            } else {ignis_core::lab_trace::ReplayCheck::FirstExecution})?;
                         let passed=row["passed"]==true;
                         rows.push(row);
-                        if !passed {break;}
+                        if !exploratory && !passed {break;}
                     }
                     Ok(json!(rows))
                 },
-                "replay" => Ok(ignis_core::lab_trace::replay(&mut model,Path::new(v["data"].as_str().ok_or("missing data path")?),
-                    &v["record"],integer(&v,"warmup",1)?,integer(&v,"samples",3)?)?),
+                "replay" => {
+                    let check=match v["check"].as_str().unwrap_or("every") {
+                        "every" => ignis_core::lab_trace::ReplayCheck::EveryExecution,
+                        "first" => ignis_core::lab_trace::ReplayCheck::FirstExecution,
+                        "exploration" => ignis_core::lab_trace::ReplayCheck::Exploration,
+                        _ => return Err("check must be every, first or exploration".into()),
+                    };
+                    Ok(ignis_core::lab_trace::replay_with_check(&mut model,Path::new(v["data"].as_str().ok_or("missing data path")?),
+                        &v["record"],integer(&v,"warmup",1)?,integer(&v,"samples",3)?,check)?)
+                },
                 "benchmark" => {
                     let mut result = benchmark::run(&model, &pool, &settings, &v["case"], &mut |m,_,_| {
                         ignis_core::lab_trace::flush(m)?;Ok(())

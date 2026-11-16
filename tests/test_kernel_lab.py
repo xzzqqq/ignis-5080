@@ -65,6 +65,81 @@ class EngineProtocolTests(unittest.TestCase):
                 try:
                     with self.assertRaises(RuntimeError):session.call({'op':'reload','path':'builtin'})
                 finally:session.close()
+    def profiled_session(self, base, body):
+        import os
+        import sys
+        from unittest.mock import patch
+        sys.path.insert(0,str(ROOT/'scripts'))
+        from kernel_lab import Session
+        launcher=base/'nsys'
+        launcher.write_text('#!'+sys.executable+'\n'+
+            "import sys,subprocess,time\n"
+            "print('Capture range started in the application.',flush=True)\n"
+            "print(\"Generating '/tmp/nsys/report.qdstrm'\",flush=True)\n"
+            "child=subprocess.Popen(sys.argv[sys.argv.index('/bin/bash'):])\n"
+            "while child.poll() is None:\n print(' [1/1] arbitrary profiler progress...Processing events...',flush=True)\n time.sleep(.005)\n"
+            "print('Capture range ended in the application.',flush=True)\nsys.exit(child.returncode)\n")
+        launcher.chmod(0o755)
+        engine=base/'engine.py'
+        engine.write_text("import sys,json,os,time\nprint(json.dumps({'event':'ready','pid':os.getpid()}),flush=True)\n"
+            "for line in sys.stdin:\n "+body+"\n")
+        with patch.dict(os.environ,PATH=str(base)+os.pathsep+os.environ.get('PATH','')):
+            return Session(Path(sys.executable),engine,base/'unused',base,1,profiler_session='test')
+
+    def test_profiled_fifo_separates_arbitrary_launcher_progress(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory)
+            session=self.profiled_session(base,"request=json.loads(line); print(json.dumps({'ok':True,'id':request['id']}),flush=True)")
+            fifo=base/'engine.stdout.fifo'
+            try:
+                self.assertTrue(fifo.exists())
+                self.assertNotEqual(session.engine_pid,session.process.pid)
+                self.assertTrue(session.call({'op':'profiler_stop'})['ok'])
+                self.assertTrue(session.call({'op':'reload','path':'builtin'})['ok'])
+            finally:session.close()
+            self.assertFalse(fifo.exists())
+            logs=(base/'engine.profiler.log').read_text()
+            self.assertIn("Generating '/tmp/nsys/report.qdstrm'",logs)
+            self.assertIn('arbitrary profiler progress',logs)
+            self.assertIn('Capture range ended in the application.',logs)
+            replies=[json.loads(line) for line in (base/'engine.jsonl').read_text().splitlines()]
+            self.assertEqual([r.get('id') for r in replies],[None,1,2])
+
+    def test_profiled_fifo_rejects_every_malformed_engine_reply(self):
+        import tempfile
+        for line in ('debug output','Capture range started in the application.',
+                     'Capture range ended in the application. unexpected'):
+            with self.subTest(line=line),tempfile.TemporaryDirectory() as directory:
+                session=self.profiled_session(Path(directory),'print('+repr(line)+',flush=True)')
+                try:
+                    with self.assertRaisesRegex(RuntimeError,'invalid engine JSON'):
+                        session.call({'op':'profiler_stop'})
+                finally:session.close()
+
+    def test_launcher_progress_does_not_extend_engine_deadline(self):
+        import tempfile
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            session=self.profiled_session(Path(directory),'time.sleep(.2)')
+            session.timeout=.04;began=time.monotonic()
+            try:
+                with self.assertRaises(TimeoutError):session.call({'op':'profiler_stop'})
+                self.assertLess(time.monotonic()-began,.15)
+            finally:session.close()
+
+    def test_profiled_fifo_detects_exited_launcher_without_eof(self):
+        import tempfile
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            session=self.profiled_session(Path(directory),'sys.exit(0)')
+            session.timeout=1;began=time.monotonic()
+            try:
+                with self.assertRaisesRegex(RuntimeError,'engine exited'):
+                    session.call({'op':'profiler_stop'})
+                self.assertLess(time.monotonic()-began,.5)
+            finally:session.close()
 
 
 if __name__ == '__main__':

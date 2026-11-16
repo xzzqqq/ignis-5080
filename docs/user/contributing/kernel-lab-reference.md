@@ -1,25 +1,20 @@
 ---
 title: "Kernel Lab reference"
-description: "Configuration, recovery, corpus semantics and development checks."
+description: "Configuration, candidate comparisons, profiling and recovery."
 ---
 
-See the [Kernel Lab guide](kernel-lab.md) for the four-command workflow.
-This page covers configuration, recovery and measurement details.
+See the [Kernel Lab guide](kernel-lab.md) for the edit/replay workflow.
 
 ## Configure once
 
-Run from the Laptop worktree. CUDA builds and all GPU work run in its configured
-remote Linux checkout. The four commands call `scripts/remote.py sync/exec`
-internally; do not manually synchronize while a lab command is running.
+Run from the Laptop worktree. CUDA builds and GPU execution use the configured
+remote Linux checkout through `scripts/remote.py`. Use a dedicated checkout and
+the private `.remote.json` / validated `.remote.env` described in
+[remote development](remote-dev.md). The remote needs systemd user services and
+user lingering. One transient systemd user unit owns the session's processes;
+one RTX 5080 supports one session. Do not manually sync during a lab command.
 
-Use a dedicated remote development checkout and the existing private
-`.remote.json` / validated `.remote.env` described in
-[remote development](remote-dev.md). The remote needs systemd user services
-and user lingering for a resident process to survive an SSH command ending.
-Each session uses a transient systemd user unit to clean up child processes.
-One RTX 5080 supports one resident session.
-
-Create an ignored local configuration, for example `.scratch/lab-settings.json`:
+Create an ignored local file, for example `.scratch/lab-settings.json`:
 
 ```json
 {
@@ -35,14 +30,8 @@ Create an ignored local configuration, for example `.scratch/lab-settings.json`:
     "kv_format": "hq-e8-2b",
     "speculation": "dflash2"
   },
-  "capture_names": [
-    "layer.0.qkv", "layer.0.z", "layer.0.output",
-    "layer.0.gate", "layer.0.down",
-    "layer.3.q", "layer.3.k", "layer.3.v", "layer.3.output", "head"
-  ],
   "capture_pin_bytes": 1073741824,
   "capture_disk_bytes": 137438953472,
-  "view": {"tokens": [8]},
   "warmup": 1,
   "samples": 3,
   "timeout_s": 1800,
@@ -50,162 +39,174 @@ Create an ignored local configuration, for example `.scratch/lab-settings.json`:
 }
 ```
 
-Paths in this JSON refer to the remote host. `data_dir` holds pinned baselines,
-source copies, corpora and results. `build_root` is a reusable Cargo/CMake
-cache. Both paths need enough free space. The lab loads the fixed text model
-and allocates memory from these settings. The context must fit each prepared
-prompt plus its output budget.
-
-`capture_names` selects which Trellis calls to record from the benchmark run.
-GDN layers have `qkv`, `z`,
-`output`, `gate`, `up`, `down`; GQA layers (3, 7, …, 63) have `q`, `k`, `v`,
-`output`, `gate`, `up`, `down`; `head` is the shared output head. Gate/up is
-captured as one SwiGLU call. Omitting the selection captures all Trellis calls.
-
-A small number of benchmark requests can still produce a very large corpus.
-The owner checks a prefill-only byte lower bound before recording; decode adds
-more. Setup fails if recording exceeds a budget; it does not sample to fit.
-The pinned-memory budget must cover the selected graphs plus the largest eager
-call; choose a smaller explicit scope or larger budget if it does not fit.
-
-`view` selects the records to measure from that stored corpus. Supported
-selectors are `names`, `tokens` and `ids`; omitted/empty selectors mean all.
-The capture scope stays fixed for the session and appears in results. The example
-stores both prefill and round calls, while measuring T=8 calls. Local aggregate
-times are not a prediction of full-model latency.
-
-## Execution and timing
-
-`setup` returns when the owner, model, clean graphs and references are ready.
-First setup includes building the baseline, preparing inputs and recording;
-these costs are reported separately from inference. Later setup reuses
-compatible data.
-
-`benchmark` fixes the request used by replay and quick forward. The default is
+Paths refer to the remote host. `data_dir` holds pinned baselines, source copies,
+candidates, recordings and results. `build_root` holds the Cargo/CMake cache.
+The context must fit each prepared prompt and its output budget. `benchmark`
+fixes the request used by recording and quick forward. The default is
 `astropy__astropy-12907`; alternatives are `django__django-10097` and
-`sympy__sympy-11618`. Setup records only this request's selected operators,
-and prepares reference outputs for all three requests.
+`sympy__sympy-11618`. `diagnostic_output_tokens` explicitly truncates generation
+for functional checks; these runs cannot establish full-workload performance.
 
-Replay checks every record in the configured view once against its frozen
-output, in one batch request. It then measures the first record for each distinct
-weight/view, token count, stride and epilogue combination with `warmup` and
-`samples`. These representatives are fixed for the session. Repeated timing
-runs keep inputs on the GPU, restore mutable outputs/workspace outside timing,
-and explicitly select `FirstExecution` output checks. Native regression callers
-default to `EveryExecution`, including warmups; results report the number of
-executions checked. Results include raw timings and
-speedups against the baseline measured at setup. These baseline timings can
-drift; confirm small differences with fresh comparisons during acceptance.
+## Select inputs per command
 
-Use `forward` by default. It executes the chosen request once, without a warmup,
-through natural EOS or the original output cap. It reuses a passing replay only
-for the identical candidate in this session. Otherwise it runs replay first.
-Reserve `forward --full` for acceptance checks requiring all requests. It uses
-configured warmups and samples, with fresh baseline runs before and after the
-candidate. The final baseline run also follows numerical rejection; failure
-ends the session. Both modes generate their own activations and output tokens.
+Setup fixes model, runtime settings and request, without requiring one permanent
+operator scope. Use repeatable `--operator` and `--tokens-per-call` selectors on
+replay, compare and profile. Token count means rows in an individual operator
+call, rather than the request's output budget. Selectors and actual coverage are
+persisted with each result. Omitted selectors select all supported operators and
+all token shapes; choose an explicit scope for quick feedback.
 
-Replay and quick forward restore builtin code and clean graphs without rerunning
-the baseline workload. Full mode also checks the restored model numerically.
-Fatal execution or restoration errors end the session.
+GDN layers expose `qkv`, `z`, `output`, `gate`, `up`, `down`. GQA layers
+(3, 7, …, 63) expose `q`, `k`, `v`, `output`, `gate`, `up`, `down`.
+`head` is the shared output head. Gate/up is one SwiGLU call.
 
-The builder caches each CUDA object by its source, compiler-reported transitive
-headers, toolchain and flags. T=8 MLP is a separate compilation unit; editing it
-reuses generic decode and prefill objects. Setup primes this cache. Candidate
-libraries remain immutable; results report object cache hits, compile times
-and link time.
+The first command selecting an uncached scope records real calls from the fixed
+request using builtin code. Compatible later commands reuse the recording.
+Recording obeys `capture_pin_bytes` and `capture_disk_bytes` and available disk
+space. It fails when the selected scope cannot fit; it does not silently sample
+to fit. Narrow the scope or increase the budgets. Legacy `capture_names` and
+`view` settings are rejected; replace them with command selectors. Changing scope
+does not reload the model.
 
-A command exiting normally leaves the engine resident; no open terminal is
-required. Concurrent evaluations are refused rather than queued. `stop` uses
-the recorded target and pinned control code without syncing or rebuilding,
-and confirms that the owned GPU process has disappeared.
-Stopping during setup cancels the waiting command and releases its command lock,
-so another setup can start without waiting for the setup timeout.
+Recordings contain BF16 inputs, initial mutable targets and frozen outputs,
+weight/view and shape/stride metadata, request and execution positions. Weights
+are rebound in the resident model by stable identity; GPU pointers are never
+persisted. Graph capture copies tensors at actual execution, then removes
+recording nodes and rebuilds clean graphs. Incompatible, corrupted or partial
+recordings are not reused.
+
+## Replay and candidates
+
+Replay is quick exploration: errors are reported, not strict acceptance gates.
+It checks selected real inputs against their frozen outputs and times fixed
+representatives of each distinct weight/view, token count, stride and epilogue.
+It reports output error statistics even when numerical values differ and still
+runs timing. Execution failures remain failures. Raw samples and numerical
+results are retained. A completed exploratory replay does not approve numerical
+changes for shipping.
+
+Inputs stay on the GPU across timing repetitions. Mutable outputs and workspace
+are restored outside CUDA event timing. Transfer, file I/O, recording and reload
+costs are separate from operator samples. Representatives are selected by input
+identity, never by a candidate's performance. Local cache conditions differ from
+full forward; aggregate replay times are not full-model latency estimates.
+
+`--candidate current` builds the synchronized source. `builtin` means the pinned
+session baseline. `replay --save-as NAME` keeps the immutable compiled candidate
+and its identity under a name. `candidates` lists saved candidates.
+`compare --baseline NAME --candidate current` runs both candidates against the
+same selected records and reports timing ratios and errors. Compare uses fresh
+measurements; old setup timing is not its control. Keep small speedup claims
+proportional to sample variability.
+
+Compare alternates baseline/candidate order across pairs. `--samples` selects
+the number of pairs; `--warmup` selects warmup executions. Both flags also
+override configured repetition counts on replay, forward and profile; warmup
+may be zero and samples must be positive. Use
+`compare --baseline before --candidate current --forward` for paired full-model
+feedback on the fixed request, or add `--full` for all requests. Operator/token
+selectors apply to operator comparisons and cannot be combined with `--forward`.
+
+The builder caches CUDA objects by source, transitive headers, toolchain and
+flags. T=8 MLP is a separate compilation unit, so editing it reuses generic
+decode/prefill objects. Candidate libraries stay immutable. Results include
+candidate identity, cache hits and compile/link costs.
+
+## Full-model feedback
+
+`forward` runs the fixed request from original prepared inputs, through natural
+EOS or the original cap, using candidate-generated activations, state and tokens.
+It reports engine prefill/decode timing and output differences. A quick run uses
+one request and one sample. `forward --full` uses all three requests, configured
+warmups/samples and fresh baseline controls. The fixtures retain tools and
+history, normalization, artifact template/tokenizer, primary EOS, reasoning-close
+behavior, greedy sampling and the 8,192-token cap; generated tools do not execute.
+
+These are engine measurements, excluding HTTP and scheduler work. Do not compare
+them directly with historical service TPS. Use the service workflow for service
+acceptance and independent references for arithmetic changes.
+
+## Operator profiling
+
+`profile --candidate current --operator layer.0.down --tokens-per-call 8` uses
+Nsight Systems' CUDA kernel timeline. The remote `nsys` executable must be
+available when setup launches the engine. If unavailable, ordinary lab work
+still functions and profile reports the missing prerequisite. Install/configure
+Nsight and restart the session to enable it. Missing tool support, collection or
+export failure and empty kernel traces are reported as failures.
+
+A profile-capable engine starts under Nsight injection. Collection starts only
+for the requested replay; setup/model loading and lazy recording are excluded.
+The same resident weights, selected recorded inputs and candidate function table
+are used. Warmup is outside collection. No second inference engine or model copy
+is started. Injection can itself affect ordinary timing; compare like sessions
+and report whether Nsight was active.
+
+Results retain the `.nsys-rep`, SQLite export and machine-readable timeline.
+The summary groups kernel names with counts and duration statistics. Per-device
+kernel span runs from the first captured kernel start to the last kernel end;
+busy time is the union of kernel intervals, gap time is span minus that union,
+and overlap excess is summed kernel durations minus the union. Overlap excess
+counts concurrency with multiplicity. Gaps can include copies, synchronization
+and host work; they do not identify a cause. CUDA event replay samples provide
+operator timings separately. Summing kernel durations is never operator wall
+time. The captured envelope includes replay setup/restoration kernels as well
+as the measured launches; inspect the timeline and counts when interpreting it.
+
+Nsight Compute memory/occupancy counters are not collected by this command.
+Profiler timings include instrumentation overhead and are diagnostic evidence;
+use replay/compare for latency measurements.
 
 ## Source, baseline and recovery
 
 Hot loading supports `trellis_linear.cu`, `trellis_linear_decode.cu`,
 `trellis_linear_prefill.cu`, `trellis_linear_mlp_t8.cu`,
 `trellis_linear_internal.cuh`, `trellis_decode.cuh` and
-`trellis_decode_helpers.cuh` in `kernel/src/`.
-Other runtime/build/ABI changes require a new baseline:
+`trellis_decode_helpers.cuh` in `kernel/src/`. Other runtime/build/ABI changes
+require a new baseline:
 
 ```sh
 python3 scripts/lab.py stop
 python3 scripts/lab.py setup --new-baseline
 ```
 
-Repeating setup for a matching live session reports its state and keeps its
-baseline. Recovery also preserves the baseline. To change the
-configuration, stop first and provide the new `--config` with `--new-baseline`.
+Repeated setup for a matching live session reports its state and preserves its
+baseline. Recovery also preserves the pinned baseline. To change configuration,
+stop first and provide the new `--config` with `--new-baseline`.
 
-Sync failure stops the command before measurement. Compilation or candidate
-compatibility checks can fail without invalidating the baseline. Numerical
-failure restores baseline and records the rejected case. `timeout_s` bounds
-the entire accepted evaluation, including compilation and all its samples;
-`setup_timeout_s` bounds setup. CUDA failure, timeout, malformed or out-of-order
-engine replies, or failed restoration end the session. A lost reply does not trigger a retry; inspect
-the saved result and logs.
+Ordinary commands restore builtin code and clean graphs. Numerical differences
+are recorded. Sync/build/admission failures do not measure stale code. CUDA
+failure, timeout, invalid engine replies or failed restoration end the session.
+`timeout_s` bounds an accepted evaluation and `setup_timeout_s` bounds setup.
+Lost replies are not retried; inspect saved results and logs.
 
-Local control receipts and full returned results live under `.scratch/lab/`.
-Remote session directories retain their own `session.json`, settings, prepared
-inputs, engine JSONL/stderr, source copies, build logs and per-operation results,
-after the session ends. Baseline metadata keeps the source revision and patch. Reports separate client preflight/sync/remote
-round-trip time from owner build/reload/measurement time. CLI output is a
-compact summary; retain the linked full result for analysis. Do not delete the
-control receipts while a session is running.
+A command returning leaves the engine resident. Concurrent evaluations are
+refused. `stop` uses recorded ownership and pinned control code, without sync or
+rebuild, and confirms the GPU process has disappeared. It can interrupt setup or
+evaluation. Results, recordings and caches survive stopping.
 
-## Corpus and measurement semantics
-
-The inputs come from the frozen Astropy, Django and SymPy conversations and
-tools in `crates/bench/fixtures/coding_agent/`. The offline preparer reuses
-instruction/history and tool-default normalization, the artifact chat template
-and tokenizer. Generation uses the primary EOS, reasoning-close behavior,
-greedy sampling and the benchmark's 8,192-token maximum; no tools execute.
-
-Use `diagnostic_output_tokens` to shorten functional checks. These truncated
-runs cannot establish full-workload performance.
-
-A corpus consists of `manifest.json`, `records.jsonl` and `data.bin`. It stores
-BF16 call inputs, initial targets and reference outputs plus weight/view,
-shape/stride, request/phase/position metadata. Weights are rebound by stable
-logical name and view offsets in the current model; GPU pointers are never
-persisted. Model/baseline/prepared-input/settings/hardware/scope identities and
-file hashes are checked at setup. Missing, incompatible or corrupted data are
-not reused. Partial recording directories are not complete corpora.
-
-Recording graphs copy actual executed tensors; host calls at graph-construction
-time are not counted as executions. After recording, the engine destroys those
-graphs and captures clean ones before measuring. A separate clean run checks
-that recording did not change the generated trajectory.
-
-The default gate requires exact outputs and finite values. Arithmetic
-changes that alter output bits require a separately justified correctness check.
-Local replay has different cache conditions from complete forward; report its coverage and use full forward for whole-model conclusions.
-
-These are engine timings, excluding HTTP and scheduler work. Do not compare
-them directly with historical service TPS. Use the service workflow for
-acceptance measurements.
+Local receipts and returned results live under `.scratch/lab/`. Remote session
+directories retain settings, inputs, engine logs, source/build identity and
+operation results. Reports separate client preflight/sync/round-trip from owner
+build/reload/recording/measurement. Keep the linked full results and do not delete
+control receipts while the session runs.
 
 ## Development checks
 
-The workspace and Python suites check CPU behavior. The opt-in
-end-to-end regression uses the real four-command interface and the single GPU:
+CPU suites check orchestration and exported-timeline arithmetic. The opt-in real
+GPU regression runs through the public commands:
 
 ```sh
 IGNIS_LAB_E2E_CONFIG="$PWD/.scratch/lab-settings.json" \
   python3 -m unittest discover -s tests -p test_lab_gpu.py
 ```
 
-The test temporarily edits a supported CUDA file to check candidate identity,
-compilation failure and incorrect outputs. It restores the file in `finally`
-and stops the session. Run with no other writer or GPU workload.
-A deliberately short diagnostic configuration is suitable for that functional
-check and must not be reported as performance evidence.
+The regression edits supported CUDA sources, restores them in `finally` and
+stops its session. Run without another writer or GPU workload. A short diagnostic
+configuration is suitable for functionality, not performance evidence. Before
+launching any GPU check, run `make gpu-status` through the remote entry point.
 
-The native `lab_capture_gpu` and `trellis_reload_gpu` ignored tests cover
+Native `lab_capture_gpu` and `trellis_reload_gpu` ignored tests cover
 recording/clean-graph parity, padded output, repeated ADD restoration, invalid
-views, actual plugin use and rollback. Run them on an exclusive card with the
-artifact and the test-only fault libraries described by their test headers.
-The normal GPU profile covers the unchanged serving path; see
-[testing](../../agents/testing.md).
+views, plugin use and rollback. Use the artifact and fault libraries documented
+in their headers. See [testing](../../agents/testing.md) for required checks.

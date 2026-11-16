@@ -94,7 +94,48 @@ fn recorded_calls_replay_with_padding_add_and_replaced_code() {
         assert_eq!(every["executions_checked"],2);
         assert_eq!(lab_trace::replay(&mut model,&zeros,&probe,2,3).unwrap()["passed"],false,
             "default regression API must check every execution");
+        let exploration=lab_trace::replay_with_check(&mut model,&zeros,&probe,2,3,
+            lab_trace::ReplayCheck::Exploration).unwrap();
+        assert_eq!(exploration["completed"],true);
+        assert_eq!(exploration["executions_checked"],5,"exploration stopped on mode {mode}");
+        assert_eq!(exploration["mismatches"],4);
+        assert!(exploration["samples_ms"].as_array().unwrap().iter().all(|t|t.as_f64().unwrap()>0.0));
+        let elements=probe["tokens"].as_u64().unwrap()*probe["weight"]["out"].as_u64().unwrap();
+        let d=&exploration["diagnostics"];
+        assert_eq!(d["total_elements"],elements*5);
+        assert_eq!(d["actual_inf"],if mode==8 {4}else{0});
+        assert_eq!(d["actual_nan"],0);
+        assert_eq!(d["finite_elements"],elements*5-if mode==8 {4}else{0});
+        assert_eq!(d["max_abs_error"],if mode==7 {1.0}else{0.0});
+        if mode==7 {assert!(d["relative_l2"].is_null());}
         unsafe{kernel_lab::reload(&mut model,&mut pool,None)}.unwrap();
     }
+    // Nonfinite references are counted explicitly and excluded from both norms.
+    unsafe{kernel_lab::reload(&mut model,&mut pool,Some(&zero))}.unwrap();
+    let mut synthetic=std::fs::read(&zeros).unwrap();
+    let reference=(probe["x_bytes"].as_u64().unwrap()+probe["y_bytes"].as_u64().unwrap()) as usize;
+    for (i,bits) in [0x3f80u16,0xc000,0x7fc0,0x7f80].iter().enumerate() {
+        synthetic[reference+2*i..reference+2*i+2].copy_from_slice(&bits.to_le_bytes());
+    }
+    std::fs::write(&zeros,synthetic).unwrap();
+    let result=lab_trace::replay_with_check(&mut model,&zeros,&probe,1,1,lab_trace::ReplayCheck::Exploration).unwrap();
+    let d=&result["diagnostics"];
+    assert_eq!(d["mismatches"],8);
+    assert_eq!(d["reference_nan"],2);assert_eq!(d["reference_inf"],2);
+    assert_eq!(d["actual_nan"],0);assert_eq!(d["actual_inf"],0);
+    assert_eq!(d["max_abs_error"],2.0);assert_eq!(d["relative_l2"],1.0);
+    unsafe{kernel_lab::reload(&mut model,&mut pool,None)}.unwrap();
+    // Filtering happens before pinned allocation or copies for both graph and eager calls.
+    let filtered=dir.join("filtered");std::fs::create_dir(&filtered).unwrap();
+    assert!(lab_trace::start_filtered(&mut model,&mut pool,&filtered,1<<30,1<<30,selection,&[0]).is_err());
+    assert_eq!(lab_trace::minimum_filtered(&model,selection,4,1,&[4]).unwrap(),0);
+    lab_trace::start_filtered(&mut model,&mut pool,&filtered,1<<30,1<<30,selection,&[4]).unwrap();
+    assert_eq!(observe(&model,&pool),expected);
+    lab_trace::stop(&mut model,&mut pool).unwrap();
+    let filtered_records:Vec<Value>=std::fs::read_to_string(filtered.join("records.jsonl")).unwrap().lines()
+        .map(|l|serde_json::from_str(l).unwrap()).collect();
+    assert!(!filtered_records.is_empty());
+    assert!(filtered_records.iter().all(|r|r["tokens"]==4));
+    assert!(filtered_records.iter().any(|r|r["weight"]["name"]=="layer.0.gate"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
