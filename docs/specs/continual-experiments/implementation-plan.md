@@ -41,7 +41,13 @@ validation catches accidental incompatibility, not malicious code.
    outside collection; collect replay under CUDA profiler start/stop, stop and
    export, then parse kernel intervals. Retain raw report, SQLite, replay samples
    and machine timeline. Missing tools or empty traces fail explicitly.
-5. Update all public command help and user docs around quick exploration,
+5. Add `profile --forward` using original candidate-generated requests without
+   a corpus or mandatory builtin control. Recapture candidate graphs once within
+   the bounded capture under setup annotations, then collect actual samples.
+   Join explicit runtime/NVTX and graph-node source/clone provenance; report
+   phase/round/layer/operator instances, separate setup/unplaced work and
+   coverage. Repeated layers aggregate per occurrence, never across round gaps.
+6. Update all public command help and user docs around quick exploration,
    dynamic selection, candidate comparisons, profiler overhead and correctness
    boundaries. Remove the separate proposed workflow document.
 
@@ -51,7 +57,10 @@ CPU tests must cover deterministic scope identity/defaults, shard reuse and
 rejection of corrupt/partial data, immutable candidate lookup, source/busy checks,
 recovery, default direct launch even with Nsight installed, explicit enabled
 launch, stopped mode toggles preserving identities, rejected irrelevant flags,
-and profiler prerequisites, cleanup and interval arithmetic. Mocked
+and profiler prerequisites, cleanup and interval arithmetic. Forward attribution
+fixtures cover eager scopes, registered NVTX text, graph clone ancestry, repeated
+rounds/chunks/samples, process/context correlation collisions, missing provenance
+and exclusion of setup recapture from request metrics. Mocked
 profiler tests cannot establish GPU collection or timing.
 
 Before any GPU launch, use `make gpu-status` through `scripts/remote.py`. On an

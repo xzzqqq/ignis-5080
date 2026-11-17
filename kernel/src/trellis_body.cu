@@ -1,6 +1,7 @@
 // ignis kernel leaf - the 27B's trellis body in its layer programs -- OURS
 // (spec 27b-16gb/05a, GitHub #339). See kernel/src/trellis_body.h.
 
+#include "lab_profile.h"
 #include "trellis_body.h"
 
 #include "model_internal.h"
@@ -101,16 +102,17 @@ void output_and_mlp(const ignis_model &model, const TrellisTail &tail, const nin
                     const ninfer::Tensor &post_norm, ninfer::Tensor &residual, ninfer::Tensor &post,
                     ninfer::Tensor &fused, cudaStream_t stream) {
   const auto hidden = static_cast<uint32_t>(model.hidden);
-  linear(model, tail.output, mixed, residual.data, hidden, IGNIS_TRELLIS_ADD, stream);
-  ninfer::ops::rmsnorm(residual, post_norm, model.rms_norm_eps, /*unit_offset=*/true, post, stream);
-  swiglu(model, tail.gate_proj, tail.up_proj, post, fused, stream);
-  linear(model, tail.down, fused, residual.data, hidden, IGNIS_TRELLIS_ADD, stream);
+  IGNIS_PROFILE_OP("linear.output", linear(model, tail.output, mixed, residual.data, hidden, IGNIS_TRELLIS_ADD, stream));
+  IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(residual, post_norm, model.rms_norm_eps, /*unit_offset=*/true, post, stream));
+  IGNIS_PROFILE_OP("mlp.swiglu", swiglu(model, tail.gate_proj, tail.up_proj, post, fused, stream));
+  IGNIS_PROFILE_OP("linear.down", linear(model, tail.down, fused, residual.data, hidden, IGNIS_TRELLIS_ADD, stream));
 }
 
 void output_head(const ignis_model &model, const ninfer::Tensor &normalized, ninfer::Tensor &logits,
                  cudaStream_t stream) {
+  ignis::LabProfileRange profile_head("op","output_head");
   if (!model.is_trellis_body) {
-    ninfer::ops::linear(normalized, model.output_head, logits, stream);
+    IGNIS_PROFILE_OP("linear.output_head", ninfer::ops::linear(normalized, model.output_head, logits, stream));
     return;
   }
   if (logits.dtype != ninfer::DType::BF16 || logits.ne[0] != static_cast<std::int32_t>(model.trellis_head.out) ||

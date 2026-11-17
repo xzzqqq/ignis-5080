@@ -12,6 +12,7 @@
 // launches, and reads results back; at a width with no ready graph it calls
 // the same traversal directly instead.
 
+#include "lab_profile.h"
 #include "ignis_step.h"
 
 #include "dflash2_drafter.h"
@@ -72,6 +73,7 @@ void set_error(std::string message) {
 // (`ignis_program_decode`, kernel/src/step.cu).
 int32_t ignis_decode_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t width,
                                      LinearPolicyMode mode) {
+  ignis::LabProfileRange profile_stage("stage","decode");
   if (model == nullptr || pool == nullptr) {
     set_error("ignis_decode_graph: null argument");
     return -1;
@@ -93,7 +95,7 @@ int32_t ignis_decode_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, u
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {hidden, batch, 1, 1});
     ninfer::Tensor right =
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {hidden, batch, 1, 1});
-    ninfer::ops::embedding(ids, model->token_embedding, left, model->stream);
+    IGNIS_PROFILE_OP("embedding", ninfer::ops::embedding(ids, model->token_embedding, left, model->stream));
 
     for (uint32_t layer = 0; layer < model->layers.size(); ++layer) {
       const int32_t rc = model->layers[layer].kind == IGNIS_LAYER_GQA
@@ -114,8 +116,8 @@ int32_t ignis_decode_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, u
                                      {hidden, 1, 1, 1});
     ninfer::Tensor normalized =
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {hidden, batch, 1, 1});
-    ninfer::ops::rmsnorm(left, norm_weight, model->rms_norm_eps, /*unit_offset=*/true, normalized,
-                         model->stream);
+    IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(left, norm_weight, model->rms_norm_eps, /*unit_offset=*/true, normalized,
+                         model->stream));
     // The output head writes the round's logits directly in the sampler's
     // own `[vocab, batch]` column layout, so no per-lane column copy is
     // needed at all any more.
@@ -142,6 +144,7 @@ int32_t ignis_decode_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, u
 // position alone -- G3's isolation property, kept by construction.
 int32_t ignis_verify_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t width,
                                      LinearPolicyMode mode) {
+  ignis::LabProfileRange profile_stage("stage","verify");
   if (model == nullptr || pool == nullptr) {
     set_error("ignis_verify_graph: null argument");
     return -1;
@@ -179,15 +182,15 @@ int32_t ignis_verify_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, u
     if (verify.drafter_scratch != nullptr) {
       ignis_dflash2_propose(model, pool, width);
     }
-    ninfer::ops::speculative_prepare_verify_inputs(anchors, drafts, base_positions, extents,
-                                                   verify_ids, positions, model->stream);
+    IGNIS_PROFILE_OP("speculative_prepare_verify_inputs", ninfer::ops::speculative_prepare_verify_inputs(anchors, drafts, base_positions, extents,
+                                                   verify_ids, positions, model->stream));
 
     const ninfer::Tensor ids(verify.verify_ids->p, ninfer::DType::I32, {columns, 1, 1, 1});
     ninfer::Tensor left =
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
     ninfer::Tensor right =
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
-    ninfer::ops::embedding(ids, model->token_embedding, left, model->stream);
+    IGNIS_PROFILE_OP("embedding", ninfer::ops::embedding(ids, model->token_embedding, left, model->stream));
 
     for (uint32_t layer = 0; layer < model->layers.size(); ++layer) {
       const int32_t rc = model->layers[layer].kind == IGNIS_LAYER_GQA
@@ -237,12 +240,12 @@ int32_t ignis_verify_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, u
                                      {hidden, 1, 1, 1});
     ninfer::Tensor normalized =
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
-    ninfer::ops::rmsnorm(left, norm_weight, model->rms_norm_eps, /*unit_offset=*/true, normalized,
-                         model->stream);
+    IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(left, norm_weight, model->rms_norm_eps, /*unit_offset=*/true, normalized,
+                         model->stream));
     ninfer::Tensor logits(verify.logits->p, ninfer::DType::BF16, {vocab, columns, 1, 1});
     ignis::trellis_body::output_head(*model, normalized, logits, model->stream);
     ninfer::Tensor target_tokens(verify.target_tokens->p, ninfer::DType::I32, {columns, 1, 1, 1});
-    ninfer::ops::argmax(logits, target_tokens, vocab, model->stream);
+    IGNIS_PROFILE_OP("argmax", ninfer::ops::argmax(logits, target_tokens, vocab, model->stream));
 
     // The vendored accept: the greedy branch keeps the longest draft prefix
     // the target argmax agrees with and takes the target argmax at the
@@ -260,11 +263,11 @@ int32_t ignis_verify_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, u
     ninfer::Tensor licensed_counts(verify.licensed_counts->p, ninfer::DType::I32, {batch, 1, 1, 1});
     ninfer::Tensor accepted(verify.accepted->p, ninfer::DType::I32, {batch, 1, 1, 1});
     ninfer::DeviceArena::Scope accept_scope = verify.accept_workspace->scope();
-    ninfer::ops::speculative_accept_greedy_drafts(
+    IGNIS_PROFILE_OP("speculative_accept_greedy_drafts", ninfer::ops::speculative_accept_greedy_drafts(
         targets_rows, logits_rows, drafts, extents, lengths, anchors_out, licensed_tokens,
         licensed_counts, accepted, vocab,
         static_cast<const ninfer::ops::SamplingConfig *>(model->sampling_decode_configs->p),
-        *verify.accept_workspace, model->stream);
+        *verify.accept_workspace, model->stream));
     return 0;
   } catch (const std::exception &e) {
     set_error("ignis_verify_graph: width " + std::to_string(width) + ": " + e.what());
@@ -342,11 +345,11 @@ int32_t capture_decode_graph_width(ignis_model *model, ignis_seq_pool *pool, uin
                                           {batch, 1, 1, 1});
     try {
       ninfer::DeviceArena::Scope workspace_scope = model->sampling_workspace->scope();
-      ninfer::ops::sample(
+      IGNIS_PROFILE_OP("sample", ninfer::ops::sample(
           logits_tensor, out_tensor, vocab,
           static_cast<const ninfer::ops::SamplingConfig *>(model->sampling_decode_configs->p),
           positions_tensor, ninfer::ops::kSamplePurposeDecode, *model->sampling_workspace,
-          model->stream);
+          model->stream));
     } catch (const std::exception &e) {
       set_error(std::string("ignis_decode_graph_capture: sample() failed: ") + e.what());
       ok = false;

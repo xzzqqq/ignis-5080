@@ -154,7 +154,7 @@ its current mode. Explicit `--enable-profiling` on a live disabled session asks
 you to stop first. Setup/evaluation results report `profiling_enabled`.
 
 A profile-capable engine starts under Nsight injection. Collection starts only
-for the requested replay; setup/model loading and lazy recording are excluded.
+for the requested workload; model loading and lazy recording are excluded.
 The same resident weights, selected recorded inputs and candidate function table
 are used. Warmup is outside collection. No second inference engine or model copy
 is started. Injection can itself affect ordinary timing; compare like sessions
@@ -170,6 +170,61 @@ and host work; they do not identify a cause. CUDA event replay samples provide
 operator timings separately. Summing kernel durations is never operator wall
 time. The captured envelope includes replay setup/restoration kernels as well
 as the measured launches; inspect the timeline and counts when interpreting it.
+
+### Full-forward profiling
+
+Use `profile --forward --candidate current` for the fixed request through the
+complete model. It requires a profiling-enabled session and accepts `--warmup`
+and `--samples`, defaulting to zero and one respectively. Operator/token selectors
+and `--full` do not apply. The request uses its own activations, recurrent/KV
+state and generated tokens; profiling does not record or consume an operator
+corpus. It does not run an extra baseline request. When an existing builtin
+reference is available, results include output differences; otherwise
+`reference_available` is false and differences are unavailable. A missing
+reference does not mean outputs match.
+
+Forward capture includes one preparation step: recapture the selected
+candidate's graphs under explicit setup annotations. This makes graph source
+layer/operator ranges available to Nsight before actual samples run. It retains
+the same resident model and PID. Preparation kernels remain in the raw trace
+as setup work and are excluded from request summaries. Instrumented benchmark
+prefill/decode timing is reported separately from recapture and collection costs.
+
+GPU attribution uses explicit versioned Ignis NVTX annotations. Eager kernels
+link to their issuing CUDA runtime API and enclosing sample/phase/layer/operator
+ranges. Graph kernels link through recorded graph-node creation/clone ancestry
+to source layer/operator ranges, and through their actual launch to the current
+sample, phase and round. Correlations are qualified by process; context is used
+where available. Ambiguous/missing links stay unclassified. Kernel names and
+execution order do not establish layer identity.
+
+In the saved `profile-timeline.json` artifact, `attribution.instances` contains
+phase, layer and operator occurrences with
+sample, phase, decode round/position, stage, layer index/type and operator when
+known. Draft layers use their own type; output-head work has an explicit
+nonlayer bin. Other unannotated work is visible as unclassified. A repeated
+prefill chunk or decode graph launch creates a separate layer occurrence.
+`aggregates` reports counts and sum/mean/max of those occurrence metrics; it
+does not take one layer's first kernel in the first round and last kernel in
+the final round as a single layer latency. Samples remain separate.
+
+For each occurrence, `span_us` is first kernel start to last kernel end,
+`kernel_total_us` sums durations, `busy_us` unions intervals, `gap_us` is span
+minus busy time, and `overlap_excess_us` is total minus busy time. These are GPU
+kernel intervals, rather than CPU NVTX range durations. Phase, layer and operator
+levels overlap and must not be added together. Sum of occurrence spans and sum
+of kernel durations are not request wall time.
+
+`coverage` counts request kernels attributed at each level.
+`capture_coverage` separately counts request, setup and unplaced kernels across
+the whole capture. Kernels without an explicit request-sample link remain
+unplaced rather than being guessed into a sample. Top-level forward kernel
+summaries cover the explicitly linked request subset; check these counts before
+claiming complete coverage. The machine-readable timeline retains every captured
+kernel and its role/link status. Command results return aggregates, coverage and
+instance/timeline counts; the full instance and per-kernel arrays stay in the
+artifact so long requests do not transfer the entire trace over the control
+channel. CLI lists are capped; the artifact retains all occurrences and aggregates.
 
 Nsight Compute memory/occupancy counters are not collected by this command.
 Profiler timings include instrumentation overhead and are diagnostic evidence;

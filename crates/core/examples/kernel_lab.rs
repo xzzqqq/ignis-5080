@@ -75,6 +75,7 @@ fn main() -> Result<()> {
     let mut generation = 0u64;
     let mut recording = false;
     emit(json!({"event":"ready", "pid":std::process::id(), "generation":generation, "settings":config,
+        "profile_nvtx_status":ignis_core::lab_trace::profile_status(),
         "startup_s":began.elapsed().as_secs_f64(), "phases_s":{"open_bind_frontend":open_s,"cuda_context":context_s,
         "weight_materialize":materialize_s,"model_workspace":model_s,"pool":pool_s,"graph_capture":capture_s}}));
     for line in io::stdin().lock().lines() {
@@ -93,6 +94,9 @@ fn main() -> Result<()> {
                         if v["sha256"].as_str() != Some(&sha) { return Err("candidate sha256 mismatch".into()); }
                         (Some(Path::new(path)), Some(sha))
                     };
+                    let _recapture=if v["profile_recapture"].as_bool().unwrap_or(false) {
+                        Some(ignis_core::lab_trace::profile_range("ignis.profile.v1/phase=setup/stage=recapture")?)
+                    } else {None};
                     unsafe { kernel_lab::reload(&mut model, &mut pool, candidate)?; }
                     generation += 1;
                     Ok(json!({"candidate":path,"sha256":sha}))
@@ -135,6 +139,9 @@ fn main() -> Result<()> {
                         &v["record"],integer(&v,"warmup",1)?,integer(&v,"samples",3)?,check)?)
                 },
                 "benchmark" => {
+                    let _sample=if v.get("profile_sample").is_some() {
+                        Some(ignis_core::lab_trace::profile_range(&format!("ignis.profile.v1/sample={}",integer(&v,"profile_sample",0)?))?)
+                    } else {None};
                     let mut result = benchmark::run(&model, &pool, &settings, &v["case"], &mut |m,_,_| {
                         ignis_core::lab_trace::flush(m)?;Ok(())
                     })?;

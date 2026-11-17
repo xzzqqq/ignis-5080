@@ -907,3 +907,8 @@ add_executable(ignis_kernel_trellis_body_test test_trellis_body.cu)
 target_include_directories(ignis_kernel_trellis_body_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(ignis_kernel_trellis_body_test PRIVATE ignis_kernel ignis_vendor)
 add_test(NAME ignis_kernel_trellis_body_test COMMAND ignis_kernel_trellis_body_test)
+
+# CPU-only guard semantics; does not need a CUDA context or link the leaf.
+add_executable(ignis_lab_profile_test test_lab_profile.cpp)
+target_include_directories(ignis_lab_profile_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+add_test(NAME ignis_lab_profile_test COMMAND ignis_lab_profile_test)

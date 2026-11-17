@@ -38,6 +38,9 @@ unsafe extern "C" {
     fn ignis_lab_capture_stop(m:*mut IgnisModel,p:*mut IgnisSeqPool)->i32;
     fn ignis_lab_trace_context(m:*mut IgnisModel,request:u32,phase:u32,position:u64)->i32;
     fn ignis_lab_trace_flush(m:*mut IgnisModel)->i32;
+    fn ignis_lab_profile_status()->i32;
+    fn ignis_lab_profile_push(label:*const c_char)->i32;
+    fn ignis_lab_profile_pop();
     fn ignis_lab_profiler_start()->i32;
     fn ignis_lab_profiler_stop()->i32;
     fn ignis_lab_capture_minimum_filtered(m:*mut IgnisModel,names:*const c_char,tokens:u64,requests:u64,
@@ -66,6 +69,22 @@ pub fn context(model:&Model,request:u32,phase:u32,position:u64)->Result<(),Strin
     checked(unsafe{ignis_lab_trace_context(model.handle(),request,phase,position)})
 }
 pub fn flush(model:&Model)->Result<(),String>{checked(unsafe{ignis_lab_trace_flush(model.handle())})}
+/// Semantic range labels are submission identities, never GPU durations.
+/// The guard stays on its creating thread and closes on early return.
+pub struct ProfileRange {active:bool,_thread:std::marker::PhantomData<*mut ()>}
+impl Drop for ProfileRange {
+    fn drop(&mut self) {if self.active {unsafe{ignis_lab_profile_pop()};}}
+}
+pub fn profile_range(label:&str)->Result<ProfileRange,String>{
+    let status=unsafe{ignis_lab_profile_status()};
+    if status<0 {return Err("NVTX3 headers unavailable at engine build; set NVTX3_INCLUDE_DIR and rebuild".into());}
+    let active=if status==0 {false} else {
+        let label=CString::new(label).map_err(|e|e.to_string())?;
+        unsafe{ignis_lab_profile_push(label.as_ptr())!=0}
+    };
+    Ok(ProfileRange{active,_thread:std::marker::PhantomData})
+}
+pub fn profile_status()->i32 {unsafe{ignis_lab_profile_status()}}
 /// Bound an external Nsight Systems capture around selected replay commands.
 pub fn profiler_start()->Result<(),String>{checked(unsafe{ignis_lab_profiler_start()})}
 pub fn profiler_stop()->Result<(),String>{checked(unsafe{ignis_lab_profiler_stop()})}

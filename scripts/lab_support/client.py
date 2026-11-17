@@ -99,7 +99,8 @@ def forward_summary(value):
             stop_tokens=dict(Counter(str(r.get('stop_token')) for r in rows)),
             differing_samples=len(differences),difference_counts=dict(fields),
             difference_examples=[difference_summary(d) for d in differences[:3]]))
-    return dict(passed=value.get('passed'),full=value.get('full'),numerical_match=value.get('numerical_match'),cases=cases)
+    return dict(passed=value.get('passed'),full=value.get('full'),numerical_match=value.get('numerical_match'),
+        reference_available=value.get('reference_available',True),cases=cases)
 
 
 def replay_summary(value):
@@ -189,14 +190,23 @@ def summary(value, local_result=None):
         if field in value:result[field]=forward_summary(value[field])
     if 'compare' in value:result['compare']=compare_summary(value['compare'])
     if 'profile' in value:
-        result['profile']={k:v for k,v in value['profile'].items() if k not in ('kernels','candidate')}
+        result['profile']={k:v for k,v in value['profile'].items() if k not in ('kernels','candidate','forward','attribution')}
         result['profile']['kernels']=value['profile'].get('kernels',[])[:20]
         result['profile']['kernels_shown']=len(result['profile']['kernels'])
+        if 'forward' in value['profile']:
+            result['profile']['forward']=forward_summary(value['profile']['forward'])
+        if 'attribution' in value['profile']:
+            attribution=value['profile']['attribution']
+            result['profile']['attribution']={k:v for k,v in attribution.items() if k not in ('timeline','instances','aggregates')}
+            for field,limit in (('instances',5),('aggregates',20)):
+                if field not in attribution:continue
+                result['profile']['attribution'][field+'_count']=len(attribution.get(field,[]))
+                result['profile']['attribution'][field]=attribution.get(field,[])[:limit]
     return result
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description='Resident Kernel Lab: setup fixes the model/settings; replay explores numerical differences and timing; forward measures model execution; compare alternates paired measurements; candidates lists saved snapshots; profile reports operator CUDA kernels; stop releases the GPU.')
+    p = argparse.ArgumentParser(description='Resident Kernel Lab: setup fixes the model/settings; replay explores numerical differences and timing; forward measures model execution; compare alternates paired measurements; candidates lists saved snapshots; profile reports operator or full-model CUDA execution; stop releases the GPU.')
     p.add_argument('action', choices=['setup', 'replay', 'forward', 'compare', 'candidates', 'profile', 'stop'], help='replay is quick exploration, not strict numerical acceptance; forward needs no replay or capture')
     p.add_argument('--config', type=Path, help='Fixed artifact/settings/resources JSON, setup only (required on first setup)')
     p.add_argument('--new-baseline', action='store_true', help='After stopping, rebuild the fixed host baseline (setup only)')
@@ -204,12 +214,12 @@ def main(argv=None):
     p.add_argument('--full',action='store_true',help='Evaluate all benchmark requests; forward also runs fresh builtin controls before and after')
     p.add_argument('--operator', action='append', default=[], dest='operators', help='Exact weight/operator name; repeat for several; omitted means all supported calls (replay/profile/compare without --forward)')
     p.add_argument('--tokens-per-call', type=int, action='append', default=[], help='Operator input token count, not generation length; repeat for several; omitted means every shape')
-    p.add_argument('--warmup', type=int, help='Warmup executions per measured call/request (0..10000), overrides setup default')
-    p.add_argument('--samples', type=int, help='Timed samples; compare alternates candidate order for this many pairs')
+    p.add_argument('--warmup', type=int, help='Warmup executions (0..10000); profile --forward defaults to 0, other modes use their usual defaults')
+    p.add_argument('--samples', type=int, help='Timed samples; profile --forward defaults to 1; compare alternates this many pairs')
     p.add_argument('--candidate', default='current', help='current freezes worktree kernels; otherwise a saved immutable name or builtin')
     p.add_argument('--baseline', default='builtin', help='Baseline snapshot name for paired compare (default builtin)')
     p.add_argument('--save-as', help='Save this replay candidate under an immutable name for this model/settings baseline')
-    p.add_argument('--forward', action='store_true', dest='compare_forward', help='Compare full-model requests instead of captured operator replay')
+    p.add_argument('--forward', action='store_true', dest='compare_forward', help='compare: pair full-model requests; profile: capture the fixed request prefill and natural generation without an operator recording')
     arguments=list(sys.argv[1:] if argv is None else argv)
     args = p.parse_args(arguments)
     supplied={a.split('=',1)[0] for a in arguments if a.startswith('--')}
@@ -218,17 +228,17 @@ def main(argv=None):
         '--operator':{'replay','profile','compare'}, '--tokens-per-call':{'replay','profile','compare'},
         '--warmup':{'replay','forward','compare','profile'}, '--samples':{'replay','forward','compare','profile'},
         '--candidate':{'replay','forward','compare','profile'}, '--baseline':{'compare'},
-        '--save-as':{'replay'}, '--forward':{'compare'}}
+        '--save-as':{'replay'}, '--forward':{'compare','profile'}}
     for option in supplied:
         if option in allowed and args.action not in allowed[option]:p.error(option+' does not apply to '+args.action)
     if args.action=='compare' and args.full and not args.compare_forward:p.error('--full requires compare --forward')
-    if args.compare_forward and (args.operators or args.tokens_per_call):p.error('--operator/--tokens-per-call do not apply to compare --forward')
+    if args.compare_forward and (args.operators or args.tokens_per_call):p.error('--operator/--tokens-per-call do not apply to '+args.action+' --forward')
     if args.warmup is not None and not 0 <= args.warmup <= 10000:p.error('--warmup must be 0..10000')
     if args.samples is not None and not 1 <= args.samples <= 10000:p.error('--samples must be 1..10000')
     if any(not n or ',' in n for n in args.operators):p.error('--operator requires one exact nonempty weight name per flag')
     if any(t < 1 for t in args.tokens_per_call):p.error('--tokens-per-call must be positive')
     if args.save_as and args.action != 'replay':p.error('--save-as requires replay')
-    if args.compare_forward and args.action != 'compare':p.error('--forward requires compare')
+    if args.compare_forward and args.action not in ('compare','profile'):p.error('--forward requires compare or profile')
     if args.full and args.action not in ('forward','compare'):p.error('--full requires forward')
     began=time.monotonic()
     local = ROOT / '.scratch/lab'
@@ -303,7 +313,8 @@ def main(argv=None):
                            new_baseline=args.new_baseline,operation=uuid.uuid4().hex,full=args.full,
                            operators=args.operators,tokens_per_call=args.tokens_per_call,
                            candidate=args.candidate,baseline=args.baseline,save_as=args.save_as,
-                           compare_forward=args.compare_forward)
+                           compare_forward=args.compare_forward and args.action=='compare',
+                           profile_forward=args.compare_forward and args.action=='profile')
             for name in ('warmup','samples'):
                 if getattr(args,name) is not None:payload[name]=getattr(args,name)
             if args.action == 'setup':

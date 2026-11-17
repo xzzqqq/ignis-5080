@@ -63,7 +63,18 @@ python3 scripts/lab.py profile --candidate current --operator layer.0.down --tok
 The profiling-enabled session uses Nsight Systems and retains the resident
 engine across commands. Setup and evaluation results report `profiling_enabled`.
 It reports kernel names, counts and durations, kernel span, gaps and
-overlap, with a timeline and raw report. Profiling adds instrumentation overhead;
+overlap, with a timeline and raw report. Add `--forward` to profile the fixed
+request through the whole model:
+
+```sh
+python3 scripts/lab.py profile --forward --candidate current
+```
+
+Forward profiling reports prefill/decode phases, individual rounds, layers and
+annotated operators. It uses the candidate's own activations and generation,
+without recording an operator corpus. The default is one request sample and
+no warmup. Coverage and unclassified work remain visible; inspect the linked
+artifact for the complete breakdown. Profiling adds instrumentation overhead;
 use replay/compare in a normal session for latency comparisons. Stop and run
 `setup` without the flag to return to normal operation. Existing baselines,
 recordings and named candidates are reused; no `--new-baseline` is needed. See the
