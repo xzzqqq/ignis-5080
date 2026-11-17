@@ -123,6 +123,72 @@ class LabTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):client.main(['setup','--new-baseline'])
                 run.assert_not_called()
 
+    def test_profiling_flag_only_applies_to_setup(self):
+        for action in ('replay','forward','compare','profile','candidates','stop'):
+            with self.subTest(action=action),patch.object(client,'probe') as probe:
+                with self.assertRaises(SystemExit) as error:client.main([action,'--enable-profiling'])
+                self.assertEqual(error.exception.code,2);probe.assert_not_called()
+
+    def test_live_setup_reports_current_mode_and_explicit_enable_needs_restart(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);receipt,_=self.fixture(root)
+            state=dict(owner='owner-a',status='ready',config_hash=common.key(receipt['config']),profiling_enabled=False)
+            with patch.object(client,'ROOT',root),patch.object(client,'probe',return_value=state),patch.object(client.subprocess,'run') as run:
+                with self.assertRaises(SystemExit):client.main(['setup','--enable-profiling'])
+                state['profiling_enabled']=True
+                client.main(['setup'])
+                client.main(['setup','--enable-profiling'])
+                run.assert_not_called()
+
+    def test_stopped_setup_mode_is_explicit_and_does_not_change_config(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);receipt,_=self.fixture(root)
+            state=dict(owner='owner-a',status='stopped',source={},profiling_enabled=True)
+            with patch.object(client,'ROOT',root),patch.object(client,'probe',return_value=state),patch.object(client,'source_identity',return_value={}),patch.object(client.subprocess,'run'),patch.object(client,'call',return_value={'status':'ready'}) as call:
+                for flags,enabled in ((['--enable-profiling'],True),([],False)):
+                    client.main(['setup',*flags])
+                    payload=call.call_args.args[2]
+                    self.assertIs(payload['profiling_enabled'],enabled)
+                    self.assertFalse(payload['new_baseline'])
+                    self.assertEqual(payload['config'],receipt['config'])
+                    self.assertEqual(common.read(root/'.scratch/lab/receipt.json')['config'],receipt['config'])
+
+    def test_missing_explicit_profiler_fails_before_heavy_setup(self):
+        payload=dict(config={'artifact':'/model','data_dir':'/data'},profiling_enabled=True)
+        with patch.object(host.shutil,'which',return_value=None),patch.object(host.subprocess,'check_output') as check:
+            with self.assertRaisesRegex(ValueError,'--enable-profiling requires'):
+                host.start(Path('/unused'),'owner',payload)
+            check.assert_not_called()
+
+    def test_setup_mode_controls_launch_without_invalidating_baseline_or_corpus(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);(root/'kernel').mkdir()
+            baseline=root/'baseline';baseline.mkdir()
+            for name in ('kernel_lab','lab_prepare'):(baseline/name).write_text('pinned '+name)
+            common.atomic(baseline/'complete.json',dict(source={},binaries={n:common.digest(baseline/n) for n in ('kernel_lab','lab_prepare')}))
+            artifact=root/'model';artifact.write_bytes(b'fixed model')
+            cfg=dict(artifact=str(artifact),data_dir=str(root/'data'))
+            corpora=[];names=[];launched=[]
+            def run(argv,log,*args,**kwargs):
+                self.assertNotIn('cargo',argv)
+                if argv[0]==str(baseline/'lab_prepare'):
+                    common.atomic(argv[2],dict(cases=[dict(id='astropy__astropy-12907',tokens=[1])]))
+            def session(*args,**kwargs):
+                launched.append(kwargs['profiler_session'])
+                return SimpleNamespace(process=SimpleNamespace(pid=123),engine_pid=123,ready={'pid':123},profiler_session=kwargs['profiler_session'])
+            for enabled in (False,True,False):
+                directory=root/('run-'+str(len(corpora)));directory.mkdir()
+                state=dict(config=cfg,directory=str(directory),baseline=str(baseline),source={},session='test',profiling_enabled=enabled)
+                service=host.Owner(root,state);service.publish=Mock()
+                with patch.object(host.shutil,'which',return_value='/bin/nsys'),patch.object(host,'run',side_effect=run),patch.object(host.subprocess,'check_output',side_effect=['','RTX 5080, uuid, driver']),patch.object(host,'Session',side_effect=session):
+                    service.setup()
+                corpora.append((service.corpus,service.corpus_identity));names.append(service.names_path())
+            self.assertEqual(launched,[None,'ignis-lab-test',None])
+            self.assertEqual(corpora[0],corpora[1]);self.assertEqual(corpora[1],corpora[2])
+            self.assertEqual(names[0],names[1]);self.assertEqual(names[1],names[2])
+
     def test_failed_restore_never_publishes_a_pass(self):
         from types import SimpleNamespace
         from unittest.mock import Mock

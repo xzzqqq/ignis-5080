@@ -31,8 +31,10 @@ def profile(owner, directory, payload, candidate):
     """Profile the already-loaded candidate without restarting the resident engine."""
     nsys = shutil.which('nsys')
     session = getattr(owner.engine, 'profiler_session', None)
-    if not nsys or not session:
-        raise ValueError('operator profiling requires nsys available when setup launches the engine; stop and setup after configuring Nsight Systems')
+    if not session:
+        raise ValueError('profiling is disabled; stop and setup --enable-profiling')
+    if not nsys:
+        raise ValueError('operator profiling requires Nsight Systems (nsys) in the remote PATH')
     groups = []
     for group in owner.selection:
         representatives = {}

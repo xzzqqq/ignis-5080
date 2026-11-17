@@ -70,6 +70,8 @@ class Owner(Iteration):
     def setup(self):
         cfg = self.config
         validate_config(cfg)
+        if self.state.get('profiling_enabled',False) and not shutil.which('nsys'):
+            raise ValueError('--enable-profiling requires Nsight Systems (nsys) in the remote PATH')
         if int(cfg.get('warmup',1))<1 or int(cfg.get('samples',3))<1:
             raise ValueError('warmup/samples must be positive')
         for k in ('artifact', 'data_dir'):
@@ -133,7 +135,7 @@ class Owner(Iteration):
             raise ValueError('lab requires exactly one RTX 5080')
         self.engine=Session(baseline/'kernel_lab',Path(cfg['artifact']),self.directory/'settings.json',
                             self.directory,float(cfg.get('setup_timeout_s',3600)),
-                            profiler_session='ignis-lab-'+self.state['session'] if shutil.which('nsys') else None)
+                            profiler_session='ignis-lab-'+self.state['session'] if self.state.get('profiling_enabled',False) else None)
         atomic(self.directory/'engine.identity.json',identity(getattr(self.engine,'engine_pid',self.engine.process.pid)))
         self.corpus_identity=dict(version=3,benchmark=selected,engine=base['binaries']['kernel_lab'],artifact=digest(cfg['artifact']),
             prepared=digest(prepared),settings=settings,machine=machine,
@@ -158,6 +160,10 @@ def relay_progress(path, offset):
 
 def start(root,owner,payload):
     cfg=payload['config'];validate_config(cfg)
+    profiling_enabled=payload.get('profiling_enabled',False)
+    if type(profiling_enabled) is not bool:raise ValueError('profiling_enabled must be a boolean')
+    if profiling_enabled and not shutil.which('nsys'):
+        raise ValueError('--enable-profiling requires Nsight Systems (nsys) in the remote PATH')
     linger=subprocess.check_output(['loginctl','show-user',str(os.getuid()),'--property=Linger','--value'],text=True).strip()
     if linger!='yes':raise ValueError('systemd user lingering is required; configure loginctl enable-linger before setup')
     directory=Path(cfg['data_dir'])/'sessions'/uuid.uuid4().hex
@@ -179,7 +185,8 @@ def start(root,owner,payload):
         socket_dir.mkdir(mode=0o700,parents=True,exist_ok=True)
         state=dict(root=str(root),owner=owner,session=session,status='starting',config=cfg,config_hash=key(cfg),
             source=payload['source'],directory=str(directory),control=str(runtime/'lab_support/host.py'),
-            socket=str(socket_dir/('ignis-lab-'+session[:16]+'.sock')),unit=unit,process=None)
+            socket=str(socket_dir/('ignis-lab-'+session[:16]+'.sock')),unit=unit,process=None,
+            profiling_enabled=profiling_enabled)
         if previous and not payload['new_baseline']:
             if previous['config_hash']!=key(cfg):raise ValueError('configuration change requires --new-baseline')
             if previous.get('baseline'):state['baseline']=previous['baseline'];state['source']=previous['source']

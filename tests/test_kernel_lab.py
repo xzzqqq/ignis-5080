@@ -52,6 +52,31 @@ class CandidateBuildTests(unittest.TestCase):
 
 
 class EngineProtocolTests(unittest.TestCase):
+    def test_plain_session_ignores_installed_nsight_and_uses_direct_pipes(self):
+        import os
+        import sys
+        import tempfile
+        from unittest.mock import patch
+        sys.path.insert(0,str(ROOT/'scripts'))
+        from kernel_lab import Session
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory);marker=base/'nsys-invoked';launcher=base/'nsys'
+            launcher.write_text('#!'+sys.executable+'\nfrom pathlib import Path\nPath('+repr(str(marker))+').touch()\nraise SystemExit(9)\n')
+            launcher.chmod(0o755)
+            engine=base/'engine.py'
+            engine.write_text("import sys,json,os\nprint(json.dumps({'event':'ready','pid':os.getpid()}),flush=True)\n"
+                "for line in sys.stdin:\n request=json.loads(line)\n print(json.dumps({'id':request['id'],'ok':True}),flush=True)\n")
+            with patch.dict(os.environ,PATH=str(base)+os.pathsep+os.environ.get('PATH','')):
+                session=Session(Path(sys.executable),engine,base/'unused',base,1)
+                try:
+                    self.assertTrue(session.call({'op':'ping'})['ok'])
+                    self.assertEqual(session.engine_pid,session.process.pid)
+                    self.assertIsNone(session.transport_path)
+                    self.assertIs(session.output_stream,session.process.stdout)
+                    self.assertFalse((base/'engine.stdout.fifo').exists())
+                    self.assertFalse(marker.exists())
+                finally:session.close()
+
     def test_malformed_or_stale_reply_cannot_be_a_reload_ack(self):
         import tempfile
         import sys
@@ -84,7 +109,7 @@ class EngineProtocolTests(unittest.TestCase):
         engine.write_text("import sys,json,os,time\nprint(json.dumps({'event':'ready','pid':os.getpid()}),flush=True)\n"
             "for line in sys.stdin:\n "+body+"\n")
         with patch.dict(os.environ,PATH=str(base)+os.pathsep+os.environ.get('PATH','')):
-            return Session(Path(sys.executable),engine,base/'unused',base,1,profiler_session='test')
+            return Session(Path(sys.executable),engine,base/'unused',base,5,profiler_session='test')
 
     def test_profiled_fifo_separates_arbitrary_launcher_progress(self):
         import json

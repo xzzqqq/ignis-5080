@@ -142,16 +142,19 @@ def compare_summary(value):
                 difference_examples=[difference_summary(d) for d in diffs[:3]])
             result['performance'].append(entry)
     else:
+        result['checks']={}
+        for name,check in value.get('checks',{}).items():
+            capture=check.get('capture_differences',[])
+            result['checks'][name]=dict(candidate=check.get('candidate'),records=check.get('records'),
+                numerical_match=check.get('numerical_match'),numerical=numerical_summary(check.get('diagnostics',[])),
+                capture_trajectory_match=check.get('capture_trajectory_match',True),capture_differing_shards=len(capture),
+                capture_difference_examples=[dict(shard=r['shard'],differences=difference_summary(r['differences'])) for r in capture[:3]])
         result['legs']={}
         for name,legs in value['legs'].items():
-            capture={r['shard']:r for leg in legs for r in leg.get('capture_differences',[])}
-            result['legs'][name]=dict(pairs=len(legs),records_per_pair=legs[0].get('records') if legs else 0,
-                representatives_per_pair=legs[0].get('performance_records') if legs else 0,numerical_match=all(leg.get('numerical_match',True) for leg in legs),
-                numerical=numerical_summary([r for leg in legs for r in leg.get('diagnostics',[])]),
-                timing_numerical=numerical_summary([r for leg in legs for r in leg.get('timings',[])]),
-                capture_trajectory_match=all(leg.get('capture_trajectory_match',True) for leg in legs),
-                capture_differing_shards=len(capture),capture_difference_examples=[dict(shard=r['shard'],
-                    differences=difference_summary(r['differences'])) for r in list(capture.values())[:3]])
+            result['legs'][name]=dict(pairs=len(legs),
+                representatives_per_pair=legs[0].get('performance_records') if legs else 0,
+                numerical_match=all(leg.get('numerical_match',True) for leg in legs),
+                timing_numerical=numerical_summary([r for leg in legs for r in leg.get('timings',[])]))
         labels={(r['shard'],r['record']):(r.get('operator'),r.get('up'),r.get('tokens'))
                 for leg in value['legs'].get('candidate',[]) for r in leg.get('timings',[])}
         grouped=defaultdict(list)
@@ -173,9 +176,9 @@ def compare_summary(value):
 
 def summary(value, local_result=None):
     if 'operation' not in value:
-        fields=('status','session','engine_pid','corpus','corpus_records','settings','profiler_session','last_result','error')
+        fields=('status','session','engine_pid','corpus','corpus_records','settings','profiling_enabled','profiler_session','last_result','error')
         return {k:value[k] for k in fields if k in value}
-    fields=('passed','operation','action','engine_pid','wall_s','error','finished','scope','profiler_session','client_timings_s')
+    fields=('passed','operation','action','engine_pid','wall_s','error','finished','scope','profiler_session','profiling_enabled','client_timings_s')
     result={k:value[k] for k in fields if k in value}
     result['status']='completed' if value.get('passed') else 'failed'
     result['local_result']=str(local_result) if local_result else None
@@ -197,6 +200,7 @@ def main(argv=None):
     p.add_argument('action', choices=['setup', 'replay', 'forward', 'compare', 'candidates', 'profile', 'stop'], help='replay is quick exploration, not strict numerical acceptance; forward needs no replay or capture')
     p.add_argument('--config', type=Path, help='Fixed artifact/settings/resources JSON, setup only (required on first setup)')
     p.add_argument('--new-baseline', action='store_true', help='After stopping, rebuild the fixed host baseline (setup only)')
+    p.add_argument('--enable-profiling', action='store_true', help='Launch this session under Nsight Systems; disabled by default on new setup (setup only)')
     p.add_argument('--full',action='store_true',help='Evaluate all benchmark requests; forward also runs fresh builtin controls before and after')
     p.add_argument('--operator', action='append', default=[], dest='operators', help='Exact weight/operator name; repeat for several; omitted means all supported calls (replay/profile/compare without --forward)')
     p.add_argument('--tokens-per-call', type=int, action='append', default=[], help='Operator input token count, not generation length; repeat for several; omitted means every shape')
@@ -210,7 +214,7 @@ def main(argv=None):
     args = p.parse_args(arguments)
     supplied={a.split('=',1)[0] for a in arguments if a.startswith('--')}
     allowed={
-        '--config':{'setup'}, '--new-baseline':{'setup'}, '--full':{'forward','compare'},
+        '--config':{'setup'}, '--new-baseline':{'setup'}, '--enable-profiling':{'setup'}, '--full':{'forward','compare'},
         '--operator':{'replay','profile','compare'}, '--tokens-per-call':{'replay','profile','compare'},
         '--warmup':{'replay','forward','compare','profile'}, '--samples':{'replay','forward','compare','profile'},
         '--candidate':{'replay','forward','compare','profile'}, '--baseline':{'compare'},
@@ -277,6 +281,8 @@ def main(argv=None):
                 if args.action == 'setup':
                     if args.new_baseline or state['config_hash'] != key(receipt['config']):
                         raise ValueError('stop the existing session before changing baseline/config')
+                    if args.enable_profiling and not state.get('profiling_enabled',False):
+                        raise ValueError('profiling is disabled in the active session; stop and setup --enable-profiling')
                     print(json.dumps(summary(state))); return
                 if state['status'] != 'ready':
                     raise ValueError('busy/not ready: ' + state['status'])
@@ -301,6 +307,7 @@ def main(argv=None):
             for name in ('warmup','samples'):
                 if getattr(args,name) is not None:payload[name]=getattr(args,name)
             if args.action == 'setup':
+                payload['profiling_enabled']=args.enable_profiling
                 state = call(target, ['/usr/bin/python3','scripts/lab_support/host.py','--root',
                     current['repo'],'start','--owner',receipt['owner']], payload, no_env=False)
                 atomic(local/'session.json',state)

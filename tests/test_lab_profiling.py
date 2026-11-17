@@ -108,7 +108,7 @@ class CollectionTests(unittest.TestCase):
     def test_uninstrumented_session_reports_prerequisite(self):
         owner = self.owner()
         owner.engine.profiler_session = None
-        with self.assertRaisesRegex(ValueError, 'requires nsys'):
+        with self.assertRaisesRegex(ValueError, 'setup --enable-profiling'):
             profile(owner, Path('/unused'), {}, dict(identity='candidate'))
         self.assertEqual(owner.calls, [])
 

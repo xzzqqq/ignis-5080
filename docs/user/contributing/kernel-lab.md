@@ -50,16 +50,23 @@ candidate's own generation and engine times. Add `--full` for all requests,
 configured repetitions and baseline controls. Replay timings describe isolated
 operators and cannot establish full-model speedups.
 
-To inspect GPU kernel launches for a selected operator:
+Normal setup launches the engine directly with profiling disabled, even when
+Nsight is installed. To inspect GPU kernel launches, restart with profiling
+explicitly enabled:
 
 ```sh
+python3 scripts/lab.py stop
+python3 scripts/lab.py setup --enable-profiling
 python3 scripts/lab.py profile --candidate current --operator layer.0.down --tokens-per-call 8
 ```
 
-Profiling uses Nsight Systems when available at setup and retains the resident
-engine. It reports kernel names, counts and durations, kernel span, gaps and
+The profiling-enabled session uses Nsight Systems and retains the resident
+engine across commands. Setup and evaluation results report `profiling_enabled`.
+It reports kernel names, counts and durations, kernel span, gaps and
 overlap, with a timeline and raw report. Profiling adds instrumentation overhead;
-use ordinary replay for latency comparisons. See the
+use replay/compare in a normal session for latency comparisons. Stop and run
+`setup` without the flag to return to normal operation. Existing baselines,
+recordings and named candidates are reused; no `--new-baseline` is needed. See the
 [profiling details](kernel-lab-reference.md#operator-profiling) for prerequisites
 and the meaning of each number.
 

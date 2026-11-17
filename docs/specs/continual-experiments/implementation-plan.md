@@ -14,7 +14,8 @@ This revision supersedes the original four-command, fixed-corpus gate plan.
   numerical diagnostics and checked CUDA-profiler calls. Strict native checks
   remain the default; exploratory requests opt into reporting output errors
   while still collecting timing.
-- Nsight Systems injects into that same process at launch when available and
+- Nsight Systems injects into that same process at launch only after explicit
+  `setup --enable-profiling` and
   collects only a requested replay range. It is optional for ordinary lab work.
 
 No second engine, scheduler, resumable task database, new compiler cache or
@@ -33,7 +34,10 @@ validation catches accidental incompatibility, not malicious code.
    saved, current and builtin implementations on the same selected records.
    Quick forward reports the candidate's own trajectory and timing without
    promoting exploratory replay into an acceptance gate.
-4. Launch a profile-capable resident session when Nsight is available. Warm up
+4. Default to a direct engine launch. Opt into a profile-capable resident session
+   with `setup --enable-profiling`, checking Nsight before heavy setup. Keep the
+   mode in session/results rather than baseline/corpus identity; stopped toggles
+   reuse existing caches. Warm up
    outside collection; collect replay under CUDA profiler start/stop, stop and
    export, then parse kernel intervals. Retain raw report, SQLite, replay samples
    and machine timeline. Missing tools or empty traces fail explicitly.
@@ -45,7 +49,9 @@ validation catches accidental incompatibility, not malicious code.
 
 CPU tests must cover deterministic scope identity/defaults, shard reuse and
 rejection of corrupt/partial data, immutable candidate lookup, source/busy checks,
-recovery, and profiler prerequisites, cleanup and interval arithmetic. Mocked
+recovery, default direct launch even with Nsight installed, explicit enabled
+launch, stopped mode toggles preserving identities, rejected irrelevant flags,
+and profiler prerequisites, cleanup and interval arithmetic. Mocked
 profiler tests cannot establish GPU collection or timing.
 
 Before any GPU launch, use `make gpu-status` through `scripts/remote.py`. On an

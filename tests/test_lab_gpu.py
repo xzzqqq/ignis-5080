@@ -195,7 +195,8 @@ class LabGpuTests(unittest.TestCase):
         config,_=self.prepare('profile')
         try:
             self.command('stop')
-            ready=self.command('setup','--config',config,'--new-baseline')
+            ready=self.command('setup','--config',config,'--new-baseline','--enable-profiling')
+            self.assertTrue(ready['profiling_enabled'])
             decode=8 if ready['settings']['speculation']=='dflash2' else 1
             reports=[]
             for _ in range(2):

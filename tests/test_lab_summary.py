@@ -57,12 +57,16 @@ class SummaryTests(unittest.TestCase):
         leg=dict(numerical_match=False,diagnostics=rows,timings=rows)
         candidate=dict(identity='saved',path='/saved',source={'hidden':'sha'})
         comparison=dict(passed=True,forward=False,baseline=candidate,candidate=candidate,
-            order=['baseline','candidate']*50,legs=dict(baseline=[leg]*50,candidate=[leg]*50),
+            order=['baseline','candidate']*50,checks=dict(baseline=dict(candidate='saved',records=100,numerical_match=False,diagnostics=rows),
+                candidate=dict(candidate='saved',records=100,numerical_match=False,diagnostics=rows)),
+            legs=dict(baseline=[dict(leg,diagnostics=[])]*50,candidate=[dict(leg,diagnostics=[])]*50),
             performance=[dict(shard='/scope',record=r['record'],baseline_ms=4,candidate_ms=2,speedup=2) for r in rows]*50)
         result=client.compare_summary(comparison)
-        self.assertLess(len(json.dumps(result)),2500)
+        self.assertLess(len(json.dumps(result)),4000)
         self.assertEqual(result['pairs'],50)
-        self.assertEqual(result['legs']['candidate']['numerical']['mismatches'],5000)
+        self.assertEqual(result['checks']['candidate']['numerical']['mismatches'],100)
+        self.assertEqual(result['legs']['candidate']['timing_numerical']['mismatches'],5000)
+        self.assertNotIn('numerical',result['legs']['candidate'])
         self.assertEqual(result['performance']['median_speedup'],2)
         self.assertEqual(result['performance']['slowest'][0]['operator'],'layer.0.gate')
     def test_forward_compare_aggregates_later_anomalies_and_bounds_output(self):

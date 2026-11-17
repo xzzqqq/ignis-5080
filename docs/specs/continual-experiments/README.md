@@ -14,7 +14,7 @@ the implementation boundaries and validation obligations.
 ## Session, scope and candidate
 
 `setup` fixes model, runtime settings, prepared benchmark request and builtin
-baseline. It prepares the resident engine and original request references.
+baseline. It prepares the resident engine and original request inputs.
 Operator scope belongs to an operation: `--operator` and `--tokens-per-call`
 select real calls without reloading the model. Omitted selectors mean all
 supported operators/token shapes; legacy fixed-scope configuration is rejected. An uncached selection records its inputs under builtin code,
@@ -26,8 +26,9 @@ disk recording must fail clearly when a scope cannot fit, never silently sample.
 `current` is an immutable library built from frozen synchronized source inputs.
 `builtin` is the pinned baseline implementation. `replay --save-as NAME` retains
 a candidate name and build identity; `candidates` lists names. `compare` resolves
-both candidate selectors and measures them freshly against the same selected
-records. A saved name must not mutate the library behind another result.
+both candidate selectors, checks all selected inputs once per immutable
+candidate per invocation, and alternates representative timing legs on the
+same scope with configured warmup for each leg. A saved name must not mutate the library behind another result.
 
 One owner holds the host-wide GPU lease, supervises the resident engine and
 builds, and serializes commands by rejecting busy/conflicting operations before
@@ -63,12 +64,18 @@ HTTP/service overhead and service acceptance remain outside Kernel Lab.
 
 ## Resident operator profiling
 
-When `nsys` is available at setup, launch the same engine under a named Nsight
-Systems injection session. Injection and collection are distinct: no setup,
+Normal setup launches the engine directly, without Nsight or FIFO transport.
+Only `setup --enable-profiling` launches the same engine under a named Nsight
+Systems injection session. Missing `nsys` then fails before build/model loading.
+Persist `profiling_enabled` in session state and every evaluation result, separate
+from model configuration, baseline, corpus and candidate identities. Toggling
+requires stop and setup; it preserves those caches without `--new-baseline`.
+Starting after stop without the flag defaults to disabled. Bare setup on a live
+session reports its mode; explicit enable on a live disabled session is refused. Injection and collection are distinct: no setup,
 model loading or lazy-recording workload belongs in the requested profile.
-The engine PID and model remain resident across profiles. If Nsight is absent,
-other commands work and profile reports the missing prerequisite; enabling it
-requires restarting setup. Injection overhead must be considered when comparing
+The engine PID and model remain resident across profiles. A disabled session
+rejects profile before compilation or recording, naming stop and
+`setup --enable-profiling`. Injection overhead must be considered when comparing
 latencies across sessions.
 
 `profile` resolves the same candidate and selected real input representatives as

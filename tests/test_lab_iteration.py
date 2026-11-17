@@ -92,15 +92,52 @@ class IterationTests(unittest.TestCase):
             value.corpus_identity={'baseline':'different'}
             self.assertEqual(value.candidates(),{})
 
-    def test_compare_alternates_identical_scope_and_does_not_restore_between_legs(self):
+    def test_compare_checks_fixed_inputs_once_and_warms_every_timing_leg(self):
+        for pairs in (3,30):
+            with self.subTest(pairs=pairs),tempfile.TemporaryDirectory() as t:
+                root=Path(t);value=self.owner(root);active=None;calls=[]
+                records=[dict(id=i,weight={'name':'gate'},tokens=1,ldy=128,epilogue=0) for i in range(5)]
+                value.selection=[dict(data='/data',shard='scope',records=records)]
+                def reload(path):
+                    nonlocal active
+                    active=path
+                def replay(request):
+                    calls.append((active,request))
+                    return dict(ok=True,result=[dict(record=r['id'],mismatches=int(active=='b' and r['id']==4),
+                        samples_ms=[2.0],executions_checked=request['warmup']+request['samples']) for r in request['records']])
+                value.engine=SimpleNamespace(reload=Mock(side_effect=reload),call=Mock(side_effect=replay))
+                with patch.object(value,'representative_scope',wraps=value.representative_scope) as representatives:
+                    result=value.compare(root,dict(samples=pairs,warmup=2),dict(identity='a',path='a'),dict(identity='b',path='b'))
+                    representatives.assert_called_once()
+                full=[(candidate,request) for candidate,request in calls if len(request['records'])==5]
+                timed=[(candidate,request) for candidate,request in calls if len(request['records'])==1]
+                self.assertEqual([candidate for candidate,_ in full],['a','b'])
+                self.assertTrue(all((r['warmup'],r['samples'])==(0,1) for _,r in full))
+                self.assertEqual(len(timed),2*pairs)
+                self.assertTrue(all((r['warmup'],r['samples'])==(2,1) for _,r in timed))
+                self.assertEqual(result['order'][:6],['baseline','candidate','candidate','baseline','baseline','candidate'])
+                self.assertTrue(result['checks']['baseline']['numerical_match'])
+                self.assertFalse(result['checks']['candidate']['numerical_match'])
+                self.assertEqual(len(result['checks']['candidate']['diagnostics']),5)
+                self.assertTrue(all(leg['numerical_match'] for leg in result['legs']['candidate']))
+                self.assertTrue(all(not leg.get('diagnostics') for leg in result['legs']['candidate']))
+                self.assertTrue(all(leg['timings'][0]['executions_checked']==3 for leg in result['legs']['candidate']))
+                self.assertNotIn('builtin',[c.args[0] for c in value.engine.reload.call_args_list])
+
+    def test_compare_aliases_check_the_same_immutable_identity_once(self):
         with tempfile.TemporaryDirectory() as t:
             root=Path(t);value=self.owner(root)
-            value.engine=SimpleNamespace(reload=Mock())
-            value.local=Mock(return_value=dict(passed=True,timings=[dict(shard='one',record=1,samples_ms=[2])]))
-            result=value.compare(root,dict(samples=3,warmup=2),dict(path='a'),dict(path='b'))
-            self.assertEqual(result['order'],['baseline','candidate','candidate','baseline','baseline','candidate'])
-            self.assertEqual([c.args[0] for c in value.engine.reload.call_args_list],['a','b','b','a','a','b'])
-            self.assertEqual([c.kwargs['warmup'] for c in value.local.call_args_list],[2,2,0,0,0,0])
+            value.selection=[dict(data='/data',shard='scope',records=[dict(id=i,weight={'name':'gate'},tokens=1,ldy=128,epilogue=0) for i in range(3)])]
+            calls=[]
+            def replay(request):
+                calls.append(request)
+                return dict(ok=True,result=[dict(record=r['id'],mismatches=0,samples_ms=[1]) for r in request['records']])
+            value.engine=SimpleNamespace(reload=Mock(),call=Mock(side_effect=replay))
+            candidate=dict(identity='same',path='/saved')
+            result=value.compare(root,dict(samples=3,warmup=1),candidate,candidate)
+            self.assertEqual(sum(len(r['records'])==3 for r in calls),1)
+            self.assertIs(result['checks']['baseline'],result['checks']['candidate'])
+            self.assertEqual(len(calls),7)
 
     def test_forward_compare_reports_direct_pair_differences_and_speedups(self):
         with tempfile.TemporaryDirectory() as t:
@@ -108,8 +145,9 @@ class IterationTests(unittest.TestCase):
             baseline=dict(tokens=[1],input_tokens=4,finish_reason='length',stop_token=None,logits_sha256='a',rounds=[],tokens_per_round=1,output_tokens=1)
             candidate=dict(baseline,tokens=[2],finish_reason='stop',tokens_per_round=2)
             value.forward=Mock(side_effect=[dict(cases=[dict(id='one',samples=[baseline],median_prefill_ms=4,median_decode_ms=6)]),
-                dict(cases=[dict(id='one',samples=[candidate],median_prefill_ms=2,median_decode_ms=3)])])
-            result=value.compare(root,dict(compare_forward=True,samples=1),dict(path='a'),dict(path='b'))
+                dict(cases=[dict(id='one',samples=[candidate],median_prefill_ms=2,median_decode_ms=3)])]*3)
+            result=value.compare(root,dict(compare_forward=True,samples=3,warmup=2),dict(path='a'),dict(path='b'))
+            self.assertEqual([c.args[3] for c in value.forward.call_args_list],[2]*6)
             row=result['performance'][0]
             self.assertEqual((row['prefill_speedup'],row['decode_speedup']),(2,2))
             self.assertEqual(set(row['differences']),{'tokens','finish_reason'})
@@ -196,6 +234,7 @@ class IterationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             root=Path(t);value=self.owner(root);value.publish=Mock()
             value.engine=SimpleNamespace(process=SimpleNamespace(pid=12),reload=Mock(return_value={}))
+            value.state['profiling_enabled']=True
             value.resolve_candidate=Mock(side_effect=AssertionError('do not compile'))
             value.select_corpus=Mock(side_effect=AssertionError('do not capture'))
             with patch.object(iteration,'source_identity',return_value={}),patch.object(host,'run'),patch.object(iteration.subprocess,'check_output',return_value='12\n'),patch.object(iteration.shutil,'which',return_value=None):

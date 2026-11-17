@@ -100,7 +100,11 @@ measurements; old setup timing is not its control. Keep small speedup claims
 proportional to sample variability.
 
 Compare alternates baseline/candidate order across pairs. `--samples` selects
-the number of pairs; `--warmup` selects warmup executions. Both flags also
+the number of pairs; `--warmup` selects warmup executions for every leg.
+Operator comparison checks all selected inputs once per immutable candidate
+per invocation, then times fixed representatives in alternating legs.
+`compare.checks` retains the complete diagnostics; every warmup/timing execution
+also retains output diagnostics. No diagnostic result is cached across commands. Both flags also
 override configured repetition counts on replay, forward and profile; warmup
 may be zero and samples must be positive. Use
 `compare --baseline before --candidate current --forward` for paired full-model
@@ -128,12 +132,26 @@ acceptance and independent references for arithmetic changes.
 
 ## Operator profiling
 
-`profile --candidate current --operator layer.0.down --tokens-per-call 8` uses
-Nsight Systems' CUDA kernel timeline. The remote `nsys` executable must be
-available when setup launches the engine. If unavailable, ordinary lab work
-still functions and profile reports the missing prerequisite. Install/configure
-Nsight and restart the session to enable it. Missing tool support, collection or
-export failure and empty kernel traces are reported as failures.
+Normal `setup` starts the engine directly, with profiling disabled even if
+Nsight Systems is installed. Enable injection explicitly for a new session:
+
+```sh
+python3 scripts/lab.py stop
+python3 scripts/lab.py setup --enable-profiling
+python3 scripts/lab.py profile --candidate current --operator layer.0.down --tokens-per-call 8
+```
+
+The remote `nsys` executable must be in PATH when enabling profiling. If missing,
+setup fails before building or loading the model. Disabled sessions reject
+profile before compilation or recording, with the restart command. Missing tool
+support, collection/export failure and empty kernel traces are failures.
+
+The flag is a session option, separate from model configuration and baseline,
+recording and candidate identities. Stop and run `setup` without the flag to
+start a normal session; this preserves the pinned baseline and caches and does
+not require `--new-baseline`. A bare `setup` on an existing live session reports
+its current mode. Explicit `--enable-profiling` on a live disabled session asks
+you to stop first. Setup/evaluation results report `profiling_enabled`.
 
 A profile-capable engine starts under Nsight injection. Collection starts only
 for the requested replay; setup/model loading and lazy recording are excluded.

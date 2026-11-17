@@ -127,33 +127,51 @@ class Iteration:
         if not output:raise ValueError('requested scope selects no supported operator calls')
         return output
 
+    def replay_rows(self, groups, warmup, samples):
+        output=[]
+        for group in groups:
+            rows=checked(self.engine.call(dict(op='replay_batch',data=group['data'],records=group['records'],
+                warmup=warmup,samples=samples,exploratory=True)))
+            labels={r['id']:dict(operator=r['weight']['name'],up=r.get('up',{}).get('name') if r.get('up') else None,
+                tokens=r['tokens']) for r in group['records']}
+            output.extend(dict(r,shard=group['shard'],**labels[r['record']]) for r in rows)
+        return output
+
+    def representative_scope(self, groups):
+        selected=[]
+        for group in groups:
+            representatives={}
+            for record in group['records']:
+                shape=key({k:record.get(k) for k in ('weight','up','tokens','ldy','epilogue')})
+                representatives.setdefault(shape,record)
+            selected.append(dict(group,records=list(representatives.values())))
+        return selected
+
+    def check_scope(self, directory, label, groups=None):
+        groups=self.selection if groups is None else groups
+        with self.stage(label+' input diagnostics'):
+            rows=self.replay_rows(groups,warmup=0,samples=1)
+        atomic(directory/(label+'-correctness.json'),rows)
+        return dict(passed=True,records=len(rows),numerical_match=all(r.get('mismatches',0)==0 for r in rows),
+            diagnostics=rows,capture_trajectory_match=all(not g.get('manifest',{}).get('recording_differences') for g in groups),
+            capture_differences=[dict(shard=g['shard'],differences=g['manifest']['recording_differences'])
+                for g in groups if g.get('manifest',{}).get('recording_differences')])
+
+    def measure_scope(self, directory, label, groups, warmup, samples):
+        with self.stage(label+' representative timing'):
+            rows=self.replay_rows(groups,warmup=warmup,samples=samples)
+        atomic(directory/(label+'-timing.json'),rows)
+        return dict(passed=True,performance_records=len(rows),warmup=warmup,samples=samples,
+            numerical_match=all(r.get('mismatches',0)==0 for r in rows),timings=rows)
+
     def local(self, directory, label, groups=None, warmup=None, samples=None):
-        groups=groups if groups is not None else self.selection
+        groups=self.selection if groups is None else groups
         warmup=self.config.get('warmup',1) if warmup is None else warmup
         samples=self.config.get('samples',3) if samples is None else samples
-        correctness=[];measured=[]
-        with self.stage(label+' replay'):
-            for group in groups:
-                rows=checked(self.engine.call(dict(op='replay_batch',data=group['data'],records=group['records'],
-                    warmup=0,samples=1,exploratory=True)))
-                labels={r['id']:dict(operator=r['weight']['name'],up=r.get('up',{}).get('name') if r.get('up') else None,
-                    tokens=r['tokens']) for r in group['records']}
-                correctness.extend(dict(r,shard=group['shard'],**labels[r['record']]) for r in rows)
-                representatives={}
-                for r in group['records']:
-                    shape=key({k:r.get(k) for k in ('weight','up','tokens','ldy','epilogue')})
-                    representatives.setdefault(shape,r)
-                rows=checked(self.engine.call(dict(op='replay_batch',data=group['data'],
-                    records=list(representatives.values()),warmup=warmup,samples=samples,exploratory=True)))
-                measured.extend(dict(r,shard=group['shard'],**labels[r['record']]) for r in rows)
-        atomic(directory/(label+'-correctness.json'),correctness)
-        atomic(directory/(label+'-timing.json'),measured)
-        return dict(passed=True,records=len(correctness),performance_records=len(measured),warmup=warmup,samples=samples,
-            numerical_match=all(r.get('mismatches',0)==0 for r in correctness+measured),
-            diagnostics=correctness,timings=measured,
-            capture_trajectory_match=all(not g.get('manifest',{}).get('recording_differences') for g in groups),
-            capture_differences=[dict(shard=g['shard'],differences=g['manifest']['recording_differences'])
-                for g in groups if g.get('manifest',{}).get('recording_differences')],
+        diagnostics=self.check_scope(directory,label,groups)
+        measured=self.measure_scope(directory,label,self.representative_scope(groups),warmup,samples)
+        return dict(diagnostics,**{k:v for k,v in measured.items() if k!='numerical_match'},
+            numerical_match=diagnostics['numerical_match'] and measured['numerical_match'],
             interpretation='representative operator calls; exploratory numerical diagnostics')
 
     def reference_forward(self, full=False):
@@ -224,14 +242,23 @@ class Iteration:
     def compare(self,directory,payload,baseline,candidate):
         full=bool(payload.get('full'));forward=bool(payload.get('compare_forward'))
         count=payload.get('samples',self.config.get('samples',3));warmup=payload.get('warmup',self.config.get('warmup',1))
-        legs={'baseline':[],'candidate':[]};order=[]
+        legs={'baseline':[],'candidate':[]};order=[];checks={}
+        if not forward:
+            representatives=self.representative_scope(self.selection)
+            checked_identities={}
+            for label,item in (('baseline',baseline),('candidate',candidate)):
+                identity=item.get('identity',item['path'])
+                if identity not in checked_identities:
+                    self.engine.reload(item['path'])
+                    checked_identities[identity]=dict(self.check_scope(directory,label),candidate=identity)
+                checks[label]=checked_identities[identity]
         # Alternating order gives both candidates the same capture and paired sample conditions.
         for i in range(count):
             pair=[('baseline',baseline),('candidate',candidate)]
             if i%2:pair.reverse()
             for label,item in pair:
                 self.engine.reload(item['path']);order.append(label)
-                leg=self.forward(directory,f'{label}-{i}',full,warmup if i==0 else 0,1) if forward else self.local(directory,f'{label}-{i}',warmup=warmup if i==0 else 0,samples=1)
+                leg=self.forward(directory,f'{label}-{i}',full,warmup,1) if forward else self.measure_scope(directory,f'{label}-{i}',representatives,warmup,1)
                 legs[label].append(leg)
         performance=[]
         if not forward:
@@ -254,7 +281,7 @@ class Iteration:
                         baseline_output_tokens=before.get('output_tokens'),candidate_output_tokens=after.get('output_tokens'),
                         baseline_tokens_per_round=before['tokens_per_round'],candidate_tokens_per_round=after['tokens_per_round'],
                         differences=forward_difference(before,after)))
-        return dict(passed=True,baseline=baseline,candidate=candidate,order=order,legs=legs,performance=performance,forward=forward)
+        return dict(passed=True,baseline=baseline,candidate=candidate,order=order,checks=checks,legs=legs,performance=performance,forward=forward)
 
     def evaluate(self,payload,action):
         actual=source_identity(self.root)
@@ -266,7 +293,8 @@ class Iteration:
         report=dict(passed=False,operation=payload['operation'],action=action,engine_pid=getattr(self.engine,'engine_pid',self.engine.process.pid),
             source=actual,config_hash=self.state['config_hash'],finished=False,settings=self.state.get('settings'),
             scope={k:payload.get(k,[]) for k in ('operators','tokens_per_call')},
-            profiler_session=getattr(self.engine,'profiler_session',None))
+            profiler_session=getattr(self.engine,'profiler_session',None),
+            profiling_enabled=self.state.get('profiling_enabled',False))
         self.publish(status='busy',active=payload['operation'],result=str(d/'result.json'))
         began=time.monotonic();self.stage_timings=[]
         fatal=None
@@ -278,6 +306,8 @@ class Iteration:
             if action=='candidates':
                 report.update(passed=True,candidates=self.candidates())
             else:
+                if action=='profile' and not self.state.get('profiling_enabled',False):
+                    raise ValueError('profiling is disabled; stop and setup --enable-profiling')
                 if action=='profile' and (not shutil.which('nsys') or not getattr(self.engine,'profiler_session',None)):
                     raise ValueError('operator profiling requires nsys available at setup; stop and setup after configuring Nsight Systems')
                 candidate=self.resolve_candidate(payload.get('candidate','current'),d)
