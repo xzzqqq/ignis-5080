@@ -4,6 +4,7 @@
 #include "ignis_trellis_candidate.h"
 #include <algorithm>
 #include <cstring>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -12,6 +13,11 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+// Minimal toolkit installs omit cuda_profiler_api.h; these stable runtime
+// entry points are provided by the same cudart already linked by the leaf.
+extern "C" cudaError_t CUDARTAPI cudaProfilerStart(void);
+extern "C" cudaError_t CUDARTAPI cudaProfilerStop(void);
 
 namespace {
 thread_local std::string error;
@@ -102,12 +108,14 @@ struct LabTrace {
   std::map<std::string,ignis_trellis_weight> named;
   std::unique_ptr<Call> eager;
   std::set<std::string> selection;
+  std::set<uint32_t> token_selection;
   std::string graph;
   uint32_t ordinal=0,request=0,phase=0;
   uint64_t position=0,offset=0,count=0,pinned=0,pin_limit=0,disk_limit=0;
   std::ofstream data,meta;
   Device one{4};
-  LabTrace(const ignis_model &m,const char *directory,uint64_t pin,uint64_t disk,const char *names):named(weights(m)),pin_limit(pin),disk_limit(disk) {
+  LabTrace(const ignis_model &m,const char *directory,uint64_t pin,uint64_t disk,const char *names,const uint32_t *token_filter,uint32_t token_filter_count):named(weights(m)),pin_limit(pin),disk_limit(disk) {
+    for(uint32_t i=0;i<token_filter_count;++i)token_selection.insert(token_filter[i]);
     std::istringstream list(names ? names : "");std::string name;
     while(std::getline(list,name,',')) {
       if(!named.count(name))throw std::runtime_error("unknown capture weight: "+name);
@@ -138,6 +146,7 @@ void *lab_before(const ignis_model &m,const ignis_trellis_weight &w,const ignis_
                  const void *x,uint32_t tokens,void *y,uint32_t ldy,uint32_t epilogue,cudaStream_t stream) {
   if(!m.lab_trace) return nullptr;
   auto &t=*m.lab_trace;
+  if(!t.token_selection.empty() && !t.token_selection.count(tokens))return nullptr;
   const auto identified=identify(t.named,w);
   if(!t.selection.empty() && !t.selection.count(identified.name) &&
      !(up && t.selection.count(identify(t.named,*up).name)))return nullptr;
@@ -177,10 +186,23 @@ void lab_after(const ignis_model &m,void *ticket,const void *y,cudaStream_t stre
 }
 }
 extern "C" const char *ignis_lab_trace_error(){return error.c_str();}
+extern "C" int32_t ignis_lab_profiler_start() {
+  try {ck(cudaProfilerStart());return 0;}catch(const std::exception &e){error=e.what();return -1;}
+}
+extern "C" int32_t ignis_lab_profiler_stop() {
+  try {ck(cudaProfilerStop());return 0;}catch(const std::exception &e){error=e.what();return -1;}
+}
 extern "C" int32_t ignis_lab_capture_start(ignis_model *m,ignis_seq_pool *p,const char *dir,uint64_t pin,uint64_t disk,const char *names) {
+  return ignis_lab_capture_start_filtered(m,p,dir,pin,disk,names,nullptr,0);
+}
+extern "C" int32_t ignis_lab_capture_start_filtered(ignis_model *m,ignis_seq_pool *p,const char *dir,uint64_t pin,uint64_t disk,
+    const char *names,const uint32_t *token_filter,uint32_t token_filter_count) {
   try {
     if(!m || !p || !dir || !pin || !disk || m->lab_trace)throw std::runtime_error("invalid capture start");
-    m->lab_trace=std::make_shared<ignis::LabTrace>(*m,dir,pin,disk,names);
+    if(token_filter_count>8192 || (token_filter_count && !token_filter))throw std::runtime_error("invalid capture token filter");
+    for(uint32_t i=0;i<token_filter_count;++i)
+      if(!token_filter[i] || token_filter[i]>8192)throw std::runtime_error("invalid capture token filter");
+    m->lab_trace=std::make_shared<ignis::LabTrace>(*m,dir,pin,disk,names,token_filter,token_filter_count);
     if(ignis_model_reload_trellis(m,p,nullptr)!=0)throw std::runtime_error(ignis_trellis_reload_error());
     auto &t=*m->lab_trace;
     for(auto &[id,c]:t.calls) {
@@ -220,9 +242,16 @@ extern "C" int32_t ignis_lab_capture_stop(ignis_model *m,ignis_seq_pool *p) {
 extern "C" int32_t ignis_lab_replay(ignis_model *m,const ignis_lab_weight_view *view,const ignis_lab_weight_view *upview,
     uint32_t tokens,uint32_t ldy,uint32_t epilogue,const void *x,const void *initial,const void *reference,
     uint32_t warmup,uint32_t samples,uint32_t check,float *times,uint64_t *mismatches,uint32_t *checked) {
+  return ignis_lab_replay_diagnostics(m,view,upview,tokens,ldy,epilogue,x,initial,reference,
+      warmup,samples,check,times,mismatches,checked,nullptr);
+}
+extern "C" int32_t ignis_lab_replay_diagnostics(ignis_model *m,const ignis_lab_weight_view *view,const ignis_lab_weight_view *upview,
+    uint32_t tokens,uint32_t ldy,uint32_t epilogue,const void *x,const void *initial,const void *reference,
+    uint32_t warmup,uint32_t samples,uint32_t check,float *times,uint64_t *mismatches,uint32_t *checked,
+    ignis_lab_diagnostics *diagnostics) {
   cudaGraph_t graph=nullptr;cudaGraphExec_t exec=nullptr;cudaEvent_t a=nullptr,b=nullptr;
   try {
-    if(!m || !view || !x || !initial || !reference || !times || !mismatches || !checked || check>IGNIS_LAB_CHECK_EVERY || !tokens ||
+    if(!m || !view || !x || !initial || !reference || !times || !mismatches || !checked || check>IGNIS_LAB_CHECK_EXPLORATION || !tokens ||
        tokens>std::max(m->prefill_chunk_tokens,uint32_t(64)) || !samples || samples>10000 || warmup>10000 || epilogue>1)
       throw std::runtime_error("invalid replay arguments");
     auto w=resolve(*m,*view);ignis_trellis_weight up{};if(upview)up=resolve(*m,*upview);
@@ -249,6 +278,8 @@ extern "C" int32_t ignis_lab_replay(ignis_model *m,const ignis_lab_weight_view *
     try {issue();} catch(...) {cudaStreamEndCapture(m->stream,&graph);throw;}
     ck(cudaStreamEndCapture(m->stream,&graph));ck(cudaGraphInstantiate(&exec,graph,0));
     ck(cudaEventCreate(&a));ck(cudaEventCreate(&b));*mismatches=0;*checked=0;
+    ignis_lab_diagnostics d{};
+    auto bf16=[](uint16_t bits) {uint32_t raw=uint32_t(bits)<<16;float value;std::memcpy(&value,&raw,4);return double(value);};
     for(uint32_t i=0;i<warmup+samples;++i) {
       reset();ck(cudaEventRecord(a,m->stream));ck(cudaGraphLaunch(exec,m->stream));
       ck(cudaEventRecord(b,m->stream));ck(cudaEventSynchronize(b));
@@ -257,9 +288,23 @@ extern "C" int32_t ignis_lab_replay(ignis_model *m,const ignis_lab_weight_view *
       ++*checked;
       ck(cudaMemcpy2D(result.data(),w.out*2,dy.p,ldy*2,w.out*2,tokens,cudaMemcpyDeviceToHost));
       const auto *expected=static_cast<const uint16_t *>(reference);
-      for(size_t j=0;j<result.size();++j) if(result[j]!=expected[j] || (result[j]&0x7f80)==0x7f80)++*mismatches;
-      if(*mismatches)break;
+      for(size_t j=0;j<result.size();++j) {
+        const double actual=bf16(result[j]),reference_value=bf16(expected[j]);
+        ++d.total_elements;
+        if(result[j]!=expected[j] || !std::isfinite(actual))++d.mismatches;
+        d.actual_nan+=std::isnan(actual);d.actual_inf+=std::isinf(actual);
+        d.reference_nan+=std::isnan(reference_value);d.reference_inf+=std::isinf(reference_value);
+        // Error norms describe only pairs where both values are finite.
+        if(std::isfinite(actual) && std::isfinite(reference_value)) {
+          ++d.finite_elements;const double delta=actual-reference_value;
+          d.max_abs_error=std::max(d.max_abs_error,std::abs(delta));
+          d.squared_error+=delta*delta;d.squared_reference+=reference_value*reference_value;
+        }
+      }
+      *mismatches=d.mismatches;
+      if(*mismatches && check!=IGNIS_LAB_CHECK_EXPLORATION)break;
     }
+    if(diagnostics)*diagnostics=d;
     cudaEventDestroy(a);cudaEventDestroy(b);cudaGraphExecDestroy(exec);cudaGraphDestroy(graph);return 0;
   } catch(const std::exception &e) {
     if(a)cudaEventDestroy(a);if(b)cudaEventDestroy(b);if(exec)cudaGraphExecDestroy(exec);if(graph)cudaGraphDestroy(graph);
@@ -268,7 +313,14 @@ extern "C" int32_t ignis_lab_replay(ignis_model *m,const ignis_lab_weight_view *
 }
 
 extern "C" int32_t ignis_lab_capture_minimum(ignis_model *m,const char *names,uint64_t tokens,uint64_t requests,uint64_t *bytes) {
+  return ignis_lab_capture_minimum_filtered(m,names,tokens,requests,nullptr,0,bytes);
+}
+extern "C" int32_t ignis_lab_capture_minimum_filtered(ignis_model *m,const char *names,uint64_t tokens,uint64_t requests,
+    const uint32_t *token_filter,uint32_t token_filter_count,uint64_t *bytes) {
   try {
+    if(token_filter_count>8192 || (token_filter_count && !token_filter))throw std::runtime_error("invalid capture token filter");
+    for(uint32_t i=0;i<token_filter_count;++i)
+      if(!token_filter[i] || token_filter[i]>8192)throw std::runtime_error("invalid capture token filter");
     if(!m || !bytes || tokens>10000000 || requests>100000)throw std::runtime_error("invalid capture size query");
     auto all=weights(*m);std::set<std::string> selected;std::istringstream list(names?names:"");std::string name;
     while(std::getline(list,name,',')){if(!all.count(name))throw std::runtime_error("unknown capture weight: "+name);selected.insert(name);}
@@ -279,6 +331,12 @@ extern "C" int32_t ignis_lab_capture_minimum(ignis_model *m,const char *names,ui
       if(!selected.empty() && !selected.count(id) && !selected.count(up))continue;
       const uint64_t size=2ull*w.in+4ull*w.out;
       if(id=="head")head=size;else per_token+=size;
+    }
+    // Aggregate prompt lengths do not identify chunk sizes. With a token
+    // filter the body can contribute zero; the one-row prefill head is known.
+    if(token_filter_count) {
+      per_token=0;
+      if(std::find(token_filter,token_filter+token_filter_count,1)==token_filter+token_filter_count)head=0;
     }
     *bytes=per_token*tokens+head*requests;return 0;
   }catch(const std::exception &e){error=e.what();return -1;}

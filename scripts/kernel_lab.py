@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import select
 import subprocess
+import time
 
 
 def sha256(path):
@@ -17,35 +18,68 @@ def sha256(path):
 
 
 class Session:
-    def __init__(self, engine, artifact, settings, output, timeout):
+    def __init__(self, engine, artifact, settings, output, timeout, profiler_session=None):
         self.timeout = timeout
+        self.profiler_session = profiler_session
         self.next_id = 0
         self.log = (output / 'engine.jsonl').open('w')
+        self.profiler_log = (output / 'engine.profiler.log').open('w')
+        self.stdout_buffer = bytearray()
         self.stderr = (output / 'engine.stderr').open('w')
         lease = os.environ.get('IGNIS_GPU_LEASE_FD')
-        self.process = subprocess.Popen([str(engine), str(artifact), str(settings)], text=True,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
+        self.transport_path = None
+        self.output_stream = None
+        argv = [str(engine), str(artifact), str(settings)]
+        if profiler_session:
+            self.transport_path = output / 'engine.stdout.fifo'
+            os.mkfifo(self.transport_path, 0o600)
+            descriptor = os.open(self.transport_path, os.O_RDWR | os.O_NONBLOCK)
+            self.output_stream = os.fdopen(descriptor, 'rb', buffering=0)
+            wrapper = 'exec "$1" "$2" "$3" > "$4"'
+            argv = ['nsys', 'launch', '--session-new='+profiler_session,
+                    '--trace=cuda', '--cuda-graph-trace=node',
+                    '/bin/bash', '--noprofile', '--norc', '-c', wrapper,
+                    'ignis-lab-engine', *argv, str(self.transport_path)]
+        self.process = subprocess.Popen(argv, text=True, stdin=subprocess.PIPE,
+            stdout=self.profiler_log if profiler_session else subprocess.PIPE, stderr=self.stderr,
             pass_fds=(() if lease is None else (int(lease),)))
+        if self.output_stream is None:
+            self.output_stream = self.process.stdout
         try:
             self.ready = self.read()
             if self.ready.get('event') != 'ready':
                 raise ValueError('engine did not become ready')
+            self.engine_pid = self.ready.get('pid',self.process.pid)
+            if profiler_session and (type(self.ready.get('pid')) is not int or self.engine_pid<1):
+                raise ValueError('profiled engine ready response lacks its process ID')
         except BaseException:
             self.close()
             raise
 
     def read(self):
-        if not select.select([self.process.stdout], [], [], self.timeout)[0]:
-            raise TimeoutError('engine response deadline; restart required')
-        line = self.process.stdout.readline()
-        if not line:
-            raise RuntimeError('engine exited; inspect engine.stderr')
-        self.log.write(line)
-        self.log.flush()
-        try:
-            return json.loads(line)
-        except ValueError as e:
-            raise RuntimeError('invalid engine JSON; session must restart') from e
+        response_deadline = time.monotonic() + self.timeout
+        while True:
+            remaining = response_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('engine response deadline; restart required')
+            if b'\n' not in self.stdout_buffer:
+                if not select.select([self.output_stream], [], [], min(remaining, 0.1))[0]:
+                    if self.process.poll() is not None:
+                        raise RuntimeError('engine exited; inspect engine.stderr and engine.profiler.log')
+                    continue
+                block = os.read(self.output_stream.fileno(), 65536)
+                if not block:
+                    raise RuntimeError('engine exited; inspect engine.stderr')
+                self.stdout_buffer.extend(block)
+                continue
+            line, _, rest = self.stdout_buffer.partition(b'\n')
+            self.stdout_buffer = bytearray(rest)
+            self.log.write(line.decode('utf-8', errors='backslashreplace') + '\n')
+            self.log.flush()
+            try:
+                return json.loads(line)
+            except ValueError as e:
+                raise RuntimeError('invalid engine JSON; session must restart') from e
 
     def call(self, value):
         self.next_id += 1
@@ -80,13 +114,16 @@ class Session:
                 except subprocess.TimeoutExpired:
                     self.process.kill()
                     self.process.wait()
-        for stream in (self.process.stdin,self.process.stdout):
+        for stream in (self.process.stdin,self.output_stream):
             try:
                 stream.close()
             except BrokenPipeError:
                 pass
         self.stderr.close()
         self.log.close()
+        self.profiler_log.close()
+        if self.transport_path is not None:
+            self.transport_path.unlink(missing_ok=True)
 
 
 

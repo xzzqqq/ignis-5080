@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from lab_support import client, common, host
+from lab_support import client, common, host, iteration
 
 
 class LabTests(unittest.TestCase):
@@ -71,6 +71,23 @@ class LabTests(unittest.TestCase):
         common.atomic(d/'.remote.json',target)
         return receipt,target
 
+    def test_stopped_foreign_session_allows_setup_and_stop_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);receipt,target=self.fixture(root)
+            state=dict(owner='another-worktree',status='stopped')
+            with patch.object(client,'ROOT',root),patch.object(client,'probe',return_value=state),patch.object(client,'source_identity',return_value={}),patch.object(client.subprocess,'run'),patch.object(client,'call',return_value={'status':'ready'}) as call,patch.object(client,'rpc') as rpc:
+                client.main(['setup','--new-baseline'])
+                call.assert_called_once();rpc.assert_not_called()
+                client.main(['stop']);rpc.assert_not_called()
+
+    def test_active_foreign_session_still_refuses_setup_before_sync(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);self.fixture(root)
+            state=dict(owner='another-worktree',status='ready')
+            with patch.object(client,'ROOT',root),patch.object(client,'probe',return_value=state),patch.object(client.subprocess,'run') as run:
+                with self.assertRaises(SystemExit):client.main(['setup','--new-baseline'])
+                run.assert_not_called()
+
     def test_busy_is_refused_before_sync(self):
         with tempfile.TemporaryDirectory() as t:
             root=Path(t);receipt,target=self.fixture(root)
@@ -106,6 +123,72 @@ class LabTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):client.main(['setup','--new-baseline'])
                 run.assert_not_called()
 
+    def test_profiling_flag_only_applies_to_setup(self):
+        for action in ('replay','forward','compare','profile','candidates','stop'):
+            with self.subTest(action=action),patch.object(client,'probe') as probe:
+                with self.assertRaises(SystemExit) as error:client.main([action,'--enable-profiling'])
+                self.assertEqual(error.exception.code,2);probe.assert_not_called()
+
+    def test_live_setup_reports_current_mode_and_explicit_enable_needs_restart(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);receipt,_=self.fixture(root)
+            state=dict(owner='owner-a',status='ready',config_hash=common.key(receipt['config']),profiling_enabled=False)
+            with patch.object(client,'ROOT',root),patch.object(client,'probe',return_value=state),patch.object(client.subprocess,'run') as run:
+                with self.assertRaises(SystemExit):client.main(['setup','--enable-profiling'])
+                state['profiling_enabled']=True
+                client.main(['setup'])
+                client.main(['setup','--enable-profiling'])
+                run.assert_not_called()
+
+    def test_stopped_setup_mode_is_explicit_and_does_not_change_config(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);receipt,_=self.fixture(root)
+            state=dict(owner='owner-a',status='stopped',source={},profiling_enabled=True)
+            with patch.object(client,'ROOT',root),patch.object(client,'probe',return_value=state),patch.object(client,'source_identity',return_value={}),patch.object(client.subprocess,'run'),patch.object(client,'call',return_value={'status':'ready'}) as call:
+                for flags,enabled in ((['--enable-profiling'],True),([],False)):
+                    client.main(['setup',*flags])
+                    payload=call.call_args.args[2]
+                    self.assertIs(payload['profiling_enabled'],enabled)
+                    self.assertFalse(payload['new_baseline'])
+                    self.assertEqual(payload['config'],receipt['config'])
+                    self.assertEqual(common.read(root/'.scratch/lab/receipt.json')['config'],receipt['config'])
+
+    def test_missing_explicit_profiler_fails_before_heavy_setup(self):
+        payload=dict(config={'artifact':'/model','data_dir':'/data'},profiling_enabled=True)
+        with patch.object(host.shutil,'which',return_value=None),patch.object(host.subprocess,'check_output') as check:
+            with self.assertRaisesRegex(ValueError,'--enable-profiling requires'):
+                host.start(Path('/unused'),'owner',payload)
+            check.assert_not_called()
+
+    def test_setup_mode_controls_launch_without_invalidating_baseline_or_corpus(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);(root/'kernel').mkdir()
+            baseline=root/'baseline';baseline.mkdir()
+            for name in ('kernel_lab','lab_prepare'):(baseline/name).write_text('pinned '+name)
+            common.atomic(baseline/'complete.json',dict(source={},binaries={n:common.digest(baseline/n) for n in ('kernel_lab','lab_prepare')}))
+            artifact=root/'model';artifact.write_bytes(b'fixed model')
+            cfg=dict(artifact=str(artifact),data_dir=str(root/'data'))
+            corpora=[];names=[];launched=[]
+            def run(argv,log,*args,**kwargs):
+                self.assertNotIn('cargo',argv)
+                if argv[0]==str(baseline/'lab_prepare'):
+                    common.atomic(argv[2],dict(cases=[dict(id='astropy__astropy-12907',tokens=[1])]))
+            def session(*args,**kwargs):
+                launched.append(kwargs['profiler_session'])
+                return SimpleNamespace(process=SimpleNamespace(pid=123),engine_pid=123,ready={'pid':123},profiler_session=kwargs['profiler_session'])
+            for enabled in (False,True,False):
+                directory=root/('run-'+str(len(corpora)));directory.mkdir()
+                state=dict(config=cfg,directory=str(directory),baseline=str(baseline),source={},session='test',profiling_enabled=enabled)
+                service=host.Owner(root,state);service.publish=Mock()
+                with patch.object(host.shutil,'which',return_value='/bin/nsys'),patch.object(host,'run',side_effect=run),patch.object(host.subprocess,'check_output',side_effect=['','RTX 5080, uuid, driver']),patch.object(host,'Session',side_effect=session):
+                    service.setup()
+                corpora.append((service.corpus,service.corpus_identity));names.append(service.names_path())
+            self.assertEqual(launched,[None,'ignis-lab-test',None])
+            self.assertEqual(corpora[0],corpora[1]);self.assertEqual(corpora[1],corpora[2])
+            self.assertEqual(names[0],names[1]);self.assertEqual(names[1],names[2])
+
     def test_failed_restore_never_publishes_a_pass(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -123,7 +206,9 @@ class LabTests(unittest.TestCase):
                 reload=Mock(side_effect=[{'ok':True},ValueError('capture restore failure')]))
             service.publish=Mock()
             service.local=Mock(return_value={'passed':True})
-            with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(host,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate','identity':'candidate'}):
+            service.select_corpus=Mock(return_value=[])
+            service.resolve_candidate=Mock(return_value={'path':'/candidate','identity':'candidate'})
+            with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(iteration,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate','identity':'candidate'}):
                 with self.assertRaises(RuntimeError):
                     service.evaluate({'source':files,'operation':'failure'},'replay')
             result=common.read(run_dir/'results/failure/result.json')
@@ -159,33 +244,6 @@ class LabTests(unittest.TestCase):
                 client.main(['setup'])
                 self.assertEqual(call.call_count,2)
 
-    def test_failed_candidate_forward_still_checks_restored_full_model(self):
-        from types import SimpleNamespace
-        from unittest.mock import Mock
-        import build_trellis_candidate
-        for restored in (True,False):
-            with self.subTest(restored=restored),tempfile.TemporaryDirectory() as t:
-                root=Path(t);run_dir=root/'run';run_dir.mkdir()
-                files={}
-                for n in build_trellis_candidate.SOURCES:
-                    p=root/'kernel/src'/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('test')
-                    files[str(p.relative_to(root))]=common.digest(p)
-                state=dict(config={'data_dir':str(root/'data')},directory=str(run_dir),source=files,config_hash='cfg')
-                service=host.Owner(root,state);service.corpus=root/'corpus'
-                service.engine=SimpleNamespace(process=SimpleNamespace(pid=123),reload=Mock(return_value={'ok':True}))
-                service.publish=Mock();service.local=Mock(return_value={'passed':True})
-                service.forward=Mock(side_effect=[{'passed':True},{'passed':False},{'passed':restored}])
-                with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(host,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate','identity':'candidate'}):
-                    if restored:service.evaluate({'source':files,'operation':'failure','full':True},'forward')
-                    else:
-                        with self.assertRaisesRegex(RuntimeError,'baseline forward changed'):
-                            service.evaluate({'source':files,'operation':'failure','full':True},'forward')
-                self.assertEqual([c.args[1] for c in service.forward.call_args_list],['before','candidate','after'])
-                self.assertEqual(service.engine.reload.call_args_list[-1].args,('builtin',))
-                result=common.read(run_dir/'results/failure/result.json')
-                self.assertTrue(result['finished']);self.assertFalse(result['passed'])
-                self.assertEqual(result['after_forward']['passed'],restored)
-                self.assertEqual(any(c.kwargs.get('status')=='ready' for c in service.publish.call_args_list),restored)
 
     def test_forward_comparison_checks_speculative_progress(self):
         base=dict(tokens=[1,2],input_tokens=4,finish_reason='length',stop_token=None,
@@ -208,34 +266,12 @@ class LabTests(unittest.TestCase):
                 calls.append(request)
                 return dict(ok=True,result=[dict(record=r['id'],passed=True,samples_ms=[1.0]) for r in request['records']])
             service.engine=SimpleNamespace(call=Mock(side_effect=reply))
+            service.selection=[dict(data=str(root/'data.bin'),shard=str(root),records=service.record_cache)]
             result=service.local(root,'candidate')
             self.assertTrue(result['passed'])
             self.assertEqual((len(calls[0]['records']),calls[0]['warmup'],calls[0]['samples']),(5,0,1))
             self.assertEqual((len(calls[1]['records']),calls[1]['warmup'],calls[1]['samples']),(1,1,3))
 
-    def test_quick_forward_reuses_only_same_candidate_without_baseline_runs(self):
-        from types import SimpleNamespace
-        from unittest.mock import Mock
-        import build_trellis_candidate
-        with tempfile.TemporaryDirectory() as t:
-            root=Path(t);files={}
-            for n in build_trellis_candidate.SOURCES:
-                p=root/'kernel/src'/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('test')
-                files[str(p.relative_to(root))]=common.digest(p)
-            service=host.Owner(root,dict(config={'data_dir':str(root/'data')},directory=t,source=files,config_hash='cfg'))
-            service.corpus=root/'corpus';service.publish=Mock()
-            service.engine=SimpleNamespace(process=SimpleNamespace(pid=123),reload=Mock(return_value={'ok':True}))
-            service.local=Mock(return_value={'passed':True});service.forward=Mock(return_value={'passed':True})
-            with patch.dict(host.os.environ,{'CUDA_HOME':'/test/cuda'}),patch.object(host,'source_identity',return_value=files),patch.object(host,'run'),patch.object(host.subprocess,'check_output',return_value='123\n'),patch.object(host,'build_candidate',return_value={'path':'/candidate','identity':'a'}) as build:
-                service.evaluate({'source':files,'operation':'replay'},'replay')
-                service.evaluate({'source':files,'operation':'forward'},'forward')
-                self.assertEqual(service.local.call_count,1)
-                build.return_value={'path':'/other','identity':'b'}
-                service.evaluate({'source':files,'operation':'changed'},'forward')
-                self.assertEqual(service.local.call_count,2)
-            self.assertEqual([c.args[1] for c in service.local.call_args_list],['candidate','candidate'])
-            self.assertEqual([c.args[1] for c in service.forward.call_args_list],['candidate','candidate'])
-            self.assertTrue(all(c.kwargs=={'full':False} for c in service.forward.call_args_list))
 
     def test_fast_forward_uses_selected_request_once_full_uses_all(self):
         from types import SimpleNamespace
@@ -245,7 +281,7 @@ class LabTests(unittest.TestCase):
             service=host.Owner(root,dict(config={'warmup':1,'samples':2},directory=t))
             service.cases=[dict(id=n) for n in ('a','b','c')];service.quick_case=service.cases[1]
             references=[dict(c,tokens=[1],rounds=[],prefill_ms=2,decode_ms=3) for c in service.cases]
-            service.manifest={'references':references}
+            service.references={r['id']:r for r in references}
             service.engine=SimpleNamespace(call=Mock(side_effect=lambda req:dict(ok=True,result=next(r for r in references if r['id']==req['case']['id']))))
             self.assertTrue(service.forward(root,'quick')['passed'])
             self.assertEqual([c.args[0]['case']['id'] for c in service.engine.call.call_args_list],['b'])

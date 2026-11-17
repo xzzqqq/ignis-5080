@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import select
 import socket
 import statistics
 import subprocess
@@ -15,12 +16,16 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lab_support.common import atomic, read, digest, key, lock, status, identity, alive, source_identity, host_changes, GPU_LOCK, validate_config, deadline, LabTimeout
 from kernel_lab import Session
+from lab_support.iteration import Iteration
 from build_trellis_candidate import build as build_candidate
 
 
 def run(argv, log, env=None, cwd=None):
+    began=time.monotonic()
+    print('lab: '+Path(log).stem, file=sys.stderr, flush=True)
     with Path(log).open('w') as f:
         p = subprocess.run(argv, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=cwd)
+    print(f'lab: {Path(log).stem} {time.monotonic()-began:.3f}s', file=sys.stderr, flush=True)
     if p.returncode:
         raise ValueError(f'command failed ({p.returncode}); see {log}')
 
@@ -46,7 +51,7 @@ def case_agrees(a, b):
         (r['emitted'],r['extent']) for r in a['rounds']] == [(r['emitted'],r['extent']) for r in b['rounds']]
 
 
-class Owner:
+class Owner(Iteration):
     def __init__(self, root, state):
         self.root, self.state = root, state
         self.config = state['config']
@@ -65,6 +70,8 @@ class Owner:
     def setup(self):
         cfg = self.config
         validate_config(cfg)
+        if self.state.get('profiling_enabled',False) and not shutil.which('nsys'):
+            raise ValueError('--enable-profiling requires Nsight Systems (nsys) in the remote PATH')
         if int(cfg.get('warmup',1))<1 or int(cfg.get('samples',3))<1:
             raise ValueError('warmup/samples must be positive')
         for k in ('artifact', 'data_dir'):
@@ -127,195 +134,36 @@ class Owner:
         if len(machine.splitlines())!=1 or 'RTX 5080' not in machine:
             raise ValueError('lab requires exactly one RTX 5080')
         self.engine=Session(baseline/'kernel_lab',Path(cfg['artifact']),self.directory/'settings.json',
-                            self.directory,float(cfg.get('setup_timeout_s',3600)))
-        atomic(self.directory/'engine.identity.json',identity(self.engine.process.pid))
-        corpus_identity=dict(version=2,benchmark=selected,engine=base['binaries']['kernel_lab'],artifact=digest(cfg['artifact']),
+                            self.directory,float(cfg.get('setup_timeout_s',3600)),
+                            profiler_session='ignis-lab-'+self.state['session'] if self.state.get('profiling_enabled',False) else None)
+        atomic(self.directory/'engine.identity.json',identity(getattr(self.engine,'engine_pid',self.engine.process.pid)))
+        self.corpus_identity=dict(version=3,benchmark=selected,engine=base['binaries']['kernel_lab'],artifact=digest(cfg['artifact']),
             prepared=digest(prepared),settings=settings,machine=machine,
-            capture_names=cfg.get('capture_names',[]),
             environment={k:os.environ.get(k) for k in ('IGNIS_TRELLIS_SM_CAP','CUDA_VISIBLE_DEVICES')})
-        corpus=Path(cfg['data_dir'])/'corpora'/key(corpus_identity)
-        if corpus.exists():
-            manifest=corpus_verify(corpus,corpus_identity)
-        else:
-            corpus.parent.mkdir(parents=True,exist_ok=True)
-            staging=corpus.with_name(corpus.name+'.partial-'+uuid.uuid4().hex)
-            staging.mkdir()
-            pin=int(cfg.get('capture_pin_bytes',1<<30));disk=int(cfg.get('capture_disk_bytes',512<<30))
-            if pin<=0 or disk<=0:raise ValueError('capture budgets must be positive')
-            minimum=checked(self.engine.call(dict(op='capture_minimum',names=','.join(cfg.get('capture_names',[])),
-                tokens=len(self.quick_case['tokens']),requests=1)))['prefill_bytes_lower_bound']
-            atomic(self.directory/'capture-storage.json',dict(prefill_bytes_lower_bound=minimum,limit=disk,
-                available=shutil.disk_usage(staging).free))
-            if minimum>disk or minimum>shutil.disk_usage(staging).free:
-                raise ValueError(f'capture needs at least {minimum} bytes for prefill alone; choose explicit scope/storage budget')
-            checked(self.engine.call(dict(op='capture_start',path=str(staging),pin_bytes=pin,disk_bytes=disk,
-                                          names=','.join(cfg.get('capture_names',[])))))
-            references=[]
-            for c in [self.quick_case]:
-                references.append(checked(self.engine.call(dict(op='benchmark',case=c))))
-            checked(self.engine.call(dict(op='capture_stop')))
-            records=sum(1 for _ in (staging/'records.jsonl').open())
-            if not records:raise ValueError('capture produced no calls')
-            # Prove recording did not change the trajectory, with clean graphs.
-            clean=[checked(self.engine.call(dict(op='benchmark',case=c))) for c in self.cases]
-            if not all(case_agrees(a,b) for a,b in zip(references,[r for r in clean if r['id']==selected])):
-                raise ValueError('recording changed baseline trajectory')
-            manifest=dict(identity=corpus_identity,complete=True,records=records,references=clean,
-                files={n:digest(staging/n) for n in ('data.bin','records.jsonl')})
-            atomic(staging/'manifest.json',manifest);staging.rename(corpus)
-        self.corpus,self.manifest=corpus,manifest
-        # References are persisted numerics only; no timing result is reused.
-        current=[checked(self.engine.call(dict(op='benchmark',case=c))) for c in self.cases]
-        if not all(case_agrees(a,b) for a,b in zip(manifest['references'],current)):
-            raise ValueError('loaded corpus baseline differs from current engine')
-        self.baseline_forward=current
-        self.record_cache=list(self.records())
-        self.baseline_replay=self.local(self.directory,'baseline')
-        if not self.baseline_replay['passed']:raise ValueError('baseline replay failed')
-        # Prime the object cache at setup, before the editing loop.
-        self.baseline_candidate=build_candidate(self.root,Path(cfg['data_dir'])/'candidates',str(Path(os.environ['CUDA_HOME'])/'bin/nvcc'))
-        self.validated_candidate=None
-        self.publish(status='starting',benchmark=selected,baseline_replay=self.baseline_replay,baseline_forward=current,engine_pid=self.engine.process.pid,corpus=str(corpus),
-            corpus_records=manifest['records'],settings=settings,ready=self.engine.ready)
+        self.corpus=Path(cfg['data_dir'])/'corpora'/key(self.corpus_identity)
+        self.corpus.mkdir(parents=True,exist_ok=True)
+        self.references={}
+        self.publish(status='starting',benchmark=selected,engine_pid=getattr(self.engine,'engine_pid',self.engine.process.pid),
+            corpus=str(self.corpus),settings=settings,ready=self.engine.ready,
+            profiler_session=getattr(self.engine,'profiler_session',None))
 
-    def records(self):
-        view=self.config.get('view',{})
-        for line in (self.corpus/'records.jsonl').open():
-            r=json.loads(line)
-            names=[r['weight']['name']]+([r['up']['name']] if r.get('up') else [])
-            if view.get('names') and not any(n in view['names'] for n in names):continue
-            if view.get('tokens') and r['tokens'] not in view['tokens']:continue
-            if view.get('ids') and r['id'] not in view['ids']:continue
-            yield r
 
-    def local(self, directory, label):
-        records=self.record_cache if hasattr(self,'record_cache') else list(self.records())
-        if not records:raise ValueError('measurement view selects no records')
-        # Correctness covers every selected real input exactly once.
-        checked_rows=checked(self.engine.call(dict(op='replay_batch',data=str(self.corpus/'data.bin'),
-            records=records,warmup=0,samples=1)))
-        passed=all(r['passed'] for r in checked_rows)
-        atomic(directory/(label+'-correctness.json'),checked_rows)
-        representatives={}
-        for r in records:
-            group=key({k:r.get(k) for k in ('weight','up','tokens','ldy','epilogue')})
-            representatives.setdefault(group,r)
-        measured=[]
-        if passed:
-            measured=checked(self.engine.call(dict(op='replay_batch',data=str(self.corpus/'data.bin'),
-                records=list(representatives.values()),warmup=int(self.config.get('warmup',1)),
-                samples=int(self.config.get('samples',3)))))
-            passed=all(r['passed'] for r in measured)
-        atomic(directory/(label+'-timing.json'),measured)
-        return dict(passed=passed,records=len(checked_rows),performance_records=len(measured),timings=measured,
-                    interpretation='fixed representative calls; not full-model latency')
-
-    def forward(self,directory,label,full=False):
-        output=[]
-        for reference,c in zip(self.manifest['references'],self.cases):
-            if not full and c['id']!=self.quick_case['id']:continue
-            rows=[]
-            warmup=int(self.config.get('warmup',1)) if full else 0
-            samples=int(self.config.get('samples',3)) if full else 1
-            for i in range(warmup+samples):
-                value=checked(self.engine.call(dict(op='benchmark',case=c)))
-                if not case_agrees(reference,value):
-                    return dict(passed=False,case=c['id'],mismatch=value)
-                if i>=warmup:rows.append(value)
-            output.append(dict(id=c['id'],samples=rows,median_prefill_ms=statistics.median(x['prefill_ms'] for x in rows),
-                median_decode_ms=statistics.median(x['decode_ms'] for x in rows)))
-        atomic(directory/(label+'-forward.json'),output)
-        return dict(passed=True,cases=output,full=full)
-
-    def evaluate(self,payload,action):
-        actual=source_identity(self.root)
-        if actual!=payload['source']:raise ValueError('sync/source identity mismatch; nothing measured')
-        changes=host_changes(self.state['source'],actual)
-        if changes:raise ValueError('host changes require new baseline: '+', '.join(changes))
-        d=self.directory/'results'/payload['operation'];d.mkdir(parents=True,exist_ok=False)
-        report=dict(passed=False,operation=payload['operation'],action=action,engine_pid=self.engine.process.pid,
-                    source=actual,corpus=str(self.corpus),config_hash=self.state['config_hash'],finished=False,
-                    settings=self.state.get('settings'),view=self.config.get('view',{}),
-                    warmup=self.config.get('warmup',1),samples=self.config.get('samples',3),
-                    diagnostic_output_tokens=self.config.get('diagnostic_output_tokens'))
-        atomic(d/'result.json',report)
-        self.publish(status='busy',active=payload['operation'],result=str(d/'result.json'))
-        began=time.monotonic()
-        try:
-            try:
-                run(['make','gpu-status'],d/'gpu-status.log',cwd=self.root)
-            except Exception as e:
-                raise RuntimeError('GPU preflight failed: '+str(e)) from e
-            apps=subprocess.check_output(['nvidia-smi','--query-compute-apps=pid','--format=csv,noheader'],text=True).splitlines()
-            if any(x.strip()!=str(self.engine.process.pid) for x in apps if x.strip()):
-                raise RuntimeError('foreign GPU process; refusing measurement')
-            # Copy exactly the candidate compilation inputs; later sync cannot change them.
-            import build_trellis_candidate as builder
-            frozen=d/'source'
-            files=set(self.root.glob('kernel/src/**/*.h'))|set(self.root.glob('kernel/src/**/*.cuh'))|set(self.root.glob('kernel/include/*.h'))
-            files|={self.root/'kernel/src'/n for n in builder.SOURCES}
-            for src in files:
-                dst=frozen/src.relative_to(self.root);dst.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(src,dst)
-                if digest(dst)!=actual[str(src.relative_to(self.root))]:raise ValueError('source changed while copying candidate')
-            try:
-                candidate=build_candidate(frozen,Path(self.config['data_dir'])/'candidates',str(Path(os.environ['CUDA_HOME'])/'bin/nvcc'))
-            except LabTimeout:
-                raise
-            except Exception as e:
-                raise ValueError('candidate build failed: '+str(e)) from e
-            report['candidate']=candidate
-            full=action=='forward' and bool(payload.get('full'))
-            report['full']=full
-            report['baseline_replay']=getattr(self,'baseline_replay',None)
-            report['baseline_forward']=getattr(self,'baseline_forward',None)
-            if full:
-                report['before_forward']=self.forward(d,'before',full=True)
-                if not report['before_forward']['passed']:raise RuntimeError('baseline forward failed')
-            report['reload']=self.engine.reload(candidate['path'])
-            try:
-                identity=candidate['identity']
-                if action=='forward' and getattr(self,'validated_candidate',None)==identity:
-                    report['replay']=dict(passed=True,reused=True,candidate=identity)
-                else:
-                    report['replay']=self.local(d,'candidate')
-                    self.validated_candidate=identity if report['replay']['passed'] else None
-                if report['replay'].get('timings'):
-                    baseline={r['record']:statistics.median(r['samples_ms']) for r in self.baseline_replay['timings']}
-                    report['performance']=[dict(record=r['record'],baseline_ms=baseline[r['record']],
-                        candidate_ms=statistics.median(r['samples_ms']),
-                        speedup=baseline[r['record']]/statistics.median(r['samples_ms']) if statistics.median(r['samples_ms'])>0 else None)
-                        for r in report['replay']['timings']]
-                report['passed']=report['replay']['passed']
-                if action=='forward' and report['passed']:
-                    report['forward']=self.forward(d,'candidate',full=full)
-                    report['passed']=report['forward']['passed']
-            finally:
-                try:report['restore']=self.engine.reload('builtin')
-                except Exception as e:raise RuntimeError('baseline restoration failed: '+str(e)) from e
-            if not report['passed']:self.validated_candidate=None
-            if full:
-                report['after_forward']=self.forward(d,'after',full=True)
-                if not report['after_forward']['passed']:raise RuntimeError('baseline forward changed')
-        except ValueError as e:
-            report.update(passed=False,error=str(e))
-            try:
-                self.engine.reload('builtin')
-            except Exception as failure:
-                report['error'] += '; baseline recovery failed: '+str(failure)
-                raise RuntimeError(report['error']) from failure
-        except Exception as e:
-            report.update(passed=False,error=str(e))
-            raise
-        finally:
-            report['finished']=True
-            report['wall_s']=time.monotonic()-began
-            atomic(d/'result.json',report)
-        self.publish(status='ready',active=None,last_result=str(d/'result.json'))
-        return report
+def relay_progress(path, offset):
+    try:
+        with Path(path).open() as stream:
+            stream.seek(offset)
+            for line in stream:
+                if line.startswith('lab:'):print(line,end='',file=sys.stderr,flush=True)
+            return stream.tell()
+    except FileNotFoundError:return offset
 
 
 def start(root,owner,payload):
     cfg=payload['config'];validate_config(cfg)
+    profiling_enabled=payload.get('profiling_enabled',False)
+    if type(profiling_enabled) is not bool:raise ValueError('profiling_enabled must be a boolean')
+    if profiling_enabled and not shutil.which('nsys'):
+        raise ValueError('--enable-profiling requires Nsight Systems (nsys) in the remote PATH')
     linger=subprocess.check_output(['loginctl','show-user',str(os.getuid()),'--property=Linger','--value'],text=True).strip()
     if linger!='yes':raise ValueError('systemd user lingering is required; configure loginctl enable-linger before setup')
     directory=Path(cfg['data_dir'])/'sessions'/uuid.uuid4().hex
@@ -324,7 +172,7 @@ def start(root,owner,payload):
         previous=status(root)
         if previous and previous['status']!='stopped':raise ValueError('lab already active')
         runtime=directory/'runtime';(runtime/'lab_support').mkdir(parents=True)
-        for name in ('common.py','host.py','__init__.py'):
+        for name in ('common.py','host.py','iteration.py','profiling.py','__init__.py'):
             shutil.copy2(Path(__file__).parent/name,runtime/'lab_support'/name)
         for name in ('kernel_lab.py','build_trellis_candidate.py'):
             shutil.copy2(root/'scripts'/name,runtime/name)
@@ -337,7 +185,8 @@ def start(root,owner,payload):
         socket_dir.mkdir(mode=0o700,parents=True,exist_ok=True)
         state=dict(root=str(root),owner=owner,session=session,status='starting',config=cfg,config_hash=key(cfg),
             source=payload['source'],directory=str(directory),control=str(runtime/'lab_support/host.py'),
-            socket=str(socket_dir/('ignis-lab-'+session[:16]+'.sock')),unit=unit,process=None)
+            socket=str(socket_dir/('ignis-lab-'+session[:16]+'.sock')),unit=unit,process=None,
+            profiling_enabled=profiling_enabled)
         if previous and not payload['new_baseline']:
             if previous['config_hash']!=key(cfg):raise ValueError('configuration change requires --new-baseline')
             if previous.get('baseline'):state['baseline']=previous['baseline'];state['source']=previous['source']
@@ -352,7 +201,9 @@ def start(root,owner,payload):
               '/bin/bash','--noprofile','--norc','-c',activate,'ignis-lab',str(env),state['control'],str(root),owner]
         subprocess.run(argv,check=True,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     deadline=time.monotonic()+float(cfg.get('setup_timeout_s',3600))
+    log_offset=0
     while time.monotonic()<deadline:
+        log_offset=relay_progress(directory/'owner.log',log_offset)
         state=read(root/'.scratch/lab/state.json')
         if not state or state.get('session')!=session:
             raise ValueError('setup session replaced or missing')
@@ -431,7 +282,15 @@ def control(root,owner,action,payload):
     sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
     sock.settimeout(float(state['config'].get('timeout_s',1800))+60)
     with sock:
+        log_path=Path(state['directory'])/'owner.log'
+        log_offset=log_path.stat().st_size if log_path.exists() else 0
         sock.connect(state['socket']);sock.sendall((json.dumps(payload)+'\n').encode())
+        response_deadline=time.monotonic()+float(state['config'].get('timeout_s',1800))+60
+        while not select.select([sock],[],[],.2)[0]:
+            log_offset=relay_progress(log_path,log_offset)
+            if time.monotonic()>=response_deadline:
+                raise ValueError('owner response deadline; inspect session logs; not retried')
+        relay_progress(log_path,log_offset)
         line=sock.makefile('r').readline()
         if not line:
             result=read(Path(state['directory'])/'results'/payload['operation']/'result.json')
@@ -444,11 +303,11 @@ def main():
     os.umask(0o077)
     p=argparse.ArgumentParser()
     p.add_argument('--root',type=Path,required=True)
-    p.add_argument('action',choices=['start','serve','stop','replay','forward'])
+    p.add_argument('action',choices=['start','serve','stop','replay','forward','compare','candidates','profile'])
     p.add_argument('--owner',required=True)
     args=p.parse_args()
     try:
-        payload=json.load(sys.stdin) if args.action in ('start','replay','forward') else None
+        payload=json.load(sys.stdin) if args.action in ('start','replay','forward','compare','candidates','profile') else None
         if args.action=='serve':serve(args.root,args.owner);return
         result=start(args.root,args.owner,payload) if args.action=='start' else control(args.root,args.owner,args.action,payload)
         print(json.dumps(result))
