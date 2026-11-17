@@ -318,7 +318,8 @@ class Iteration:
                     self.reference_forward(bool(payload.get('full')))
                     if action=='forward' and payload.get('full'):
                         report['before_forward']=self.forward(d,'before',full=True)
-                else:self.selection=self.select_corpus(payload)
+                elif not (action=='profile' and payload.get('profile_forward')):
+                    self.selection=self.select_corpus(payload)
                 if action=='compare':
                     baseline=self.resolve_candidate(payload.get('baseline','builtin'),d/'baseline')
                     report['compare']=self.compare(d,payload,baseline,candidate)

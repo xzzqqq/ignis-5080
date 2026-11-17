@@ -19,9 +19,11 @@ pub fn run(model: &Model, pool: &SeqPool, settings: &Settings, case: &Value,
     let request_index=integer(case,"request_index",0)?;
     ignis_core::lab_trace::context(model,request_index,0,0)?;
     let start=Instant::now();
+    let prefill_range=ignis_core::lab_trace::profile_range("ignis.profile.v1/phase=prefill")?;
     prefill_program_draw(model,pool,&mut seq,&prompt,0,
         LaneDraw {sampling:SamplingParams::greedy(),permitted:&[],
             redirect:Redirect {stop_ids:&stops,close_id:if starts_in_reasoning && thinking.closed_at().is_none() {close_id} else {-1}}},Some(&mut logits))?;
+    drop(prefill_range);
     let prefill_ms=start.elapsed().as_secs_f64()*1000.0;
     after_step(model,"prefill",0)?;
     if logits.iter().any(|x|!x.is_finite()) { return Err("nonfinite benchmark logits".into()); }
@@ -34,6 +36,7 @@ pub fn run(model: &Model, pool: &SeqPool, settings: &Settings, case: &Value,
         let position = prompt.len()+tokens.len();
         ignis_core::lab_trace::context(model,request_index,if settings.spec.is_some(){2}else{1},position as u64)?;
         let start = Instant::now();
+        let round_range=ignis_core::lab_trace::profile_range(&format!("ignis.profile.v1/phase=decode_round/round={}/position={position}",rounds.len()))?;
         let (emitted,extent) = if let Some(spec) = settings.spec {
             let mut runs = decode_program_verify_runs(model,pool,&mut [&mut seq],&[VerifyLane {
                 remaining_tokens:remaining,stop_ids:&stops,reasoning_close:if starts_in_reasoning && thinking.closed_at().is_none() {close_id} else {-1},
@@ -47,6 +50,7 @@ pub fn run(model: &Model, pool: &SeqPool, settings: &Settings, case: &Value,
             let result = decode_program_round(model,pool,&mut [&mut seq],&[draw],None)?;
             (result.into_iter().map(|r|r.token).collect::<Vec<_>>(),0)
         };
+        drop(round_range);
         let elapsed = start.elapsed().as_secs_f64()*1000.0;
         after_step(model,if settings.spec.is_some() {"verify"} else {"decode"},position as u64)?;
         if emitted.is_empty() || emitted.len()>remaining as usize { return Err("invalid decode progress".into()); }

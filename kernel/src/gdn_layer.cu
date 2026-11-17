@@ -17,6 +17,7 @@
 // across the `num_tokens` tokens; releasing and re-allocating the sequence
 // resets it (a fresh slot reads zero, ignis_seq.h).
 
+#include "lab_profile.h"
 #include "ignis_gdn_layer.h"
 
 #include "ignis_seq_internal.h"
@@ -89,8 +90,8 @@ void output_and_mlp(ignis_model &model, const GdnLayerWeights &w, const ninfer::
   // P2-03 (GitHub #85): the output projection's residual add under the
   // call's mode policy (AllowA4 on the NVFP4 output parent, or A16Only
   // under the override).
-  ninfer::ops::linear_add(gated, w.output, residual, ignis_policy_for(w.output.qtype, mode), arena, stream);
-  ninfer::ops::rmsnorm(residual, post_norm, model.rms_norm_eps, /*unit_offset=*/true, post, stream);
+  IGNIS_PROFILE_OP("linear_add.output", ninfer::ops::linear_add(gated, w.output, residual, ignis_policy_for(w.output.qtype, mode), arena, stream));
+  IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(residual, post_norm, model.rms_norm_eps, /*unit_offset=*/true, post, stream));
   // P2-03 (GitHub #85): the MLP tail under the call's mode policy too
   // (AllowA4 on the NVFP4 gate_up/down parents under the engine default,
   // or A16 under the override). The width-aware `linear_swiglu`
@@ -100,9 +101,9 @@ void output_and_mlp(ignis_model &model, const GdnLayerWeights &w, const ninfer::
   // #85 behavior); under the engine default AllowA4 at every width, the
   // vendored dispatch's own decision per its token thresholds, GitHub
   // #85's acceptance.
-  ninfer::ops::linear_swiglu(post, w.mlp_gate_up, fused,
-                             ignis_linear_swiglu_policy_for(w.mlp_gate_up.qtype, mode, T), arena, stream);
-  ninfer::ops::linear_add(fused, w.mlp_down, residual, ignis_policy_for(w.mlp_down.qtype, mode), arena, stream);
+  IGNIS_PROFILE_OP("linear_swiglu.mlp_gate_up", ninfer::ops::linear_swiglu(post, w.mlp_gate_up, fused,
+                             ignis_linear_swiglu_policy_for(w.mlp_gate_up.qtype, mode, T), arena, stream));
+  IGNIS_PROFILE_OP("linear_add.mlp_down", ninfer::ops::linear_add(fused, w.mlp_down, residual, ignis_policy_for(w.mlp_down.qtype, mode), arena, stream));
 }
 
 // GitHub #339: the GDN input projection -- the conv input's q | k | v
@@ -113,14 +114,14 @@ void output_and_mlp(ignis_model &model, const GdnLayerWeights &w, const ninfer::
 void input_projection(ignis_model &model, const GdnLayerWeights &w, const ninfer::Tensor &h, ninfer::Tensor &qkv,
                       ninfer::Tensor &z, ninfer::DeviceArena &arena, LinearPolicyMode mode, cudaStream_t stream) {
   if (model.is_trellis_body) {
-    ignis::trellis_body::linear(model, w.trellis.in_proj_qkv, h, qkv.data, static_cast<uint32_t>(qkv.ne[0]),
-                                IGNIS_TRELLIS_STORE, stream);
-    ignis::trellis_body::linear(model, w.trellis.in_proj_z, h, z.data, static_cast<uint32_t>(z.ne[0]),
-                                IGNIS_TRELLIS_STORE, stream);
+    IGNIS_PROFILE_OP("linear.in_proj_qkv", ignis::trellis_body::linear(model, w.trellis.in_proj_qkv, h, qkv.data, static_cast<uint32_t>(qkv.ne[0]),
+                                IGNIS_TRELLIS_STORE, stream));
+    IGNIS_PROFILE_OP("linear.in_proj_z", ignis::trellis_body::linear(model, w.trellis.in_proj_z, h, z.data, static_cast<uint32_t>(z.ne[0]),
+                                IGNIS_TRELLIS_STORE, stream));
     return;
   }
-  ninfer::ops::gdn_input_proj(h, w.query_key_value_z, qkv, z, ignis_policy_for(w.query_key_value_z.qtype, mode),
-                              arena, stream);
+  IGNIS_PROFILE_OP("gdn_input_proj", ninfer::ops::gdn_input_proj(h, w.query_key_value_z, qkv, z, ignis_policy_for(w.query_key_value_z.qtype, mode),
+                              arena, stream));
 }
 
 // Runs one GDN layer for `num_tokens` sequential tokens of one sequence
@@ -137,6 +138,7 @@ void input_projection(ignis_model &model, const GdnLayerWeights &w, const ninfer
 int32_t run_gdn_layer(ignis_model *model, ignis_seq_pool *pool, int32_t slot, uint32_t layer,
                       uint32_t gdn_layer, void *in_residual, void *out_residual,
                       uint64_t num_tokens, LinearPolicyMode mode) {
+  ignis::LabProfileRange profile_layer(layer,"gdn");
   const auto hidden = static_cast<std::int32_t>(model->hidden);
   const auto T = static_cast<std::int32_t>(num_tokens);
   const auto stream = model->stream;
@@ -193,7 +195,7 @@ int32_t run_gdn_layer(ignis_model *model, ignis_seq_pool *pool, int32_t slot, ui
     // --- input RMSNorm (the layer's pre-attention norm) ---
     const ninfer::Tensor input_norm =
         weight_tensor(w.input_norm, ninfer::DType::BF16, {hidden, 1, 1, 1});
-    ninfer::ops::rmsnorm(in, input_norm, model->rms_norm_eps, /*unit_offset=*/true, h, stream);
+    IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(in, input_norm, model->rms_norm_eps, /*unit_offset=*/true, h, stream));
 
     // --- GDN input projection (NVFP4, kernel/src/gdn_input_proj.cu) -> the
     // combined pre-conv q/k/v plane (query/key/value channel order) and z
@@ -214,7 +216,7 @@ int32_t run_gdn_layer(ignis_model *model, ignis_seq_pool *pool, int32_t slot, ui
     // widest policy, P2-01, GitHub #83), so a chunk's A4 route needs
     // nothing new. GitHub #339: the trellis body's two matrices instead.
     input_projection(*model, w, h, qkv, zbuf, *model->scratch, mode, stream);
-    ninfer::ops::causal_conv1d_silu(qkv, conv_weight, conv_state, qkv_conv, stream);
+    IGNIS_PROFILE_OP("causal_conv1d_silu", ninfer::ops::causal_conv1d_silu(qkv, conv_weight, conv_state, qkv_conv, stream));
 
     // The convolved query/key/value channel ranges are strided sub-views of
     // `qkv_conv` (a [conv_channels, T] feature-major buffer: for a fixed
@@ -246,8 +248,8 @@ int32_t run_gdn_layer(ignis_model *model, ignis_seq_pool *pool, int32_t slot, ui
         weight_tensor(w.a_log, ninfer::DType::FP32, {value_heads, 1, 1, 1});
     const ninfer::Tensor dt_bias =
         weight_tensor(w.dt_bias, ninfer::DType::FP32, {value_heads, 1, 1, 1});
-    ninfer::ops::gdn_gating_proj(h, w.a_b_projection, a_log, dt_bias, *model->scratch, g, beta,
-                                 stream);
+    IGNIS_PROFILE_OP("gdn_gating_proj", ninfer::ops::gdn_gating_proj(h, w.a_b_projection, a_log, dt_bias, *model->scratch, g, beta,
+                                 stream));
 
     // --- P2-04 (GitHub #86): the distinct-state recurrence entry point.
     // The sequence's own slot is supplied as BOTH the input and the output
@@ -267,17 +269,17 @@ int32_t run_gdn_layer(ignis_model *model, ignis_seq_pool *pool, int32_t slot, ui
     // `[128, value_heads, T]` view of the `recurrent` buffer (the op writes
     // it in place, so it must be an lvalue, not a temporary view).
     ninfer::Tensor recurrent_out = recurrent.view({head_dim, value_heads, T, 1});
-    ninfer::ops::gated_delta_net(
+    IGNIS_PROFILE_OP("gated_delta_net", ninfer::ops::gated_delta_net(
         query.view({head_dim, qk_heads, T, 1}), key.view({head_dim, qk_heads, T, 1}),
         value.view({head_dim, value_heads, T, 1}), g, beta, readout_scale, /*normalize_qk=*/true,
-        *model->scratch, ssm_state, ssm_state, recurrent_out, stream);
+        *model->scratch, ssm_state, ssm_state, recurrent_out, stream));
 
     // --- gated RMSNorm with z (per-head norm * SiLU(z)) ---
     const ninfer::Tensor gdn_norm =
         weight_tensor(w.norm, ninfer::DType::BF16, {head_dim, 1, 1, 1});
     ninfer::Tensor gated_out = gated.view({head_dim, value_heads, T, 1});
-    ninfer::ops::gated_rmsnorm(recurrent_out, gdn_norm, zbuf.view({head_dim, value_heads, T, 1}),
-                               model->rms_norm_eps, gated_out, stream);
+    IGNIS_PROFILE_OP("gated_rmsnorm", ninfer::ops::gated_rmsnorm(recurrent_out, gdn_norm, zbuf.view({head_dim, value_heads, T, 1}),
+                               model->rms_norm_eps, gated_out, stream));
 
     // --- output projection + residual (the layer's attention residual add; the
     // layer-4 BF16 output arm, exercised by the test). `residual_view` is not
@@ -322,6 +324,7 @@ int32_t run_gdn_layer(ignis_model *model, ignis_seq_pool *pool, int32_t slot, ui
 int32_t run_gdn_layer_graph(ignis_model *model, ignis_seq_pool *pool, uint32_t layer,
                             uint32_t width, void *in_residual, void *out_residual,
                             uint32_t gdn_layer, LinearPolicyMode mode) {
+  ignis::LabProfileRange profile_layer(layer,"gdn");
   // A decode round is exactly one token per lane: the batch's rows are the
   // lanes, so the activation buffers below carry `T` == `width` columns and
   // every snapshot op sees W=1 per row.
@@ -377,7 +380,7 @@ int32_t run_gdn_layer_graph(ignis_model *model, ignis_seq_pool *pool, uint32_t l
 
     const ninfer::Tensor input_norm =
         weight_tensor(w.input_norm, ninfer::DType::BF16, {hidden, 1, 1, 1});
-    ninfer::ops::rmsnorm(in, input_norm, model->rms_norm_eps, /*unit_offset=*/true, h, stream);
+    IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(in, input_norm, model->rms_norm_eps, /*unit_offset=*/true, h, stream));
 
     const ninfer::Tensor conv_weight = weight_tensor(
         w.convolution, ninfer::DType::BF16, {conv_channels, kIgnisGdnConvKernel, 1, 1});
@@ -389,9 +392,9 @@ int32_t run_gdn_layer_graph(ignis_model *model, ignis_seq_pool *pool, uint32_t l
     ninfer::Tensor conv_states_mut = conv_states;
     ninfer::Tensor qkv_rows = qkv.view({conv_channels, 1, T, 1});
     ninfer::Tensor qkv_conv_rows = qkv_conv.view({conv_channels, 1, T, 1});
-    ninfer::ops::causal_conv1d_silu_snapshot(qkv_rows, conv_weight, conv_states_mut,
+    IGNIS_PROFILE_OP("causal_conv1d_silu_snapshot", ninfer::ops::causal_conv1d_silu_snapshot(qkv_rows, conv_weight, conv_states_mut,
                                              /*valid_columns=*/ninfer::Tensor{}, lane_slots,
-                                             lane_slots, qkv_conv_rows, stream);
+                                             lane_slots, qkv_conv_rows, stream));
 
     constexpr std::size_t kElemBytes = 2;
     auto copy_channel_range = [&](std::int32_t offset, std::int32_t width,
@@ -416,24 +419,24 @@ int32_t run_gdn_layer_graph(ignis_model *model, ignis_seq_pool *pool, uint32_t l
         weight_tensor(w.a_log, ninfer::DType::FP32, {value_heads, 1, 1, 1});
     const ninfer::Tensor dt_bias =
         weight_tensor(w.dt_bias, ninfer::DType::FP32, {value_heads, 1, 1, 1});
-    ninfer::ops::gdn_gating_proj(h, w.a_b_projection, a_log, dt_bias, *model->decode_graph_scratch,
-                                 g, beta, stream);
+    IGNIS_PROFILE_OP("gdn_gating_proj", ninfer::ops::gdn_gating_proj(h, w.a_b_projection, a_log, dt_bias, *model->decode_graph_scratch,
+                                 g, beta, stream));
 
     // The snapshot form's [.., W, B] layout with W=1: one token per lane,
     // `width` lanes -- the same contiguous buffers the projections above
     // wrote, re-viewed with the batch on the last axis.
     ninfer::Tensor recurrent_out = recurrent.view({head_dim, value_heads, 1, T});
-    ninfer::ops::gated_delta_net_snapshot(
+    IGNIS_PROFILE_OP("gated_delta_net_snapshot", ninfer::ops::gated_delta_net_snapshot(
         query.view({head_dim, qk_heads, 1, T}), key.view({head_dim, qk_heads, 1, T}),
         value.view({head_dim, value_heads, 1, T}), g.view({value_heads, 1, T, 1}),
         beta.view({value_heads, 1, T, 1}), readout_scale, /*normalize_qk=*/true, ssm_states,
-        /*valid_columns=*/ninfer::Tensor{}, lane_slots, lane_slots, recurrent_out, stream);
+        /*valid_columns=*/ninfer::Tensor{}, lane_slots, lane_slots, recurrent_out, stream));
 
     const ninfer::Tensor gdn_norm =
         weight_tensor(w.norm, ninfer::DType::BF16, {head_dim, 1, 1, 1});
     ninfer::Tensor gated_out = gated.view({head_dim, value_heads, 1, T});
-    ninfer::ops::gated_rmsnorm(recurrent_out, gdn_norm, zbuf.view({head_dim, value_heads, 1, T}),
-                               model->rms_norm_eps, gated_out, stream);
+    IGNIS_PROFILE_OP("gated_rmsnorm", ninfer::ops::gated_rmsnorm(recurrent_out, gdn_norm, zbuf.view({head_dim, value_heads, 1, T}),
+                               model->rms_norm_eps, gated_out, stream));
 
     ninfer::Tensor residual_view(out_residual, ninfer::DType::BF16, {hidden, T, 1, 1});
     err = cudaMemcpyAsync(out_residual, in_residual, static_cast<std::size_t>(hidden) * T * 2,
@@ -469,6 +472,7 @@ int32_t run_gdn_layer_graph(ignis_model *model, ignis_seq_pool *pool, uint32_t l
 int32_t run_gdn_layer_record(ignis_model *model, ignis_seq_pool *pool, uint32_t layer,
                              uint32_t width, void *in_residual, void *out_residual,
                              uint32_t gdn_layer, LinearPolicyMode mode) {
+  ignis::LabProfileRange profile_layer(layer,"gdn");
   const IgnisVerifyRound &verify = *model->verify;
   const auto W = static_cast<std::int32_t>(verify.window + 1);
   const auto batch = static_cast<std::int32_t>(width);
@@ -521,7 +525,7 @@ int32_t run_gdn_layer_record(ignis_model *model, ignis_seq_pool *pool, uint32_t 
     const ninfer::Tensor in(in_residual, ninfer::DType::BF16, {hidden, T, 1, 1});
     const ninfer::Tensor input_norm =
         weight_tensor(w.input_norm, ninfer::DType::BF16, {hidden, 1, 1, 1});
-    ninfer::ops::rmsnorm(in, input_norm, model->rms_norm_eps, /*unit_offset=*/true, h, stream);
+    IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(in, input_norm, model->rms_norm_eps, /*unit_offset=*/true, h, stream));
 
     const ninfer::Tensor conv_weight = weight_tensor(
         w.convolution, ninfer::DType::BF16, {conv_channels, kIgnisGdnConvKernel, 1, 1});
@@ -537,12 +541,12 @@ int32_t run_gdn_layer_record(ignis_model *model, ignis_seq_pool *pool, uint32_t 
       // `[C, W*B]` matrix of every lane's columns) and z beside it, then the
       // shared record kernel convolves each lane's valid columns from its
       // own conv taps, without touching them.
-      ignis::trellis_body::linear(*model, w.trellis.in_proj_qkv, h, records.conv.data,
-                                  static_cast<uint32_t>(conv_channels), IGNIS_TRELLIS_STORE, stream);
-      ignis::trellis_body::linear(*model, w.trellis.in_proj_z, h, zbuf.data, static_cast<uint32_t>(value_width),
-                                  IGNIS_TRELLIS_STORE, stream);
-      ninfer::ops::detail::gdn_projected_conv_record_launch(records.conv, conv_weight, conv_states, valid_columns,
-                                                            lane_slots, query_rows, key_rows, value_rows, stream);
+      IGNIS_PROFILE_OP("linear.in_proj_qkv", ignis::trellis_body::linear(*model, w.trellis.in_proj_qkv, h, records.conv.data,
+                                  static_cast<uint32_t>(conv_channels), IGNIS_TRELLIS_STORE, stream));
+      IGNIS_PROFILE_OP("linear.in_proj_z", ignis::trellis_body::linear(*model, w.trellis.in_proj_z, h, zbuf.data, static_cast<uint32_t>(value_width),
+                                  IGNIS_TRELLIS_STORE, stream));
+      IGNIS_PROFILE_OP("gdn_projected_conv_record", ninfer::ops::detail::gdn_projected_conv_record_launch(records.conv, conv_weight, conv_states, valid_columns,
+                                                            lane_slots, query_rows, key_rows, value_rows, stream));
     } else {
       // The record form checks its operands against the *live workspace* it
       // is handed, so it gets a span of its own out of the arena rather than
@@ -555,31 +559,31 @@ int32_t run_gdn_layer_record(ignis_model *model, ignis_seq_pool *pool, uint32_t 
       const ninfer::DeviceSpan record_workspace_storage =
           model->decode_graph_scratch->alloc_bytes(std::max<std::size_t>(record_workspace_bytes, 1));
       ninfer::DeviceArena record_workspace(record_workspace_storage);
-      ninfer::ops::gdn_input_proj_conv_record(h_rows, w.query_key_value_z, conv_weight, conv_states,
+      IGNIS_PROFILE_OP("gdn_input_proj_conv_record", ninfer::ops::gdn_input_proj_conv_record(h_rows, w.query_key_value_z, conv_weight, conv_states,
                                               valid_columns, lane_slots, records.conv, query_rows,
                                               key_rows, value_rows, z_rows, policy, record_workspace,
-                                              stream);
+                                              stream));
     }
 
     const ninfer::Tensor a_log =
         weight_tensor(w.a_log, ninfer::DType::FP32, {value_heads, 1, 1, 1});
     const ninfer::Tensor dt_bias =
         weight_tensor(w.dt_bias, ninfer::DType::FP32, {value_heads, 1, 1, 1});
-    ninfer::ops::gdn_gating_proj(h, w.a_b_projection, a_log, dt_bias, *model->decode_graph_scratch,
-                                 g, beta, stream);
+    IGNIS_PROFILE_OP("gdn_gating_proj", ninfer::ops::gdn_gating_proj(h, w.a_b_projection, a_log, dt_bias, *model->decode_graph_scratch,
+                                 g, beta, stream));
 
     ninfer::Tensor recurrent_out = recurrent.view({head_dim, value_heads, W, batch});
-    ninfer::ops::gated_delta_net_replay_record(
+    IGNIS_PROFILE_OP("gated_delta_net_replay_record", ninfer::ops::gated_delta_net_replay_record(
         query.view({head_dim, qk_heads, W, batch}), key.view({head_dim, qk_heads, W, batch}),
         value.view({head_dim, value_heads, W, batch}), g.view({value_heads, W, batch, 1}),
         beta.view({value_heads, W, batch, 1}), readout_scale, ssm_states, valid_columns, lane_slots,
-        records.key, records.value, records.gate, recurrent_out, stream);
+        records.key, records.value, records.gate, recurrent_out, stream));
 
     const ninfer::Tensor gdn_norm =
         weight_tensor(w.norm, ninfer::DType::BF16, {head_dim, 1, 1, 1});
     ninfer::Tensor gated_out = gated.view({head_dim, value_heads, W, batch});
-    ninfer::ops::gated_rmsnorm(recurrent_out, gdn_norm, zbuf.view({head_dim, value_heads, W, batch}),
-                               model->rms_norm_eps, gated_out, stream);
+    IGNIS_PROFILE_OP("gated_rmsnorm", ninfer::ops::gated_rmsnorm(recurrent_out, gdn_norm, zbuf.view({head_dim, value_heads, W, batch}),
+                               model->rms_norm_eps, gated_out, stream));
 
     ninfer::Tensor residual_view(out_residual, ninfer::DType::BF16, {hidden, T, 1, 1});
     cudaError_t err = cudaMemcpyAsync(out_residual, in_residual,

@@ -93,6 +93,35 @@ reported separately. Copies and host activity can occupy kernel gaps, whose
 cause is not inferred. Empty/missing/unsupported exports are errors, not success.
 Nsight Compute counters are outside this implementation.
 
+### Full-forward GPU attribution
+
+`profile --forward` collects the fixed request, default warmup zero and sample
+count one. It uses candidate-generated state and tokens without a replay corpus
+or mandatory baseline execution. Cached builtin references may supply output
+differences; absent references are explicitly unavailable.
+
+Inside the bounded collection, recapture the same candidate graphs once under
+`phase=setup/stage=recapture` before benchmark samples. This retains graph-node
+source NVTX scopes in the exported trace without model reload or a second
+engine. Request summaries exclude this setup work. Keep it and unplaced kernels
+in the raw timeline and report all role counts.
+
+NVTX labels use `ignis.profile.v1/` fields: sample; phase; round/position;
+stage; layer index/type; and logical op. Runtime correlation IDs are qualified
+by process (and context when exported). Eager attribution follows enclosing
+issuing-thread ranges. Graph attribution follows explicit node creation/clone
+ancestry to source scopes, combined with the actual graph launch's sample and
+phase. Never infer layer identity from kernel symbols or execution order.
+Missing/ambiguous provenance remains unclassified and coverage is reported.
+
+Phase/layer/operator metrics use actual GPU kernel timestamps. Instances are
+separate for each source range occurrence and graph launch, including repeated
+prefill chunks and decode rounds. Aggregate counts and sums/means/maxima of
+instance spans rather than spanning a layer across unrelated rounds. Preserve
+sample separation, nonlayer output-head bins and draft layer identities. Union,
+summed duration and overlap metrics have the same distinction as replay;
+levels overlap and cannot be added together into request wall time.
+
 ## Evidence and implementation boundary
 
 CPU tests cover scope/candidate orchestration, failure cleanup, protocol handling

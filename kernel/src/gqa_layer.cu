@@ -4,6 +4,7 @@
 // context: input norm -> fused Q/K/gate/V projection -> q/k norm + RoPE ->
 // KV append -> attention + sigmoid output gate -> output residual -> MLP tail.
 
+#include "lab_profile.h"
 #include "attention_readout.h"
 #include "ignis_attn_tap.h"
 #include "ignis_gqa_layer.h"
@@ -62,15 +63,15 @@ void input_projection(ignis_model &model, const GqaLayerWeights &weights, const 
                       cudaStream_t stream) {
   if (model.is_trellis_body) {
     const GqaTrellisWeights &t = weights.trellis;
-    ignis::trellis_body::query_gate(model, t.q_proj, normalized, heads, head_dim, arena, query, gate, stream);
-    ignis::trellis_body::linear(model, t.k_proj, normalized, key.data, static_cast<uint32_t>(key.ne[0]),
-                                IGNIS_TRELLIS_STORE, stream);
-    ignis::trellis_body::linear(model, t.v_proj, normalized, value.data, static_cast<uint32_t>(value.ne[0]),
-                                IGNIS_TRELLIS_STORE, stream);
+    IGNIS_PROFILE_OP("linear.q_proj", ignis::trellis_body::query_gate(model, t.q_proj, normalized, heads, head_dim, arena, query, gate, stream));
+    IGNIS_PROFILE_OP("linear.k_proj", ignis::trellis_body::linear(model, t.k_proj, normalized, key.data, static_cast<uint32_t>(key.ne[0]),
+                                IGNIS_TRELLIS_STORE, stream));
+    IGNIS_PROFILE_OP("linear.v_proj", ignis::trellis_body::linear(model, t.v_proj, normalized, value.data, static_cast<uint32_t>(value.ne[0]),
+                                IGNIS_TRELLIS_STORE, stream));
     return;
   }
-  ninfer::ops::attn_input_proj(normalized, weights.query_key_gate_value, query, gate, key, value,
-                               ignis_policy_for(weights.query_key_gate_value.qtype, mode), arena, stream);
+  IGNIS_PROFILE_OP("attn_input_proj", ninfer::ops::attn_input_proj(normalized, weights.query_key_gate_value, query, gate, key, value,
+                               ignis_policy_for(weights.query_key_gate_value.qtype, mode), arena, stream));
 }
 
 // GitHub #339: the output projection's residual add and the MLP tail on the
@@ -90,9 +91,9 @@ void output_and_mlp(ignis_model &model, const GqaLayerWeights &weights, const ni
   // (AllowA4 on the NVFP4 output projection under the engine default, so
   // its W4A4 route is the vendored dispatch's own decision) or A16Only
   // under the override.
-  ninfer::ops::linear_add(attention, weights.output, residual, ignis_policy_for(weights.output.qtype, mode), arena,
-                          stream);
-  ninfer::ops::rmsnorm(residual, post_norm, model.rms_norm_eps, /*unit_offset=*/true, post, stream);
+  IGNIS_PROFILE_OP("linear_add.output", ninfer::ops::linear_add(attention, weights.output, residual, ignis_policy_for(weights.output.qtype, mode), arena,
+                          stream));
+  IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(residual, post_norm, model.rms_norm_eps, /*unit_offset=*/true, post, stream));
   // P2-03 (GitHub #85): the MLP tail takes the call's mode policy too.
   // The reference's text-model policy is AllowA4 on the NVFP4 gate_up at
   // every width under the engine default, and the route (A16 small-T vs
@@ -104,17 +105,18 @@ void output_and_mlp(ignis_model &model, const GqaLayerWeights &weights, const ni
   // runnable route above its A16 cap -- the pre-#85 behavior. The scratch
   // was already reserved for AllowA4 at any T (P2-01, GitHub #83), so a
   // chunk's A4 route needs nothing new.
-  ninfer::ops::linear_swiglu(post, weights.mlp_gate_up, fused,
+  IGNIS_PROFILE_OP("linear_swiglu.mlp_gate_up", ninfer::ops::linear_swiglu(post, weights.mlp_gate_up, fused,
                              ignis_linear_swiglu_policy_for(weights.mlp_gate_up.qtype, mode, tokens), arena,
-                             stream);
-  ninfer::ops::linear_add(fused, weights.mlp_down, residual, ignis_policy_for(weights.mlp_down.qtype, mode), arena,
-                          stream);
+                             stream));
+  IGNIS_PROFILE_OP("linear_add.mlp_down", ninfer::ops::linear_add(fused, weights.mlp_down, residual, ignis_policy_for(weights.mlp_down.qtype, mode), arena,
+                          stream));
 }
 
 int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
                       uint32_t layer, void *in_residual, void *out_residual,
                       uint32_t gqa_layer, uint64_t num_tokens, LinearPolicyMode mode,
                       const void *rope_positions, const AttentionReadoutTarget *attention_readout) {
+  ignis::LabProfileRange profile_layer(layer,"gqa");
   constexpr std::int32_t kHeadDim = 256;
   constexpr std::int32_t kQHeads = kIgnisGqaQHeads;
   constexpr std::int32_t kKvHeads = 4;
@@ -148,8 +150,8 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
     const ninfer::Tensor input(in_residual, ninfer::DType::BF16, {hidden, tokens, 1, 1});
     const ninfer::Tensor input_norm =
         weight_tensor(weights.input_norm, ninfer::DType::BF16, {hidden, 1, 1, 1});
-    ninfer::ops::rmsnorm(input, input_norm, model->rms_norm_eps, /*unit_offset=*/true,
-                         normalized, stream);
+    IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(input, input_norm, model->rms_norm_eps, /*unit_offset=*/true,
+                         normalized, stream));
 
     // P2-03 (GitHub #85): the reference's own activation-quantization policy
     // under the call's mode (ADR 0016): AllowA4 on the NVFP4 projection when
@@ -164,7 +166,7 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
 
     // The future full prefill/decode step supplies the same offset to every
     // GQA layer for a token, so positions advance per token, never per layer.
-    ninfer::ops::fill_i32_positions(positions, start_position, stream);
+    IGNIS_PROFILE_OP("fill_i32_positions", ninfer::ops::fill_i32_positions(positions, start_position, stream));
     // GitHub #178: what the span rotates at -- a multimodal chunk's three
     // axes, a multimodal sequence's positions shifted by its rope delta, or
     // (every text sequence) the cache positions above, as before.
@@ -174,7 +176,7 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
                                           {tokens, 3, 1, 1});
     } else if (seq->rope_delta != 0) {
       rotation_positions = model->scratch->alloc(ninfer::DType::I32, {tokens, 1, 1, 1});
-      ninfer::ops::fill_i32_positions(rotation_positions, start_position + seq->rope_delta, stream);
+      IGNIS_PROFILE_OP("fill_i32_positions", ninfer::ops::fill_i32_positions(rotation_positions, start_position + seq->rope_delta, stream));
     }
     const ninfer::Tensor q_norm =
         weight_tensor(weights.query_norm, ninfer::DType::BF16, {kHeadDim, 1, 1, 1});
@@ -188,9 +190,9 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
     ninfer::Tensor key_heads = key.view({kHeadDim, kKvHeads, tokens, 1});
     ninfer::Tensor rotated_query_heads = rotated_query.view({kHeadDim, kQHeads, tokens, 1});
     ninfer::Tensor rotated_key_heads = rotated_key.view({kHeadDim, kKvHeads, tokens, 1});
-    ninfer::ops::qk_norm_rope(query_heads, key_heads, q_norm, k_norm, model->rms_norm_eps,
+    IGNIS_PROFILE_OP("qk_norm_rope", ninfer::ops::qk_norm_rope(query_heads, key_heads, q_norm, k_norm, model->rms_norm_eps,
                               rotation_positions, rope, rotated_query_heads, rotated_key_heads,
-                              stream);
+                              stream));
 
     // Test-only attention-input tap (kernel/include/ignis_attn_tap.h): one
     // flag load when disarmed, which is the only way production ever runs.
@@ -331,17 +333,17 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
                               ? IgnisHqPromptPrecision::kFp16
                               : IgnisHqPromptPrecision::kFp8;
       options.after_attention = [&](const IgnisHqPromptKeys &keys) { readout(&keys); };
-      ignis_hq_prompt_attention(rotated_query_heads, rotated_key_heads, value_heads, positions,
+      IGNIS_PROFILE_OP("hq_prompt_attention", ignis_hq_prompt_attention(rotated_query_heads, rotated_key_heads, value_heads, positions,
                                 start_position, gate.view({kHeadDim, kQHeads, tokens, 1}),
                                 attention_scale,
                                 ignis_kv_layer_view(pool, seq, static_cast<std::int32_t>(gqa_layer)),
-                                attention_workspace, attention_heads, stream, options);
+                                attention_workspace, attention_heads, stream, options));
     } else {
-      ninfer::ops::gqa_attention(
+      IGNIS_PROFILE_OP("gqa_attention", ninfer::ops::gqa_attention(
           rotated_query_heads, rotated_key_heads, value_heads, positions,
           /*valid_columns=*/ninfer::Tensor{}, kv_table_rows,
           gate.view({kHeadDim, kQHeads, tokens, 1}), attention_scale, batch_cache, envelope,
-          attention_workspace, attention_heads, stream);
+          attention_workspace, attention_heads, stream));
       readout(nullptr);
     }
     if (readout_failed) {
@@ -397,6 +399,7 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
                             const void *rope_positions_ptr,
                             const void *valid_columns_ptr, void *in_residual, void *out_residual,
                             uint32_t gqa_layer, LinearPolicyMode mode, const char *op) {
+  ignis::LabProfileRange profile_layer(layer,"gqa");
   constexpr std::int32_t kHeadDim = 256;
   constexpr std::int32_t kQHeads = kIgnisGqaQHeads;
   constexpr std::int32_t kKvHeads = 4;
@@ -439,8 +442,8 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
     const ninfer::Tensor input(in_residual, ninfer::DType::BF16, {hidden, columns, 1, 1});
     const ninfer::Tensor input_norm =
         weight_tensor(weights.input_norm, ninfer::DType::BF16, {hidden, 1, 1, 1});
-    ninfer::ops::rmsnorm(input, input_norm, model->rms_norm_eps, /*unit_offset=*/true,
-                         normalized, stream);
+    IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(input, input_norm, model->rms_norm_eps, /*unit_offset=*/true,
+                         normalized, stream));
 
     input_projection(*model, weights, normalized, query, gate, key, value, kQHeads, kHeadDim,
                      *model->decode_graph_scratch, mode, stream);
@@ -489,9 +492,9 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
     ninfer::Tensor key_tokens = key.view({kHeadDim, kKvHeads, columns, 1});
     ninfer::Tensor rotated_query_tokens = rotated_query.view({kHeadDim, kQHeads, columns, 1});
     ninfer::Tensor rotated_key_tokens = rotated_key.view({kHeadDim, kKvHeads, columns, 1});
-    ninfer::ops::qk_norm_rope(query_tokens, key_tokens, q_norm, k_norm, model->rms_norm_eps,
+    IGNIS_PROFILE_OP("qk_norm_rope", ninfer::ops::qk_norm_rope(query_tokens, key_tokens, q_norm, k_norm, model->rms_norm_eps,
                               rotation_positions, rope, rotated_query_tokens, rotated_key_tokens,
-                              stream);
+                              stream));
     ninfer::Tensor rotated_query_heads = rotated_query.view({kHeadDim, kQHeads, lane_tokens, batch});
     ninfer::Tensor rotated_key_heads = rotated_key.view({kHeadDim, kKvHeads, lane_tokens, batch});
 
@@ -547,10 +550,10 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
     }
     ninfer::DeviceArena attention_workspace(attention_workspace_storage);
     ninfer::Tensor attention_heads = attention.view({kHeadDim, kQHeads, lane_tokens, batch});
-    ninfer::ops::gqa_attention(
+    IGNIS_PROFILE_OP("gqa_attention", ninfer::ops::gqa_attention(
         rotated_query_heads, rotated_key_heads, value_heads, positions_rows, valid_columns,
         kv_table_rows, gate.view({kHeadDim, kQHeads, lane_tokens, batch}), attention_scale,
-        batch_cache, envelope, attention_workspace, attention_heads, stream);
+        batch_cache, envelope, attention_workspace, attention_heads, stream));
 
     ninfer::Tensor residual(out_residual, ninfer::DType::BF16, {hidden, columns, 1, 1});
     error = cudaMemcpyAsync(out_residual, in_residual,

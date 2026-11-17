@@ -219,6 +219,59 @@ class LabGpuTests(unittest.TestCase):
         finally:
             self.command('stop')
 
+    @unittest.skipUnless(os.environ.get('IGNIS_LAB_E2E_PROFILE'),'opt-in real full-forward Nsight capture')
+    def test_real_forward_profile_preserves_resident_engine(self):
+        config,cfg=self.prepare('forward-profile')
+        name='forward-profile-'+uuid.uuid4().hex[:8]
+        try:
+            self.command('stop')
+            ready=self.command('setup','--config',config,'--new-baseline','--enable-profiling')
+            pid=ready['engine_pid'];decode=8 if ready['settings']['speculation']=='dflash2' else 1
+            reports=[]
+            for selector,warmup,samples in (('builtin',0,1),(name,1,2)):
+                ordinary=self.command('forward','--candidate',selector,'--warmup','0','--samples','1')
+                self.assert_forward(ordinary,pid)
+                reference=ordinary['forward']['cases'][0]['samples'][0]
+                before=self.corpus_inventory(cfg['data_dir'])
+                options=[] if selector=='builtin' else ['--warmup',str(warmup),'--samples',str(samples)]
+                result=self.command('profile','--forward','--candidate',selector,*options)
+                self.assertTrue(result['passed']);self.assertEqual(result['engine_pid'],pid)
+                value=result['profile'];self.assertEqual(value['mode'],'forward')
+                self.assertEqual(value['timing_kind'],'instrumented')
+                self.assertEqual((value['warmup'],value['samples']),(warmup,samples))
+                self.assertEqual(self.corpus_inventory(cfg['data_dir']),before,'full-forward profile recorded operator inputs')
+                self.assertTrue(value['reference_available']);self.assertTrue(value['forward']['numerical_match'])
+                self.assertGreater(value['kernel_count'],0)
+                attribution=value['attribution'];self.assertTrue(attribution['available'])
+                self.assertNotIn('timeline',attribution);self.assertNotIn('instances',attribution)
+                self.assertGreater(attribution['timeline_count'],0);self.assertGreater(attribution['instances_count'],0)
+                self.assertGreater(attribution['coverage']['phase_attributed'],0)
+                self.assertGreater(attribution['coverage']['layer_attributed'],0)
+                self.assertGreater(attribution['coverage']['operator_attributed'],0)
+                self.assertTrue({'prefill','decode_round'} <= {i.get('phase') for i in attribution['aggregates']})
+                self.assertGreater(len({i['layer'] for i in attribution['aggregates'] if i.get('layer') is not None}),1)
+                self.assertEqual({str(i['sample']) for i in attribution['aggregates'] if i.get('sample') is not None},set(map(str,range(samples))))
+                rows=value['forward']['cases'][0]['samples']
+                self.assertEqual(len(rows),samples)
+                self.assertEqual([r['profile_sample'] for r in rows],list(range(samples)))
+                for row in rows:
+                    for field in ('tokens','input_tokens','output_tokens','finish_reason','stop_token','logits_sha256'):
+                        self.assertEqual(row[field],reference[field],field+' changed under profiling')
+                    self.assertEqual([(r['emitted'],r['extent']) for r in row['rounds']],
+                        [(r['emitted'],r['extent']) for r in reference['rounds']],'speculative trajectory changed under profiling')
+                self.assertTrue(all(0<r['output_tokens']<=4 and r['round_count']>0 for r in rows))
+                self.assertTrue(all(r['finish_reason'] and r['prefill_ms']>0 and r['decode_ms']>0 for r in rows))
+                self.assertTrue(self.remote("import json,sys;from pathlib import Path;print(json.dumps(all(Path(p).stat().st_size>0 for p in json.loads(sys.argv[1]).values())))",json.dumps(value['artifacts'])))
+                reports.append(value['artifacts']['report'])
+                # The first replay also saves an immutable current candidate for
+                # the second full-model capture; both replays prove same-PID use.
+                save=['--save-as',name] if selector=='builtin' else []
+                replay=self.command('replay','--candidate','current' if save else 'builtin',
+                    '--operator','layer.0.gate','--tokens-per-call',str(decode),'--warmup','0','--samples','1',*save)
+                self.assert_replay(replay,pid,1)
+            self.assertEqual(len(set(reports)),2)
+        finally:self.command('stop')
+
     def test_disconnect_busy_stop_and_owner_death(self):
         config,_=self.prepare('lifecycle')
         def remote(code,*args):

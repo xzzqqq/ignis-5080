@@ -3,6 +3,7 @@ import collections
 import contextlib
 import shutil
 import sqlite3
+import statistics
 import subprocess
 import time
 from pathlib import Path
@@ -29,6 +30,8 @@ def command(argv, log, required=True, timeout=None):
 
 def profile(owner, directory, payload, candidate):
     """Profile the already-loaded candidate without restarting the resident engine."""
+    if payload.get('profile_forward'):
+        return profile_forward(owner, directory, payload, candidate)
     nsys = shutil.which('nsys')
     session = getattr(owner.engine, 'profiler_session', None)
     if not session:
@@ -91,6 +94,89 @@ def profile(owner, directory, payload, candidate):
                 stop_status=stop_status, artifacts=dict(report=str(report), sqlite=str(database),
                     timeline=str(directory/'profile-timeline.json'), replay=str(directory/'profile-replay.json')),
                 **{field:value for field,value in summary.items() if field != 'timeline'})
+
+
+def profile_forward(owner, directory, payload, candidate):
+    """Capture the selected full request once by default, without recording operators."""
+    from .iteration import forward_difference
+    from .forward_timeline import attribute_forward
+    nsys = shutil.which('nsys')
+    session = getattr(owner.engine, 'profiler_session', None)
+    if not session:
+        raise ValueError('profiling is disabled; stop and setup --enable-profiling')
+    if not nsys:
+        raise ValueError('forward profiling requires Nsight Systems (nsys) in the remote PATH')
+    warmup = int(payload.get('warmup') if payload.get('warmup') is not None else 0)
+    samples = int(payload.get('samples') if payload.get('samples') is not None else 1)
+    if not 0 <= warmup <= 10000 or not 1 <= samples <= 10000:
+        raise ValueError('forward profile requires warmup 0..10000 and samples 1..10000')
+    if payload.get('operators') or payload.get('tokens_per_call') or payload.get('full'):
+        raise ValueError('profile --forward uses one fixed request; operator selectors and --full do not apply')
+    case = owner.quick_case
+    # The caller already froze, compiled and loaded this candidate. Only explicit
+    # warmups run here; a missing builtin reference never causes a hidden request.
+    for _ in range(warmup):
+        checked(owner.engine.call(dict(op='benchmark', case=case)))
+    prefix = directory / 'forward-profile'
+    report = prefix.with_suffix('.nsys-rep')
+    database = prefix.with_suffix('.sqlite')
+    began = time.monotonic()
+    rows = []
+    reference = getattr(owner, 'references', {}).get(case['id'])
+    try:
+        command([nsys, 'start', '--session=' + session, '--capture-range=cudaProfilerApi',
+                 '--capture-range-end=stop', '--sample=none', '--cpuctxsw=none',
+                 '--output=' + str(prefix)], directory/'nsys-start.log')
+        checked(owner.engine.call(dict(op='profiler_start')))
+        try:
+            # Nvtx graph-construction provenance must be in this export. This
+            # recaptures the same candidate graphs without moving model weights;
+            # its setup kernels are kept separate from actual request summaries.
+            recapture = owner.engine.reload(candidate['path'], profile_recapture=True)
+            for sample in range(samples):
+                value = checked(owner.engine.call(dict(op='benchmark', case=case, profile_sample=sample)))
+                rounds = value['rounds']
+                rows.append(dict(value, profile_sample=sample, round_count=len(rounds),
+                    tokens_per_round=sum(r['emitted'] for r in rounds)/len(rounds) if rounds else None,
+                    reference_available=reference is not None,
+                    differences=forward_difference(reference, value) if reference is not None else None))
+        finally:
+            checked(owner.engine.call(dict(op='profiler_stop')))
+    finally:
+        stop_status = command([nsys, 'stop', '--session=' + session], directory/'nsys-stop.log',
+                              required=False, timeout=10)
+    timeout = float(owner.config.get('timeout_s', 1800))
+    while not report.is_file():
+        if time.monotonic() - began >= timeout:
+            raise ValueError('Nsight produced no report; see nsys-start.log and nsys-stop.log')
+        time.sleep(0.1)
+    command([nsys, 'export', '--type=sqlite', '--output=' + str(database), str(report)],
+            directory/'nsys-export.log')
+    attribution = attribute_forward(database)
+    summary = attribution.pop('request_summary')
+    summary['attribution'] = attribution
+    summary['interpretation'] = ('Instrumented full-model request. Prefill/decode wall times include profiler overhead; '
+        'use ordinary forward for latency comparisons. Kernel span and summed durations have different meanings.')
+    atomic(directory/'profile-timeline.json', summary)
+    forward = dict(passed=True, full=False, reference_available=reference is not None,
+        numerical_match=all(not r['differences'] for r in rows) if reference is not None else None,
+        cases=[dict(id=case['id'], samples=rows, median_prefill_ms=statistics.median(r['prefill_ms'] for r in rows),
+                    median_decode_ms=statistics.median(r['decode_ms'] for r in rows))])
+    atomic(directory/'profile-forward.json', forward)
+    if not summary['kernel_count']:
+        raise ValueError('forward profile contains no sample-attributed CUDA kernels; inspect '+str(report)+
+            ' and profile-timeline.json; rebuild setup --new-baseline --enable-profiling for NVTX instrumentation')
+    attribution_summary={field:attribution[field] for field in
+        ('schema_version','available','coverage','capture_coverage','aggregates','limitations') if field in attribution}
+    attribution_summary['instances_count']=len(attribution.get('instances',[]))
+    attribution_summary['timeline_count']=len(attribution.get('timeline',[]))
+    return dict(passed=True, mode='forward', candidate=candidate['identity'], profiler='nsys',
+        timing_kind='instrumented', benchmark=case['id'], reference_available=reference is not None,
+        graph_recapture=recapture, attribution=attribution_summary,
+        warmup=warmup, samples=samples, profile_wall_s=time.monotonic()-began, stop_status=stop_status,
+        forward=forward, artifacts=dict(report=str(report), sqlite=str(database),
+            timeline=str(directory/'profile-timeline.json'), forward=str(directory/'profile-forward.json')),
+        **{field:value for field,value in summary.items() if field not in ('timeline','attribution')})
 
 
 def summarize(database):

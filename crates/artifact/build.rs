@@ -127,4 +127,5 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=NVTX3_INCLUDE_DIR");
 }

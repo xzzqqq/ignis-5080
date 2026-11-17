@@ -8,6 +8,7 @@
 // (kernel/src/model_internal.h) so no stream or host activation pointer
 // crosses this ABI.
 
+#include "lab_profile.h"
 #include "ignis_step.h"
 
 #include "attention_readout.h"
@@ -192,10 +193,10 @@ int32_t sample_single(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
   ninfer::Tensor out_tensor(model->sampling_single_out->p, ninfer::DType::I32, {1, 1, 1, 1});
   try {
     ninfer::DeviceArena::Scope workspace_scope = model->sampling_workspace->scope();
-    ninfer::ops::sample(
+    IGNIS_PROFILE_OP("sample", ninfer::ops::sample(
         logits, out_tensor, static_cast<std::int32_t>(model->vocab),
         static_cast<const ninfer::ops::SamplingConfig *>(model->sampling_single_configs->p),
-        positions_tensor, purpose, *model->sampling_workspace, model->stream);
+        positions_tensor, purpose, *model->sampling_workspace, model->stream));
   } catch (const std::exception &e) {
     set_error(std::string("ignis_program: sample() failed: ") + e.what());
     return -1;
@@ -344,21 +345,21 @@ int32_t run_degenerate_step(ignis_model *model, int32_t token_id, int32_t *out_t
     }
 
     ninfer::Tensor embed_out = model->scratch->alloc(ninfer::DType::BF16, {hidden, 1, 1, 1});
-    ninfer::ops::embedding(ids, model->token_embedding, embed_out, model->stream);
+    IGNIS_PROFILE_OP("embedding", ninfer::ops::embedding(ids, model->token_embedding, embed_out, model->stream));
 
     // The final norm's weight is a dense BF16 [hidden] tensor (not a
     // quantized `Weight`); `rmsnorm` takes a plain `Tensor` view of it.
     ninfer::Tensor norm_weight(const_cast<void *>(model->final_norm.qdata), ninfer::DType::BF16,
                                {hidden, 1, 1, 1});
     ninfer::Tensor norm_out = model->scratch->alloc(ninfer::DType::BF16, {hidden, 1, 1, 1});
-    ninfer::ops::rmsnorm(embed_out, norm_weight, model->rms_norm_eps, /*unit_offset=*/true,
-                         norm_out, model->stream);
+    IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(embed_out, norm_weight, model->rms_norm_eps, /*unit_offset=*/true,
+                         norm_out, model->stream));
 
     ninfer::Tensor logits = model->scratch->alloc(ninfer::DType::BF16, {vocab, 1, 1, 1});
     ignis::trellis_body::output_head(*model, norm_out, logits, model->stream);
 
     ninfer::Tensor argmax_out = model->scratch->alloc(ninfer::DType::I32, {1, 1, 1, 1});
-    ninfer::ops::argmax(logits, argmax_out, vocab, model->stream);
+    IGNIS_PROFILE_OP("argmax", ninfer::ops::argmax(logits, argmax_out, vocab, model->stream));
 
     int32_t host_token_id = -1;
     err = cudaMemcpyAsync(&host_token_id, argmax_out.data, sizeof(host_token_id),
@@ -461,7 +462,7 @@ int32_t run_program_token(ignis_model *model, ignis_seq_pool *pool, ignis_seq *s
     }
     ninfer::Tensor left = model->scratch->alloc(ninfer::DType::BF16, {hidden, 1, 1, 1});
     ninfer::Tensor right = model->scratch->alloc(ninfer::DType::BF16, {hidden, 1, 1, 1});
-    ninfer::ops::embedding(ids, model->token_embedding, left, model->stream);
+    IGNIS_PROFILE_OP("embedding", ninfer::ops::embedding(ids, model->token_embedding, left, model->stream));
 
     uint64_t dispatches = 0;
     for (uint32_t layer = 0; layer < model->layers.size(); ++layer) {
@@ -486,8 +487,8 @@ int32_t run_program_token(ignis_model *model, ignis_seq_pool *pool, ignis_seq *s
     ninfer::Tensor norm_weight(const_cast<void *>(model->final_norm.qdata), ninfer::DType::BF16,
                                {hidden, 1, 1, 1});
     ninfer::Tensor normalized = model->scratch->alloc(ninfer::DType::BF16, {hidden, 1, 1, 1});
-    ninfer::ops::rmsnorm(left, norm_weight, model->rms_norm_eps, /*unit_offset=*/true,
-                         normalized, model->stream);
+    IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(left, norm_weight, model->rms_norm_eps, /*unit_offset=*/true,
+                         normalized, model->stream));
     ninfer::Tensor logits = model->scratch->alloc(ninfer::DType::BF16, {vocab, 1, 1, 1});
     ignis::trellis_body::output_head(*model, normalized, logits, model->stream);
     if (sample_single(model, pool, seq, logits, sampling, ninfer::ops::kSamplePurposePrefill,
@@ -984,7 +985,7 @@ int32_t run_program_chunk(ignis_model *model, ignis_seq_pool *pool, ignis_seq *s
     }
     ninfer::Tensor left = model->scratch->alloc(ninfer::DType::BF16, {hidden, T, 1, 1});
     ninfer::Tensor right = model->scratch->alloc(ninfer::DType::BF16, {hidden, T, 1, 1});
-    ninfer::ops::embedding(ids, model->token_embedding, left, model->stream);
+    IGNIS_PROFILE_OP("embedding", ninfer::ops::embedding(ids, model->token_embedding, left, model->stream));
 
     // GitHub #178: a multimodal chunk rotates at its slice of the span's
     // three axes, and its placeholder rows take the media item's columns.
@@ -1050,7 +1051,7 @@ int32_t run_program_chunk(ignis_model *model, ignis_seq_pool *pool, ignis_seq *s
                   static_cast<std::size_t>(within) * static_cast<std::size_t>(hidden) *
                       sizeof(std::uint16_t),
               ninfer::DType::BF16, {hidden, take, 1, 1});
-          ninfer::ops::scatter(columns, indices.slice(0, done, take), left, model->stream);
+          IGNIS_PROFILE_OP("scatter", ninfer::ops::scatter(columns, indices.slice(0, done, take), left, model->stream));
           done += take;
         }
       }
@@ -1233,8 +1234,8 @@ int32_t run_program_chunk(ignis_model *model, ignis_seq_pool *pool, ignis_seq *s
                                      {hidden, cols, 1, 1});
         ninfer::Tensor normalized(block_norm.data, ninfer::DType::BF16, {hidden, cols, 1, 1});
         ninfer::Tensor logits(block_logits.data, ninfer::DType::BF16, {vocab, cols, 1, 1});
-        ninfer::ops::rmsnorm(columns, norm_weight, model->rms_norm_eps, /*unit_offset=*/true,
-                             normalized, model->stream);
+        IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(columns, norm_weight, model->rms_norm_eps, /*unit_offset=*/true,
+                             normalized, model->stream));
         ignis::trellis_body::output_head(*model, normalized, logits, model->stream);
         err = cudaMemcpyAsync(span_logits_out + static_cast<std::size_t>(c0) * static_cast<std::size_t>(vocab),
                               logits.data,
@@ -1257,8 +1258,8 @@ int32_t run_program_chunk(ignis_model *model, ignis_seq_pool *pool, ignis_seq *s
       const ninfer::Tensor norm_weight(const_cast<void *>(model->final_norm.qdata),
                                        ninfer::DType::BF16, {hidden, 1, 1, 1});
       ninfer::Tensor normalized = model->scratch->alloc(ninfer::DType::BF16, {hidden, 1, 1, 1});
-      ninfer::ops::rmsnorm(last_token, norm_weight, model->rms_norm_eps, /*unit_offset=*/true,
-                           normalized, model->stream);
+      IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(last_token, norm_weight, model->rms_norm_eps, /*unit_offset=*/true,
+                           normalized, model->stream));
       ninfer::Tensor logits = model->scratch->alloc(ninfer::DType::BF16, {vocab, 1, 1, 1});
       ignis::trellis_body::output_head(*model, normalized, logits, model->stream);
       // The absolute logical position of the span's last token in this
@@ -1817,10 +1818,10 @@ struct UncommittedRingColumns {
     }
     for (std::size_t i = 0; i < slots->size(); ++i) {
       const auto first = static_cast<std::uint64_t>((*base_positions)[i]);
-      ninfer::apply_kv_ring_valid_words(
+      IGNIS_PROFILE_OP("kv_ring_invalidate", ninfer::apply_kv_ring_valid_words(
           pool->hq_ring_words((*slots)[i]),
           ignis_hq_ring_invalidate_mask(first, first + static_cast<std::uint64_t>((*extents)[i]) + 1),
-          ninfer::KvRingWords{}, kIgnisHqRingWords, stream);
+          ninfer::KvRingWords{}, kIgnisHqRingWords, stream));
     }
     (void)cudaStreamSynchronize(stream);
   }
@@ -2133,9 +2134,9 @@ int32_t run_verify_round(ignis_model *model, ignis_seq_pool *pool,
         if (kept >= written) {
           continue;
         }
-        ninfer::apply_kv_ring_valid_words(pool->hq_ring_words(slots[i]),
+        IGNIS_PROFILE_OP("kv_ring_invalidate", ninfer::apply_kv_ring_valid_words(pool->hq_ring_words(slots[i]),
                                           ignis_hq_ring_invalidate_mask(kept, written),
-                                          ninfer::KvRingWords{}, kIgnisHqRingWords, model->stream);
+                                          ninfer::KvRingWords{}, kIgnisHqRingWords, model->stream));
         err = cudaGetLastError();
         if (err != cudaSuccess) {
           set_error(std::string("ignis_program_decode: hq ring invalidation failed: ") +
@@ -2145,14 +2146,15 @@ int32_t run_verify_round(ignis_model *model, ignis_seq_pool *pool,
       }
     }
 
+    ignis::LabProfileRange profile_commit("stage","commit");
     // The fold: every GDN layer's slot and conv taps rebuilt from the
     // committed prefix of this round's records, in one vendored call over
     // every lane. A zero-length commit is that op's own strict no-op; this
     // round never asks for one (c >= 1), the anchor is always committed.
-    ninfer::ops::gdn_replay_fold(verify.records, pool->gdn_pool.all_layers_view(),
+    IGNIS_PROFILE_OP("gdn_replay_fold", ninfer::ops::gdn_replay_fold(verify.records, pool->gdn_pool.all_layers_view(),
                                  std::span<const ninfer::ops::GdnReplayFoldRow>(fold_rows.data(),
                                                                                 batch_size),
-                                 model->stream);
+                                 model->stream));
 
     // The accepted hidden state per lane (the run's last column's final
     // residual), kept for the drafter's continuation input (P5-05).
@@ -2163,8 +2165,8 @@ int32_t run_verify_round(ignis_model *model, ignis_seq_pool *pool,
                                         {hidden, static_cast<std::int32_t>(lane_columns), batch, 1});
     const ninfer::Tensor selector_tensor(verify.selectors->p, ninfer::DType::I32, {batch, 1, 1, 1});
     ninfer::Tensor selected(verify.selected_hidden->p, ninfer::DType::BF16, {hidden, batch, 1, 1});
-    ninfer::ops::speculative_select_accepted_hidden(hidden_columns, selector_tensor, selected,
-                                                    model->stream);
+    IGNIS_PROFILE_OP("speculative_select_accepted_hidden", ninfer::ops::speculative_select_accepted_hidden(hidden_columns, selector_tensor, selected,
+                                                    model->stream));
 
     // P5-05 (GitHub #155): the committed columns' feature taps into each
     // lane's window -- its whole committed run, or nothing for a lane at
@@ -2584,11 +2586,11 @@ extern "C" int32_t ignis_program_decode(struct ignis_model *model,
       const ninfer::Tensor positions_tensor(model->sampling_decode_positions->p, ninfer::DType::I32,
                                             {batch, 1, 1, 1});
       ninfer::DeviceArena::Scope workspace_scope = model->sampling_workspace->scope();
-      ninfer::ops::sample(
+      IGNIS_PROFILE_OP("sample", ninfer::ops::sample(
           logits_tensor, out_tensor, vocab,
           static_cast<const ninfer::ops::SamplingConfig *>(model->sampling_decode_configs->p),
           positions_tensor, ninfer::ops::kSamplePurposeDecode, *model->sampling_workspace,
-          model->stream);
+          model->stream));
       // GitHub #242: and the committed token's share of the set it was drawn
       // from, one float per lane, while the logits are still here.
       if (any_constrained && options != nullptr && options->out_permitted_probs != nullptr &&

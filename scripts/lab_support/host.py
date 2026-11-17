@@ -172,7 +172,7 @@ def start(root,owner,payload):
         previous=status(root)
         if previous and previous['status']!='stopped':raise ValueError('lab already active')
         runtime=directory/'runtime';(runtime/'lab_support').mkdir(parents=True)
-        for name in ('common.py','host.py','iteration.py','profiling.py','__init__.py'):
+        for name in ('common.py','host.py','iteration.py','profiling.py','forward_timeline.py','__init__.py'):
             shutil.copy2(Path(__file__).parent/name,runtime/'lab_support'/name)
         for name in ('kernel_lab.py','build_trellis_candidate.py'):
             shutil.copy2(root/'scripts'/name,runtime/name)

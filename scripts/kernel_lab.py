@@ -37,11 +37,12 @@ class Session:
             self.output_stream = os.fdopen(descriptor, 'rb', buffering=0)
             wrapper = 'exec "$1" "$2" "$3" > "$4"'
             argv = ['nsys', 'launch', '--session-new='+profiler_session,
-                    '--trace=cuda', '--cuda-graph-trace=node',
+                    '--trace=cuda,nvtx', '--cuda-graph-trace=node',
                     '/bin/bash', '--noprofile', '--norc', '-c', wrapper,
                     'ignis-lab-engine', *argv, str(self.transport_path)]
+        environment = dict(os.environ, IGNIS_LAB_PROFILE='1' if profiler_session else '0')
         self.process = subprocess.Popen(argv, text=True, stdin=subprocess.PIPE,
-            stdout=self.profiler_log if profiler_session else subprocess.PIPE, stderr=self.stderr,
+            stdout=self.profiler_log if profiler_session else subprocess.PIPE, stderr=self.stderr, env=environment,
             pass_fds=(() if lease is None else (int(lease),)))
         if self.output_stream is None:
             self.output_stream = self.process.stdout
@@ -90,8 +91,10 @@ class Session:
             raise RuntimeError('engine reply id mismatch; session must restart')
         return reply
 
-    def reload(self, path):
+    def reload(self, path, profile_recapture=False):
         request = {'op': 'reload', 'path': str(path)}
+        if profile_recapture:
+            request['profile_recapture'] = True
         if path != 'builtin':
             request['sha256'] = sha256(path)
         reply = self.call(request)

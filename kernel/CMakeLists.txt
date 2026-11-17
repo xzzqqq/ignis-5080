@@ -308,6 +308,23 @@ add_library(ignis_kernel STATIC ${IGNIS_KERNEL_SRCS})
 set_target_properties(ignis_kernel PROPERTIES OUTPUT_NAME "ignis_kernel")
 target_include_directories(ignis_kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(ignis_kernel PUBLIC ignis_vendor)
+# NVTX3 is header-only and optional for ordinary builds. A profiling session
+# reports unavailability explicitly when neither CUDA nor Nsight supplies it.
+find_program(IGNIS_NSYS_EXECUTABLE nsys)
+if(IGNIS_NSYS_EXECUTABLE)
+  get_filename_component(IGNIS_NSYS_REALPATH "${IGNIS_NSYS_EXECUTABLE}" REALPATH)
+  get_filename_component(IGNIS_NSYS_DIRECTORY "${IGNIS_NSYS_REALPATH}" DIRECTORY)
+endif()
+find_path(IGNIS_NVTX3_INCLUDE_DIR nvtx3/nvToolsExt.h HINTS
+  "$ENV{NVTX3_INCLUDE_DIR}" ${CUDAToolkit_INCLUDE_DIRS}
+  "${IGNIS_NSYS_DIRECTORY}/../target-linux-x64/nvtx/include"
+  "${IGNIS_NSYS_DIRECTORY}/nvtx/include"
+  "${IGNIS_NSYS_DIRECTORY}/../nvtx/include")
+if(IGNIS_NVTX3_INCLUDE_DIR)
+  target_include_directories(ignis_kernel PRIVATE "${IGNIS_NVTX3_INCLUDE_DIR}")
+  target_compile_definitions(ignis_kernel PRIVATE IGNIS_NVTX3_AVAILABLE=1)
+endif()
+
 # ...and back: the dependency between the two archives is genuinely mutual.
 # The vendored plans call `ninfer::ops::linear` (nvfp4_linear_swiglu_plan.cpp,
 # attn_input_proj, linear_add), and the qtype dispatcher behind that name is
