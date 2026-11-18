@@ -1,21 +1,20 @@
 ---
 title: "5080 fork：远端开发"
-description: "Laptop 编辑与 CPU 检查，远端 Linux 构建 CUDA 和运行 RTX 5080。"
+description: "本地编辑与 CPU 检查，远端 Linux 构建 CUDA 和运行 RTX 5080。"
 sidebar:
   order: 7
 ---
 
 ## 分工与配置
 
-此 fork 从 Ignis 起步，目标是 RTX 5080 上的 Qwen3.8-27B 个人聊天与 coding agent
-服务。Laptop 负责编辑、CPU 检查、提交和分析；CUDA 构建、GPU 执行及依赖 Linux
-的检查在远端进行。上游 5090 的运行结果不代表此 fork 已完成 5080 验证。
+本地负责编辑、CPU 检查和分析；CUDA 构建、GPU 执行及依赖 Linux
+的检查在远端进行。
 
-开发任务和提交不要求关联 GitHub issue。临时计划与交接记录放在 `.scratch/`，
-需要长期维护的规格放在 `docs/specs/`，可复用结论按 `docs/findings/` 的规范保存。
-提交信息直接说明改动；历史 issue 引用可保留，无需为提交创建 issue。
+反复优化 kernel 时，优先使用 [Kernel Lab](kernel-lab.md) 的常驻引擎和算子回放；
+Lab 命令自行处理所需的源码同步与远端执行。下面的 `sync` / `exec` 用于普通
+远端操作，服务构建与重启流程不需要在每次 replay 前执行。
 
-Laptop 和远端需要 Python 3.10+、Git；Laptop 还需 OpenSSH 客户端。
+本地和远端需要 Python 3.10+、Git；本地还需 OpenSSH 客户端。
 `scripts/remote.py` 只使用标准库，远端命令通过 Bash 执行。
 在仓库根目录初始化私有配置：
 
@@ -65,8 +64,8 @@ python3 scripts/remote.py sync --dry-run
 python3 scripts/remote.py sync
 ```
 
-`sync` 将 Laptop 当前工作区同步到远端：包含已提交源码、未提交修改、未被 Git
-忽略的新文件，以及源码删除。不要求先提交，也不改变 Laptop 的分支或暂存区。
+`sync` 将本地当前工作区同步到远端：包含已提交源码、未提交修改、未被 Git
+忽略的新文件，以及源码删除。不要求先提交，也不改变本地的分支或暂存区。
 初次同步要求远端 HEAD 是本地历史中的祖先；此命令不负责创建 checkout。
 
 传输使用压缩的增量 Git bundle。输出中的 `bundle bytes` 是源码包大小，不含 SSH
@@ -76,14 +75,14 @@ python3 scripts/remote.py sync
 已同步且内容未变的未提交文件也不重复传输。源码同步不启动服务或触发构建，可以
 多次编辑、同步后再构建；通常按一次需要远端验证的改动同步一次。
 
-远端 HEAD 跟随 Laptop HEAD；未提交的工作区快照由内部 Git ref 记录，并出现在
-远端暂存区。远端是构建副本，源码继续在 Laptop 编辑：若远端出现独立修改、
+远端 HEAD 跟随本地 HEAD；未提交的工作区快照由内部 Git ref 记录，并出现在
+远端暂存区。远端是构建副本，源码继续在本地编辑：若远端出现独立修改、
 非忽略的新文件或不同的 HEAD，下一次同步会拒绝，先保存并处理这些修改再重试。
 不要在同步过程中编辑远端源码；完成同步后再构建，避免编译读到新旧文件的混合版本。
 
 ## 唯一远端入口
 
-从 Laptop 的仓库根目录运行：
+从本地的仓库根目录运行：
 
 ```sh
 python3 scripts/remote.py exec -- git rev-parse HEAD
@@ -97,14 +96,15 @@ python3 scripts/remote.py exec -- make gpu-guard
 
 命令在配置中的远端仓库目录运行，保留标准输入、输出、错误及退出码。参数逐项传递；
 需要管道或重定向时，显式调用 `bash -c '…'`，其中的 shell 内容由调用者控制。
-环境由 `.remote.env` 加载，避免登录 shell 重新改写 PATH。Laptop 不需要 make 或 CUDA。
+环境由 `.remote.env` 加载，避免登录 shell 重新改写 PATH。本地不需要 make 或 CUDA。
 
 `exec` 不同步文件、不 checkout、不提交、不 push、不管理实验队列，也不自动重试。
-执行前先 `sync`，再核对 commit 和未提交改动；本地编辑不会自动出现在远端。
+需要运行本地新源码时，先 `sync` 并核对版本；本地编辑不会自动出现在远端。
+查看状态等只读操作无需先同步，Kernel Lab 命令自行管理所需同步。
 退出码 255 通常表示 SSH 连接问题，命令可能已经开始执行，重跑前先
 核对远端状态。长时间服务需使用远端持久会话或 daemon；此入口不保证断线后任务继续。
 
-## Linux 服务与开发循环
+## Linux 服务开发与运行
 
 配置好远端 `local.mk` 中的模型路径、`UI` 和其他运行参数后：
 
@@ -124,20 +124,20 @@ CUDA 启动仍经过 GPU guard。后台进程脱离 SSH 会话；启动等待公
 `FORCE=1` 才额外停止同用户的其他 `ignis-server`。
 
 PID 和日志在 `.scratch/serve/`；再次启动会归档旧日志，`make logs` 跟踪当前日志。
-普通修改的循环是 `sync` 后 `exec -- make redeploy`：构建成功才停止旧服务并启动新
+服务代码修改的循环是 `sync` 后 `exec -- make redeploy`：构建成功才停止旧服务并启动新
 服务，编译失败保留旧服务。`restart` 只重启，不构建。
 
 `dev` 是构建后前台运行；代理管理长期服务用 `start/stop`。已有 `make watch`
-需要 `cargo-watch`，检测远端文件变更并重新编译、重启进程；它不负责 Laptop 同步。
+需要 `cargo-watch`，检测远端文件变更并重新编译、重启进程；它不负责本地同步。
 CUDA 修改重启后会重新加载模型，不是在保留显存状态下热替换代码；CPU mock 的
 `make watch CUDA=0` 更适合快速检查服务逻辑。Linux 的 `dev-ui/run-ui` 联动尚未实现，
 前端可单独运行已有的 `make web-dev` 使用 Vite 热更新。
 
 ## 常驻引擎实验
 
-一个 Agent 反复修改 Trellis kernel 时，使用 [Kernel Lab](kernel-lab.md)。
-四个命令自动同步源码并在远端执行，模型保持常驻；用算子回放快速检查修改，
-用完整模型运行评估结果。
+使用 [Kernel Lab](kernel-lab.md) 对支持热替换的 Trellis 算子进行快速实验。
+命令处理所需同步与远端执行，模型保持常驻；用 replay 筛选多个优化点，按需用
+forward 检查组合效果。当前热替换不包含 attention；支持范围和新基线要求见 Lab 指南。
 
 ## 检查与当前限制
 
@@ -148,7 +148,7 @@ CUDA 修改重启后会重新加载模型，不是在保留显存状态下热替
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Rust CPU 测试优先在 Laptop 执行。Cargo 默认使用 host target。
+Rust CPU 测试优先在本地执行。Cargo 默认使用 host target。
 如需显式指定，可用 `rustc -vV` 查看 `host`，然后运行：
 
 ```sh
@@ -162,7 +162,9 @@ GPU 工作前先查看 `make gpu-status` 并通过 `make gpu-guard`，协调全�
 包括其他项目和 worktree。状态检查不是锁；上游 guard 的显存阈值也不证明 5080
 有足够余量。不能因检查通过就并行启动第二项 GPU 工作。
 
-Linux 支持 CUDA build/check、GPU status/guard、后台服务控制和 GPU profile：
+Linux 支持 CUDA build/check、GPU status/guard 和后台服务控制。下面的
+`gpu_profile.py` 是完整 GPU 验收入口，用于一轮优化收尾时检查累计改动，
+不是每个 replay 候选后的必经步骤：
 
 ```sh
 python3 scripts/remote.py exec -- python3 scripts/gpu_profile.py --artifact models/qwen3_8_27b_trellis_sc30-v2.ninfer --out .scratch/gpu-check
@@ -182,35 +184,5 @@ Linux 的模型重载预算使用 NVML 报告的本进程显存占用，计入�
 
 ## 推送前的凭据检查
 
-在负责提交和推送的 Laptop 安装 Gitleaks，再为当前仓库安装 hook：
-
-```sh
-brew install gitleaks
-python3 scripts/pre_push.py install
-```
-
-安装器只安装 `pre-push`，保留已有 `core.hooksPath` 和其他 hook；已有其他来源的
-`pre-push` 时拒绝覆盖。Python 和扫描器的本机路径保存在本地 Git 配置中，不写进
-提交。更新或搬迁工具后重新执行安装命令即可。已有 `make setup` 配置的 checkout
-也使用同一份检查逻辑。
-
-正常执行 `git push` 就会检查，不需要另外运行扫描命令。范围来自 Git 传入的
-实际推送分支、标签和远端旧提交；新分支会查询**目标远端**实时公布的 refs，仅排除
-其中本地已知的提交历史。空远端或没有可用基线时扫描完整可达历史；未知的旧提交、
-远端查询失败或浅克隆会阻止推送，需要先取回完整的目标历史。
-
-检查包含每个新增提交的补丁（含合并提交）、commit message 和 annotated tag
-message。因此某个提交写入凭据、下个提交删掉，仍会被拦截。`.remote.json`、
-`.remote.env`、`.remote.cargo.toml`、`local.mk`、`.env` 和 `.toolchain/`、
-`.scratch/`、`.ssh/` 是私有路径，出现在新增历史中就拒绝，不依赖内容识别。
-仅允许推送普通分支和指向 commit 的标签；内部 refs 和 `--mirror` 会被拒绝。
-
-内容检查使用 Gitleaks 默认规则，并启用两层解码和压缩包检查；仓库里的忽略文件、
-`gitleaks:allow` 注释及环境变量不能关闭这个 hook 的规则。发现可疑内容时只输出
-规则、文件、行号和提交位置，不输出凭据值；扫描器缺失、报错或超时也拒绝推送。
-误报需核实后调整检查代码中的精确规则，不通过排除整个目录或跳过 hook 放行。
-
-这是本机防护，不能识别任意格式的自定义密码，也可以被主动禁用或 `--no-verify`
-绕过；GitHub 的 push protection 是额外的服务端防线。CI 运行这些临时仓库回归
-测试，但 CI 在上传之后执行，不代替本机拦截。安装过程不会推送代码，也不会修改
-GitHub 设置。
+提交和推送前，按[凭据检查指南](credential-checks.md)安装本地 pre-push hook。
+正常 `git push` 会自动执行检查；配置、扫描范围和故障处理见该指南。

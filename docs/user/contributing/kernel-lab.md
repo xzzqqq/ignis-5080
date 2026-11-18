@@ -3,10 +3,11 @@ title: "Kernel Lab"
 description: "Explore kernel edits with a resident model, real operator inputs and full-model feedback."
 ---
 
-Use Kernel Lab when one agent repeatedly edits Trellis kernels against a fixed
-model and benchmark request. Run commands from the Laptop worktree; they handle
+Use Kernel Lab for repeated Trellis kernel experiments against a fixed model
+and benchmark request. Run commands from the local worktree; they handle
 sync and remote execution through `scripts/remote.py`. The model stays on the
-remote GPU. One agent owns the session and GPU at a time.
+remote GPU. Agents can collaborate, but one executor owns the session and GPU
+at a time; coordinate access before issuing commands.
 
 Hot loading covers Trellis linear/SwiGLU operations: GDN/GQA projections, MLP
 and the output head. Attention, GDN state updates and normalization remain fixed.
@@ -27,8 +28,8 @@ operator timing.
 Repeat **edit → replay** for quick exploration. Replay reports timing and output
 errors against the recorded baseline. Numerical differences do not block timing;
 this is exploratory feedback, not strict correctness acceptance. Report the error
-measurements along with speedups. Acceptance still needs the independent
-correctness checks required by the repository.
+measurements along with speedups. Run full acceptance on the accumulated changes
+at the end of an optimization round, not after each replay candidate.
 
 Save useful candidates and compare them on the same selected inputs:
 
@@ -45,7 +46,8 @@ libraries. `builtin` selects the session's pinned baseline. Inspect the result
 linked by each command under `.scratch/lab/` for identities, coverage, raw samples
 and errors.
 
-Use `forward` for feedback on the selected full request. It reports the
+Use `forward` when full-request feedback helps diagnose issues or assess combined
+changes; it is not required after every replay. It reports the
 candidate's own generation and engine times. Add `--full` for all requests,
 configured repetitions and baseline controls. Replay timings describe isolated
 operators and cannot establish full-model speedups.
@@ -81,8 +83,10 @@ recordings and named candidates are reused; no `--new-baseline` is needed. See t
 [profiling details](kernel-lab-reference.md#operator-profiling) for prerequisites
 and the meaning of each number.
 
-Finish with `python3 scripts/lab.py stop`. It releases the GPU and keeps results,
-saved candidates, recordings and build caches. Both evaluation and profiling
+Keep the session resident across experiments. When the session is no longer
+needed or GPU ownership is handed off, use `python3 scripts/lab.py stop`. It
+releases the GPU and keeps results, saved candidates, recordings and build
+caches. Both evaluation and profiling
 restore builtin code afterward. Unsupported source or configuration changes
 require stopping and [creating a new baseline](kernel-lab-reference.md#source-baseline-and-recovery).
 
