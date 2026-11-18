@@ -39,6 +39,19 @@ header names the upstream repo, commit, path and licence; this section lists
 the same. Only MIT, BSD or Apache-2.0 code is copied (never CUTLASS 3.x, never
 FlashInfer's `csrc/fmha_v2`).
 
+### `kernel/include/ignis_gqa_hq_reduce.cuh`
+The HQ27 split reducer specialization.
+- Upstream: `gpillon/ninfer`, commit
+  `a00648cb828457986cf5b4b4f712b4cbcd7af0d1`, Apache-2.0:
+  `src/ops/kernel/gqa_attention_decode.cuh` (the split reducer).
+- Changed here: fixed 256-thread/D256 launch contract and shared reuse of the
+  identical FP32 per-split exponential weights. The original 256-leaf max/sum
+  tree, leaf and numerator ordering, predicates and BF16 output roundings are
+  retained. The unmodified generic reducer remains the bit-exact oracle in
+  `ignis_kernel_hq_verify_exact_test`; this is an owned adaptation, not a
+  byte-identical vendored file. Kernel Lab candidates use this helper; the
+  production dispatcher remains unchanged by the Lab extension.
+
 ### `kernel/src/image/attn8.cu` (spec image-model/02 acceptance 4, GitHub #319)
 The image model's 8-bit DiT attention kernel (`ignis_image_attn`).
 - Upstream: `thu-ml/SageAttention`, commit

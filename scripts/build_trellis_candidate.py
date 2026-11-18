@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build just the Trellis translation units into an immutable lab plugin."""
+"""Build incremental Trellis and full GQA launchers into an immutable lab plugin."""
 import argparse
 import hashlib
 import json
@@ -11,8 +11,17 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = ['trellis_linear.cu', 'trellis_linear_decode.cu', 'trellis_linear_prefill.cu', 'trellis_linear_mlp_t8.cu']
+SOURCES = ['trellis_linear.cu', 'trellis_linear_decode.cu', 'trellis_linear_prefill.cu', 'trellis_linear_mlp_t8.cu', 'lab_gqa_candidate.cu', 'lab_mlp_segment.cu', 'lab_gqa_segment.cu', 'lab_gdn_segment.cu']
 ADAPTER = '''#include "ignis_trellis_candidate.h"
+#include "ignis_gqa_candidate.h"
+#include "ignis_segment_candidate.h"
+#include "ignis_mlp_segment.h"
+#include "ignis_gqa_segment.h"
+#include "ignis_gdn_segment.h"
+extern "C" int32_t ignis_lab_gqa_prepare();
+extern "C" uint64_t ignis_lab_gqa_workspace(uint32_t);
+extern "C" int32_t ignis_lab_gqa_run(const ignis_gqa_candidate_call *,void *,uint64_t,void *);
+extern "C" const char *ignis_lab_gqa_error();
 extern "C" __attribute__((visibility("default")))
 const ignis_trellis_candidate_api *ignis_trellis_candidate_v1() {
   static const ignis_trellis_candidate_api api = {
@@ -21,6 +30,44 @@ const ignis_trellis_candidate_api *ignis_trellis_candidate_v1() {
     ignis_trellis_prepare, ignis_trellis_workspace_bytes, ignis_trellis_linear,
     ignis_trellis_linear_swiglu, ignis_trellis_last_error};
   return &api;
+}
+extern "C" __attribute__((visibility("default")))
+const ignis_gqa_candidate_api *ignis_gqa_candidate_v1() {
+  static const ignis_gqa_candidate_api api = {
+    IGNIS_GQA_CANDIDATE_ABI,sizeof(ignis_gqa_candidate_api),sizeof(ignis_gqa_candidate_call),0,"%s",
+    ignis_lab_gqa_prepare,ignis_lab_gqa_workspace,ignis_lab_gqa_run,ignis_lab_gqa_error};
+  return &api;
+}
+namespace {
+thread_local const char *segment_error="";
+int32_t segment_prepare(){
+  if(ignis_lab_mlp_segment_prepare()){segment_error=ignis_lab_mlp_segment_error();return -1;}
+  if(ignis_lab_gqa_segment_prepare()){segment_error=ignis_lab_gqa_segment_error();return -1;}
+  if(ignis_lab_gdn_segment_prepare()){segment_error=ignis_lab_gdn_segment_error();return -1;}
+  return 0;
+}
+uint64_t segment_workspace(const ignis_segment_profile *p){
+  if(!p)return 0;
+  switch(p->kind){case IGNIS_SEGMENT_MLP:return ignis_lab_mlp_segment_workspace(p);
+    case IGNIS_SEGMENT_GQA:return ignis_lab_gqa_segment_workspace(p);
+    case IGNIS_SEGMENT_GDN:return ignis_lab_gdn_segment_workspace(p);default:return 0;}
+}
+int32_t run_mlp(const ignis_mlp_segment_call *c,void *w,uint64_t n,void *s){
+  int rc=ignis_lab_mlp_segment_run(c,w,n,s);if(rc)segment_error=ignis_lab_mlp_segment_error();return rc;
+}
+int32_t run_gqa(const ignis_gqa_segment_call *c,void *w,uint64_t n,void *s){
+  int rc=ignis_lab_gqa_segment_run(c,w,n,s);if(rc)segment_error=ignis_lab_gqa_segment_error();return rc;
+}
+int32_t run_gdn(const ignis_gdn_segment_call *c,void *w,uint64_t n,void *s){
+  int rc=ignis_lab_gdn_segment_run(c,w,n,s);if(rc)segment_error=ignis_lab_gdn_segment_error();return rc;
+}
+const char *segment_last_error(){return segment_error;}
+}
+extern "C" __attribute__((visibility("default")))
+const ignis_segment_candidate_api *ignis_segment_candidate_v1(){
+  static const ignis_segment_candidate_api api{IGNIS_SEGMENT_CANDIDATE_ABI,sizeof(ignis_segment_candidate_api),
+    sizeof(ignis_segment_profile),sizeof(ignis_mlp_segment_call),sizeof(ignis_gqa_segment_call),sizeof(ignis_gdn_segment_call),
+    "%s",segment_prepare,segment_workspace,run_mlp,run_gqa,run_gdn,segment_last_error};return &api;
 }
 '''
 
@@ -35,11 +82,36 @@ def dependencies(source, name, nvcc, flags):
     return {str(Path(n).resolve()): digest(Path(n)) for n in names}
 
 
+def compile_flags():
+    return ['-std=c++20', '-O3', '-arch=sm_120a', '-Xcompiler=-fPIC,-fvisibility=hidden']
+
+
+def include_flags(source):
+    return ['-I'+str(source/p) for p in ('kernel/include','kernel/src','kernel/vendor/include','kernel/vendor/src')]
+
+
+def freeze_inputs(source, nvcc):
+    """Exact local transitive compiler dependencies, discovered before freezing.
+
+    External toolkit/system dependencies remain tracked by the object builder.
+    This is not a hot-source whitelist: admission separately limits editable files.
+    """
+    source=source.resolve()
+    files={source/'kernel/include'/name for name in
+           ('ignis_trellis_candidate.h','ignis_trellis_linear.h','ignis_gqa_candidate.h','ignis_segment_candidate.h','ignis_mlp_segment.h','ignis_gqa_segment.h','ignis_gdn_segment.h')}
+    for name in SOURCES:
+        files.add(source/'kernel/src'/name)
+        for dependency in dependencies(source,name,nvcc,compile_flags()+include_flags(source)):
+            path=Path(dependency).resolve()
+            if path.is_relative_to(source):files.add(path)
+    return files
+
+
 def build(source, output, nvcc):
     began = time.monotonic()
     source = source.resolve()
-    flags = ['-std=c++20', '-O3', '-arch=sm_120a', '-Xcompiler=-fPIC,-fvisibility=hidden']
-    includes = ['-I'+str(source/'kernel/include'), '-I'+str(source/'kernel/src')]
+    flags = compile_flags()
+    includes = include_flags(source)
     toolchain = dict(nvcc=subprocess.check_output([nvcc, '--version'], text=True),
                      host=subprocess.check_output(['g++', '--version'], text=True),
                      environment={k:os.environ.get(k) for k in ('NVCC_PREPEND_FLAGS','NVCC_APPEND_FLAGS','NVCC_CCBIN','CPATH','CPLUS_INCLUDE_PATH')})
@@ -75,7 +147,10 @@ def build(source, output, nvcc):
         timings.append(dict(source=name,cache_hit=cached,seconds=time.monotonic()-start))
     inputs = dict(version=2,objects=identities,adapter=ADAPTER,toolchain=toolchain,
                   abi=digest(source/'kernel/include/ignis_trellis_candidate.h'),
-                  linear_abi=digest(source/'kernel/include/ignis_trellis_linear.h'))
+                  linear_abi=digest(source/'kernel/include/ignis_trellis_linear.h'),
+                  gqa_abi=digest(source/'kernel/include/ignis_gqa_candidate.h'),
+                  segment_abi={n:digest(source/'kernel/include'/n) for n in
+                    ('ignis_segment_candidate.h','ignis_mlp_segment.h','ignis_gqa_segment.h','ignis_gdn_segment.h')})
     key = hashlib.sha256(json.dumps(inputs,sort_keys=True).encode()).hexdigest()
     target = output/key
     cached = target.exists(); linked = time.monotonic()
@@ -85,7 +160,7 @@ def build(source, output, nvcc):
             raise ValueError('cached candidate checksum mismatch')
     else:
         with tempfile.TemporaryDirectory(prefix='.candidate-', dir=output) as scratch:
-            tmp=Path(scratch);(tmp/'adapter.cpp').write_text(ADAPTER % key)
+            tmp=Path(scratch);(tmp/'adapter.cpp').write_text(ADAPTER % (key,key,key))
             with (tmp/'build.log').open('w') as log:
                 result=subprocess.run([nvcc,*flags,*includes,'--shared','--cudart=shared','-Xlinker=-Bsymbolic',
                     *map(str,objects),str(tmp/'adapter.cpp'),'-o',str(tmp/'candidate.so')],stdout=log,stderr=subprocess.STDOUT)

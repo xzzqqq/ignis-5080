@@ -479,6 +479,7 @@ struct ignis_model {
   ignis_trellis_workspace trellis_workspace{};
   std::shared_ptr<ignis::TrellisCandidate> trellis_candidate;
   std::shared_ptr<ignis::LabTrace> lab_trace;
+  std::shared_ptr<ignis::SegmentWorkspaceSet> segment_builtin_workspaces;
   uint64_t vram_bytes = 0;
   // ADR 0062: what of the bound tensors lives in mapped host memory.
   uint64_t host_mapped_bytes = 0;

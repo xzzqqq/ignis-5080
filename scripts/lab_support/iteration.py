@@ -94,6 +94,9 @@ class Iteration:
 
     def select_corpus(self, payload):
         operators=payload.get('operators',[]);tokens=payload.get('tokens_per_call',[])
+        blocks=[name.endswith(('.mlp_block','.gqa_block','.gdn_block')) for name in operators]
+        if any(blocks) and not all(blocks):
+            raise ValueError('segment and legacy operator selectors cannot be mixed; issue separate commands')
         cached=[]
         for path in sorted(self.corpus.glob('*/manifest.json')):
             if not re.fullmatch(r'[0-9a-f]{64}',path.parent.name):continue
@@ -142,7 +145,11 @@ class Iteration:
         for group in groups:
             representatives={}
             for record in group['records']:
-                shape=key({k:record.get(k) for k in ('weight','up','tokens','ldy','epilogue')})
+                # GQA launch work and writes depend on device positions, masks,
+                # slot selectors and recorded cache state. Keep every immutable
+                # call rather than collapsing distinct windows by tensor shape.
+                shape=('gqa',record['id']) if record.get('kind') in ('gqa_attention','segment') else key(
+                    {k:record.get(k) for k in ('weight','up','tokens','ldy','epilogue')})
                 representatives.setdefault(shape,record)
             selected.append(dict(group,records=list(representatives.values())))
         return selected
@@ -153,6 +160,7 @@ class Iteration:
             rows=self.replay_rows(groups,warmup=0,samples=1)
         atomic(directory/(label+'-correctness.json'),rows)
         return dict(passed=True,records=len(rows),numerical_match=all(r.get('mismatches',0)==0 for r in rows),
+            state_match=all(r.get('state_diagnostics',{}).get('exact_match',True) for r in rows),
             diagnostics=rows,capture_trajectory_match=all(not g.get('manifest',{}).get('recording_differences') for g in groups),
             capture_differences=[dict(shard=g['shard'],differences=g['manifest']['recording_differences'])
                 for g in groups if g.get('manifest',{}).get('recording_differences')])
@@ -162,7 +170,8 @@ class Iteration:
             rows=self.replay_rows(groups,warmup=warmup,samples=samples)
         atomic(directory/(label+'-timing.json'),rows)
         return dict(passed=True,performance_records=len(rows),warmup=warmup,samples=samples,
-            numerical_match=all(r.get('mismatches',0)==0 for r in rows),timings=rows)
+            numerical_match=all(r.get('mismatches',0)==0 for r in rows),
+            state_match=all(r.get('state_diagnostics',{}).get('exact_match',True) for r in rows),timings=rows)
 
     def local(self, directory, label, groups=None, warmup=None, samples=None):
         groups=self.selection if groups is None else groups
@@ -170,8 +179,9 @@ class Iteration:
         samples=self.config.get('samples',3) if samples is None else samples
         diagnostics=self.check_scope(directory,label,groups)
         measured=self.measure_scope(directory,label,self.representative_scope(groups),warmup,samples)
-        return dict(diagnostics,**{k:v for k,v in measured.items() if k!='numerical_match'},
+        return dict(diagnostics,**{k:v for k,v in measured.items() if k not in ('numerical_match','state_match')},
             numerical_match=diagnostics['numerical_match'] and measured['numerical_match'],
+            state_match=diagnostics['state_match'] and measured['state_match'],
             interpretation='representative operator calls; exploratory numerical diagnostics')
 
     def reference_forward(self, full=False):
@@ -219,14 +229,14 @@ class Iteration:
         from .host import build_candidate
         actual=getattr(self,'evaluation_source',None) or source_identity(self.root)
         frozen=directory/'source';frozen.mkdir(parents=True)
-        files=set(self.root.glob('kernel/src/**/*.h'))|set(self.root.glob('kernel/src/**/*.cuh'))|set(self.root.glob('kernel/include/*.h'))
-        files|={self.root/'kernel/src'/n for n in builder.SOURCES}
+        nvcc=str(Path(os.environ['CUDA_HOME'])/'bin/nvcc')
+        files=builder.freeze_inputs(self.root,nvcc)
         for src in files:
             dst=frozen/src.relative_to(self.root);dst.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(src,dst)
             if digest(dst)!=actual[str(src.relative_to(self.root))]:raise ValueError('source changed while copying candidate')
         with self.stage('compile candidate'):
             try:
-                candidate=build_candidate(frozen,Path(self.config['data_dir'])/'candidates',str(Path(os.environ['CUDA_HOME'])/'bin/nvcc'))
+                candidate=build_candidate(frozen,Path(self.config['data_dir'])/'candidates',nvcc)
             except Exception as e:
                 raise ValueError('candidate build failed: '+str(e)) from e
         return dict(candidate,sha256=digest(candidate['path']),source={n:actual[n] for n in actual if n.startswith('kernel/')})

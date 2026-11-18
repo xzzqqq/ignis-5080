@@ -99,7 +99,7 @@ fn main() -> Result<()> {
                     } else {None};
                     unsafe { kernel_lab::reload(&mut model, &mut pool, candidate)?; }
                     generation += 1;
-                    Ok(json!({"candidate":path,"sha256":sha}))
+                    Ok(json!({"candidate":path,"sha256":sha,"gqa":ignis_core::lab_trace::gqa_status(&model),"segments":ignis_core::lab_trace::segment_status(&model)}))
                 },
                 "capture_minimum" => Ok(json!({"prefill_bytes_lower_bound":ignis_core::lab_trace::minimum_filtered(&model,
                     v["names"].as_str().unwrap_or(""),v["tokens"].as_u64().ok_or("missing tokens")?,

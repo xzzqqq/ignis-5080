@@ -2,10 +2,16 @@
 #include "ignis_trellis_linear.h"
 #include <cuda_runtime.h>
 #include <cstdint>
+#include "core/paged_kv_cache.h"
 struct ignis_model;
 struct ignis_seq_pool;
 namespace ignis {
 struct LabTrace;
+void *lab_gqa_before(const ignis_model &, uint32_t layer, const ninfer::Tensor &q,
+    const ninfer::Tensor &k, const ninfer::Tensor &v, const ninfer::Tensor &gate,
+    const ninfer::Tensor &positions, const ninfer::Tensor &valid, const ninfer::Tensor &rows,
+    const ninfer::PagedKVBatchLayerView &, uint32_t max_keys, cudaStream_t);
+void lab_gqa_after(const ignis_model &, void *, const ninfer::Tensor &, cudaStream_t);
 void lab_prefill_position(ignis_model *, uint64_t);
 void lab_graph_begin(ignis_model *, bool verify, uint32_t width);
 void *lab_before(const ignis_model &, const ignis_trellis_weight &, const ignis_trellis_weight *,
@@ -20,7 +26,13 @@ int32_t ignis_lab_trace_flush(ignis_model *);
 int32_t ignis_lab_profiler_start();
 int32_t ignis_lab_profiler_stop();
 const char *ignis_lab_trace_error();
+const char *ignis_lab_gqa_implementation(ignis_model *);
+int32_t ignis_lab_gqa_candidate_applied(ignis_model *);
 int32_t ignis_lab_capture_minimum(ignis_model *, const char *, uint64_t tokens, uint64_t requests, uint64_t *bytes);
+// Stable on-disk tensor order: q,k,v,gate,positions,valid,rows,tables,
+// k_pages,v_pages,k_meta,v_meta,residual_k,residual_v,ring. No device pointers.
+struct ignis_lab_gqa_tensor { uint32_t dtype; int32_t ne[4]; };
+struct ignis_lab_gqa_view { uint32_t version, layer, max_keys; float scale; ignis_lab_gqa_tensor tensors[15]; };
 struct ignis_lab_weight_view {
   const char *name;
   uint64_t trellis_offset, suh_offset, svh_offset;
@@ -34,6 +46,9 @@ struct ignis_lab_diagnostics {
   uint64_t reference_nan, reference_inf, actual_nan, actual_inf;
   double max_abs_error, squared_error, squared_reference;
 };
+int32_t ignis_lab_gqa_replay(ignis_model *, const ignis_lab_gqa_view *, const void *blob, uint64_t bytes,
+    uint32_t warmup, uint32_t samples, uint32_t check, float *times, uint32_t *checked,
+    ignis_lab_diagnostics *, uint64_t *state_mismatches, uint64_t *state_bytes);
 // Empty token filters preserve the original all-token capture behavior.
 int32_t ignis_lab_capture_start_filtered(ignis_model *, ignis_seq_pool *, const char *, uint64_t, uint64_t,
     const char *, const uint32_t *token_filter, uint32_t token_filter_count);

@@ -18,6 +18,7 @@
 // resets it (a fresh slot reads zero, ignis_seq.h).
 
 #include "lab_profile.h"
+#include "lab_segment.h"
 #include "ignis_gdn_layer.h"
 
 #include "ignis_seq_internal.h"
@@ -523,6 +524,42 @@ int32_t run_gdn_layer_record(ignis_model *model, ignis_seq_pool *pool, uint32_t 
         verify.records.layer(static_cast<std::int32_t>(gdn_layer), batch);
 
     const ninfer::Tensor in(in_residual, ninfer::DType::BF16, {hidden, T, 1, 1});
+    // The finite verify boundary ends at output projection + residual. State
+    // is a read-only livein; every ReplaySSM plane is an observable liveout
+    // consumed later by accept/commit, including preserved invalid suffixes.
+    // Other widths and legacy operator captures retain the original chain.
+    bool record_segment = false;
+    void *segment_ticket = nullptr;
+    if (model->is_trellis_body && W == 8 && batch == 1 && hidden == 5120 &&
+        head_dim == 128 && spec.value_head_dim == 128 && value_heads == 48 && qk_heads == 16 && conv_channels == 10240 &&
+        ignis::lab_segment_should_run(*model, IGNIS_SEGMENT_GDN, layer, T, batch)) {
+      const auto p = ignis::segment_gdn_profile(*model, *pool);
+      ninfer::Tensor residual_view(out_residual, ninfer::DType::BF16, {hidden, T, 1, 1});
+      const std::vector<ignis::SegmentBinding> bindings{
+          {"residual_in", in, ignis::SEGMENT_INPUT},
+          {"conv_states", conv_states, ignis::SEGMENT_INPUT},
+          {"recurrent_states", ssm_states, ignis::SEGMENT_INPUT},
+          {"lane_slots", lane_slots, ignis::SEGMENT_INPUT},
+          {"valid_columns", valid_columns, ignis::SEGMENT_INPUT},
+          {"residual_out", residual_view, ignis::SEGMENT_OUTPUT},
+          {"conv_record", records.conv, ignis::SEGMENT_MUTABLE | ignis::SEGMENT_OUTPUT},
+          {"key_record", records.key, ignis::SEGMENT_MUTABLE | ignis::SEGMENT_OUTPUT},
+          {"value_record", records.value, ignis::SEGMENT_MUTABLE | ignis::SEGMENT_OUTPUT},
+          {"gate_record", records.gate, ignis::SEGMENT_MUTABLE | ignis::SEGMENT_OUTPUT},
+      };
+      if (ignis::lab_segment_is_recording(*model)) {
+        // Record the existing layer chain as the independent reference. The
+        // candidate launcher is used only by replay and a loaded extension.
+        record_segment = true;
+        segment_ticket = ignis::lab_segment_before(*model, layer, p, bindings, stream);
+      } else {
+        ignis::lab_segment_execute(*model, layer, p, bindings, stream);
+        const ninfer::Tensor post_norm =
+            weight_tensor(w.post_attention_norm, ninfer::DType::BF16, {hidden, 1, 1, 1});
+        ignis::segment_mlp(*model, layer, post_norm, residual_view, post, fused, stream);
+        return 0;
+      }
+    }
     const ninfer::Tensor input_norm =
         weight_tensor(w.input_norm, ninfer::DType::BF16, {hidden, 1, 1, 1});
     IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(in, input_norm, model->rms_norm_eps, /*unit_offset=*/true, h, stream));
@@ -594,8 +631,20 @@ int32_t run_gdn_layer_record(ignis_model *model, ignis_seq_pool *pool, uint32_t 
                 cudaGetErrorString(err));
       return -1;
     }
-    output_and_mlp(*model, w, gated, residual_view, post, fused, *model->decode_graph_scratch, mode, T,
-                   stream);
+    if (record_segment) {
+      // Same original output projection, with its residual liveout captured
+      // before the following MLP can modify it. Discovery has a null ticket
+      // but must traverse this same chain to retain graph identity.
+      IGNIS_PROFILE_OP("linear.output", ignis::trellis_body::linear(*model, w.trellis.tail.output,
+          gated, residual_view.data, static_cast<uint32_t>(hidden), IGNIS_TRELLIS_ADD, stream));
+      ignis::lab_segment_after(*model, segment_ticket, stream);
+      const ninfer::Tensor post_norm =
+          weight_tensor(w.post_attention_norm, ninfer::DType::BF16, {hidden, 1, 1, 1});
+      ignis::segment_mlp(*model, layer, post_norm, residual_view, post, fused, stream);
+    } else {
+      output_and_mlp(*model, w, gated, residual_view, post, fused, *model->decode_graph_scratch, mode, T,
+                     stream);
+    }
     return 0;
   } catch (const std::exception &e) {
     set_error(std::string("ignis_gdn_layer_verify: ") + e.what());

@@ -1,5 +1,10 @@
 // Model-local code replacement for the offline experiment engine.
 #include "trellis_candidate.h"
+#include "gqa_candidate.h"
+#include "lab_segment.h"
+#include "ignis_mlp_segment.h"
+#include "ignis_gqa_segment.h"
+#include "ignis_gdn_segment.h"
 #include "model_internal.h"
 #include "ignis_seq.h"
 #include "ignis_step.h"
@@ -8,6 +13,7 @@
 #include <string>
 #include <set>
 #include <tuple>
+#include <stdexcept>
 
 namespace ignis {
 TrellisCandidate::~TrellisCandidate() { if (library) dlclose(library); }
@@ -74,7 +80,36 @@ extern "C" int32_t ignis_model_reload_trellis(ignis_model *model, ignis_seq_pool
       return fail("candidate ABI mismatch");
     if (a->prepare() != 0) return fail(std::string("candidate prepare: ") + a->last_error());
     if (!fits(*model, *a)) return fail("candidate exceeds the resident workspace or lacks a shape");
+    // Optional extension: old Trellis-only libraries remain valid. Allocate
+    // before touching the active generation; failed admission preserves it.
+    auto gqa_entry = reinterpret_cast<const ignis_gqa_candidate_api *(*)()>(dlsym(next->library,"ignis_gqa_candidate_v1"));
+    if(gqa_entry){
+      next->gqa=gqa_entry();const auto *g=next->gqa;
+      if(!g || g->version!=IGNIS_GQA_CANDIDATE_ABI || g->size!=sizeof(*g) ||
+         g->call_size!=sizeof(ignis_gqa_candidate_call) || g->reserved || !g->identity ||
+         !g->prepare || !g->workspace_bytes || !g->run || !g->last_error)
+        return fail("GQA candidate ABI mismatch");
+      if(g->prepare())return fail(std::string("GQA candidate prepare: ")+g->last_error());
+      const auto bytes=g->workspace_bytes(model->max_context_tokens);
+      if(!bytes || bytes>(1ull<<30))return fail("GQA candidate invalid workspace capacity");
+      try{next->gqa_workspace=std::make_unique<ninfer::DeviceBuffer>(bytes);}
+      catch(const std::exception &e){return fail(std::string("GQA candidate workspace allocation: ")+e.what());}
+    }
   }
+  if(next){
+    auto entry=reinterpret_cast<const ignis_segment_candidate_api *(*)()>(dlsym(next->library,"ignis_segment_candidate_v1"));
+    if(entry){
+      next->segments=entry();const auto *s=next->segments;
+      if(!s || s->version!=IGNIS_SEGMENT_CANDIDATE_ABI || s->size!=sizeof(*s) ||
+         s->profile_size!=sizeof(ignis_segment_profile) || s->mlp_call_size!=sizeof(ignis_mlp_segment_call) ||
+         s->gqa_call_size!=sizeof(ignis_gqa_segment_call) || s->gdn_call_size!=sizeof(ignis_gdn_segment_call) ||
+         !s->identity || !s->prepare || !s->workspace_bytes || !s->run_mlp || !s->run_gqa || !s->run_gdn || !s->last_error)
+        return fail("segment candidate ABI mismatch");
+      if(s->prepare())return fail(std::string("segment candidate prepare: ")+s->last_error());
+    }
+  }
+  try{ignis::segment_prepare_runtime(*model,*pool,next.get());}
+  catch(const std::exception &e){return fail(std::string("segment preparation: ")+e.what());}
   // Keep old code alive until every graph referring to it has been destroyed.
   auto previous = model->trellis_candidate;
   auto old_graphs = model->decode_graph_exec;
@@ -115,4 +150,39 @@ extern "C" int32_t ignis_model_reload_trellis(ignis_model *model, ignis_seq_pool
   destroy(old_graphs);
   destroy(old_verify);
   return 0;
+}
+
+namespace ignis {
+bool gqa_candidate_applies(const ignis_model &m,const ninfer::Tensor &q,const ninfer::PagedKVBatchLayerView &cache){
+  return m.trellis_candidate && m.trellis_candidate->gqa && q.ne[0]==256 && q.ne[1]==24 &&
+      q.ne[2]==8 && q.ne[3]==1 && cache.dtype==ninfer::DType::U8;
+}
+uint64_t gqa_candidate_workspace_bytes(const ignis_model &m,uint32_t max_keys){
+  if(!m.trellis_candidate || !m.trellis_candidate->gqa)return 0;
+  const auto bytes=m.trellis_candidate->gqa->workspace_bytes(max_keys);
+  if(!bytes || bytes>(1ull<<30))throw std::runtime_error("GQA candidate invalid replay workspace capacity");
+  return bytes;
+}
+void gqa_attention_dispatch(const ignis_model &m,const ninfer::Tensor &q,const ninfer::Tensor &k,
+    const ninfer::Tensor &v,const ninfer::Tensor &positions,const ninfer::Tensor &valid,
+    const ninfer::Tensor &rows,const ninfer::Tensor &gate,float scale,
+    ninfer::PagedKVBatchLayerView cache,ninfer::ops::GqaExecutionEnvelope envelope,ninfer::DeviceArena &arena,
+    ninfer::Tensor &out,cudaStream_t stream,void *replay_workspace,uint64_t replay_bytes){
+  if(!gqa_candidate_applies(m,q,cache)){
+    ninfer::ops::gqa_attention(q,k,v,positions,valid,rows,gate,scale,cache,envelope,arena,out,stream);return;
+  }
+  auto &candidate=*m.trellis_candidate;const auto *api=candidate.gqa;
+  const auto bytes=gqa_candidate_workspace_bytes(m,envelope.max_visible_keys);
+  void *workspace=replay_workspace?replay_workspace:candidate.gqa_workspace->p;
+  const uint64_t capacity=replay_workspace?replay_bytes:candidate.gqa_workspace->bytes;
+  if(bytes>capacity)throw std::runtime_error("GQA candidate query exceeds host-owned workspace");
+  ignis_gqa_candidate_call call{IGNIS_GQA_CANDIDATE_ABI,sizeof(ignis_gqa_candidate_call),envelope.max_visible_keys,
+      static_cast<uint32_t>(cache.block_tables.ne[0]),static_cast<uint32_t>(cache.k_pages.ne[3]),
+      static_cast<uint32_t>(cache.block_tables.ne[1]),scale,q.data,k.data,v.data,gate.data,
+      static_cast<const int32_t *>(positions.data),static_cast<const int32_t *>(valid.data),
+      static_cast<const int32_t *>(rows.data),static_cast<const int32_t *>(cache.block_tables.data),
+      cache.k_pages.data,cache.v_pages.data,cache.k_scale_pages.data,cache.v_scale_pages.data,
+      cache.residual_k.data,cache.residual_v.data,static_cast<uint32_t *>(cache.ring_valid.data),out.data};
+  if(api->run(&call,workspace,capacity,stream))throw std::runtime_error(std::string("GQA candidate: ")+api->last_error());
+}
 }

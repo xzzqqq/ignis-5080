@@ -403,6 +403,7 @@ target_link_libraries(ignis_hq_verify_bench PRIVATE ignis_vendor)
 add_executable(ignis_kernel_hq_verify_exact_test test_hq_verify_exact.cu)
 target_compile_definitions(ignis_kernel_hq_verify_exact_test PRIVATE
   IGNIS_HQ_KV_FIXTURE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hq_kv_rows_27b.bin")
+target_include_directories(ignis_kernel_hq_verify_exact_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(ignis_kernel_hq_verify_exact_test PRIVATE ignis_vendor)
 add_test(NAME ignis_kernel_hq_verify_exact_test COMMAND ignis_kernel_hq_verify_exact_test)
 

@@ -12,6 +12,20 @@ import uuid
 
 HOT = {'kernel/src/' + x for x in ('trellis_linear.cu', 'trellis_linear_decode.cu',
     'trellis_linear_prefill.cu', 'trellis_linear_internal.cuh', 'trellis_decode.cuh', 'trellis_linear_mlp_t8.cu', 'trellis_decode_helpers.cuh')}
+# Exact candidate code/policy dependencies admitted for hot experiments. ABI,
+# runtime and unrelated vendor headers still require a new pinned baseline.
+HOT |= {'kernel/'+name for name in (
+    'src/lab_gqa_candidate.cu', 'src/lab_gqa_candidate_policy.cuh',
+    'src/lab_mlp_segment.cu', 'src/lab_mlp_segment_policy.cuh', 'src/lab_gqa_segment.cu', 'src/lab_gdn_segment.cu',
+    'include/ignis_gqa_hq_reduce.cuh',
+    'vendor/src/ops/kernel/gqa_attention_decode.cuh',
+    'vendor/src/ops/kernel/gqa_attention_decode_bf16.cuh',
+    'vendor/src/ops/kernel/gqa_attention_decode_hq.cuh',
+    'vendor/src/ops/kernel/hq_codec.cuh',
+    'vendor/src/ops/kernel/rmsnorm.cuh', 'vendor/src/ops/kernel/rope.cuh',
+    'vendor/src/ops/gdn_input_proj/gdn_projected_conv.cu',
+    'vendor/src/ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu',
+    'vendor/src/ops/linear_attention/gated_delta_net/recurrent.cuh')}
 GPU_LOCK = Path('/tmp/ignis-gpu-profile.lock')
 
 
