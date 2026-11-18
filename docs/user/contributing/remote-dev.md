@@ -163,8 +163,10 @@ GPU 工作前先查看 `make gpu-status` 并通过 `make gpu-guard`，协调全�
 有足够余量。不能因检查通过就并行启动第二项 GPU 工作。
 
 Linux 支持 CUDA build/check、GPU status/guard 和后台服务控制。下面的
-`gpu_profile.py` 是完整 GPU 验收入口，用于一轮优化收尾时检查累计改动，
-不是每个 replay 候选后的必经步骤：
+`gpu_profile.py` 是 GPU 回归检查入口，不包含服务性能基准、容量或 canary 检查。
+一轮优化收尾的验收范围见[testing 指南](../../agents/testing.md)，最终服务性能按
+[固定 coding-agent benchmark](coding-agent-benchmark.md) 验证；这些检查针对累计
+改动，不是每个 replay 候选后的必经步骤：
 
 ```sh
 python3 scripts/remote.py exec -- python3 scripts/gpu_profile.py --artifact models/qwen3_8_27b_trellis_sc30-v2.ninfer --out .scratch/gpu-check

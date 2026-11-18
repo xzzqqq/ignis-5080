@@ -22,7 +22,7 @@ measuring both performance and numerical error. Keep candidates with
 substantial speedups as alternatives while investigating numerical differences;
 do not discard them solely for failing bitwise comparison. Use targeted
 checks and forward measurements when they help diagnose issues or evaluate
-combined changes. Run full acceptance once at the end of an optimization
+combined changes. Run [full acceptance](docs/agents/testing.md) at the end of an optimization
 round on the accumulated changes, not after every optimization point.
 
 ## Numerical correctness
