@@ -78,6 +78,41 @@ class IterationTests(unittest.TestCase):
             self.assertTrue(all(c['exploratory'] for c in calls))
             self.assertEqual((calls[1]['warmup'],calls[1]['samples']),(2,4))
 
+    def test_gqa_representatives_preserve_each_recorded_window_and_mask(self):
+        value=iteration.Iteration()
+        records=[dict(id=i,kind='gqa_attention',weight={'name':'layer.3.attention'},tokens=8,
+                      position=64+i,max_keys=1024,tensors=[{'shape':[8,1,1,1]}]) for i in range(3)]
+        groups=[dict(shard='gqa',records=records)]
+        self.assertEqual(value.representative_scope(groups)[0]['records'],records)
+        self.assertTrue(iteration.selected(records[1],['layer.3.attention'],[8]))
+        self.assertFalse(iteration.selected(records[1],['layer.3.output'],[8]))
+
+    def test_mixed_block_and_legacy_selectors_are_rejected_before_capture(self):
+        value=iteration.Iteration();value.capture=Mock(side_effect=AssertionError('must not capture'))
+        with self.assertRaisesRegex(ValueError,'cannot be mixed'):
+            value.select_corpus(dict(operators=['layer.0.mlp_block','layer.0.down'],tokens_per_call=[8]))
+        value.capture.assert_not_called()
+
+    def test_finite_segment_records_keep_distinct_state_and_boundaries(self):
+        value=iteration.Iteration()
+        records=[dict(id=i,kind='segment',weight={'name':name},tokens=8,profile={'kind':kind})
+            for i,(name,kind) in enumerate([('layer.0.mlp_block',1),('layer.3.gqa_block',2),('layer.0.gdn_block',3),('layer.0.gdn_block',3)])]
+        groups=[dict(records=records)]
+        self.assertEqual(value.representative_scope(groups)[0]['records'],records)
+        self.assertTrue(iteration.selected(records[2],['layer.0.gdn_block'],[8]))
+        self.assertFalse(iteration.selected(records[2],['layer.0.mlp_block'],[8]))
+
+    def test_gqa_state_differences_are_separate_exploratory_diagnostics(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);value=self.owner(root)
+            record=dict(id=0,kind='gqa_attention',weight={'name':'layer.3.attention'},tokens=8)
+            value.selection=[dict(data='/data',shard='gqa',records=[record])]
+            value.engine=SimpleNamespace(call=Mock(return_value=dict(ok=True,result=[dict(record=0,
+                mismatches=0,passed=False,state_diagnostics=dict(exact_match=False,mismatched_bytes=1),samples_ms=[1.0])])) )
+            result=value.local(root,'gqa',warmup=0,samples=1)
+            self.assertTrue(result['passed']);self.assertTrue(result['numerical_match'])
+            self.assertFalse(result['state_match']);self.assertEqual(len(result['timings']),1)
+
     def test_saved_names_are_immutable_and_check_library_identity(self):
         with tempfile.TemporaryDirectory() as t:
             root=Path(t);value=self.owner(root);library=root/'candidate.so';library.write_bytes(b'original')

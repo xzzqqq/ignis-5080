@@ -42,6 +42,33 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(result['reference_nan'],1)
         self.assertEqual(result['actual_inf'],1)
 
+    def test_gqa_state_and_builtin_implementation_are_visible_in_compact_output(self):
+        row=self.row(0);row.update(kind='gqa_attention',candidate_applied=False,implementation='builtin',
+            state_diagnostics=dict(mismatched_bytes=2,checked_bytes=4096,exact_match=False))
+        result=client.replay_summary(dict(records=1,state_match=False,diagnostics=[row],timings=[row]))
+        self.assertFalse(result['state_match'])
+        self.assertEqual(result['numerical']['state']['mismatched_bytes'],2)
+        self.assertFalse(result['timing_numerical']['native_attention']['candidate_applied'])
+        self.assertEqual(result['numerical']['native_attention']['implementations'],['builtin'])
+
+    def test_gqa_candidate_identity_is_preserved_without_exact_output_gate(self):
+        row=self.row(0);row.update(kind='gqa_attention',implementation='candidate-sha',candidate_applied=True,
+            state_diagnostics=dict(mismatched_bytes=0,checked_bytes=4096,exact_match=True))
+        result=client.replay_summary(dict(passed=True,numerical_match=False,diagnostics=[row],timings=[row]))
+        self.assertTrue(result['passed']);self.assertFalse(result['numerical_match'])
+        self.assertEqual(result['numerical']['native_attention']['implementations'],['candidate-sha'])
+        self.assertTrue(result['timing_numerical']['native_attention']['candidate_applied'])
+
+    def test_segment_liveout_metrics_remain_separate_by_binding(self):
+        row=self.row(0);row.update(kind='segment',candidate_applied=True,implementation='segment-sha',
+            state_diagnostics=dict(mismatched_bytes=0,checked_bytes=4096,exact_match=True),
+            outputs=[dict(binding='residual_out',diagnostics=dict(max_abs_error=0.25,relative_l2=0.1)),
+                     dict(binding='gate_record',diagnostics=dict(max_abs_error=0.001,relative_l2=0.0001))])
+        summary=client.numerical_summary([row])
+        self.assertTrue(summary['native_segments']['candidate_applied'])
+        self.assertEqual(summary['outputs']['residual_out']['max_abs_error'],0.25)
+        self.assertEqual(summary['outputs']['gate_record']['max_abs_error'],0.001)
+
     def test_huge_output_differences_report_counts_and_first_change(self):
         result=client.difference_summary(dict(tokens=dict(baseline=list(range(8192)),candidate=[-1]*8192),
             rounds=dict(baseline=[[1,2]]*8192,candidate=[[2,3]]*8192),

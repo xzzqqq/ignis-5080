@@ -5,6 +5,9 @@
 // KV append -> attention + sigmoid output gate -> output residual -> MLP tail.
 
 #include "lab_profile.h"
+#include "lab_trace.h"
+#include "lab_segment.h"
+#include "gqa_candidate.h"
 #include "attention_readout.h"
 #include "ignis_attn_tap.h"
 #include "ignis_gqa_layer.h"
@@ -420,6 +423,53 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
 
   ninfer::DeviceArena::Scope scope = model->decode_graph_scratch->scope();
   try {
+    void *segment_ticket=nullptr;
+    bool recording_segment=false;
+    // Finite GQA sublayer boundary: candidates own the entire token mixer,
+    // including its norm, projections, rotary preparation and residual add.
+    // Explicitly retain the original path for every other body/cache/shape.
+    // Legacy operator recording also chooses that path inside should_run so
+    // its inner projection and attention hooks continue to observe real work.
+    if(model->is_trellis_body && model->hidden==5120 && lane_tokens==8 && batch==1 &&
+       pool->kv_format==IGNIS_KV_FORMAT_HQ_E8_2B &&
+       ignis::lab_segment_should_run(*model,IGNIS_SEGMENT_GQA,layer,lane_tokens,batch)){
+      const auto profile=ignis::segment_gqa_profile(*model,*pool);
+      const auto cache=ignis_kv_batch_layer_view(pool,static_cast<std::int32_t>(gqa_layer));
+      const ninfer::Tensor input(in_residual,ninfer::DType::BF16,{hidden,columns});
+      ninfer::Tensor residual(out_residual,ninfer::DType::BF16,{hidden,columns});
+      const ninfer::Tensor positions(const_cast<void *>(positions_ptr),ninfer::DType::I32,{lane_tokens,batch});
+      const ninfer::Tensor rotation_positions(const_cast<void *>(rope_positions_ptr),ninfer::DType::I32,{columns});
+      const ninfer::Tensor valid(const_cast<void *>(valid_columns_ptr),ninfer::DType::I32,{batch});
+      const ninfer::Tensor rows(model->decode_graph_slots->p,ninfer::DType::I32,{batch});
+      const std::vector<ignis::SegmentBinding> bindings{
+          {"input",input,ignis::SEGMENT_INPUT},
+          {"positions",positions,ignis::SEGMENT_INPUT},
+          {"rope_positions",rotation_positions,ignis::SEGMENT_INPUT},
+          {"valid_columns",valid,ignis::SEGMENT_INPUT},
+          {"table_rows",rows,ignis::SEGMENT_INPUT},
+          {"block_tables",cache.block_tables,ignis::SEGMENT_INPUT},
+          {"k_pages",cache.k_pages,ignis::SEGMENT_MUTABLE},
+          {"v_pages",cache.v_pages,ignis::SEGMENT_MUTABLE},
+          {"k_meta",cache.k_scale_pages,ignis::SEGMENT_MUTABLE},
+          {"v_meta",cache.v_scale_pages,ignis::SEGMENT_MUTABLE},
+          {"residual_k",cache.residual_k,ignis::SEGMENT_MUTABLE},
+          {"residual_v",cache.residual_v,ignis::SEGMENT_MUTABLE},
+          {"ring",cache.ring_valid,ignis::SEGMENT_MUTABLE},
+          {"output",residual,ignis::SEGMENT_OUTPUT}};
+      if(ignis::lab_segment_is_recording(*model)){
+        // Corpus references come from the original resident operator chain.
+        // Discovery returns no ticket but still needs the same boundary split.
+        recording_segment=true;
+        segment_ticket=ignis::lab_segment_before(*model,layer,profile,bindings,stream);
+      }else{
+        ignis::lab_segment_execute(*model,layer,profile,bindings,stream);
+        ninfer::Tensor post=model->decode_graph_scratch->alloc(ninfer::DType::BF16,{hidden,columns});
+        ninfer::Tensor fused=model->decode_graph_scratch->alloc(ninfer::DType::BF16,{ffn,columns});
+        const auto post_norm=weight_tensor(weights.post_attention_norm,ninfer::DType::BF16,{hidden});
+        ignis::segment_mlp(*model,layer,post_norm,residual,post,fused,stream);
+        return 0;
+      }
+    }
     ninfer::Tensor normalized =
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
     ninfer::Tensor query =
@@ -550,10 +600,14 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
     }
     ninfer::DeviceArena attention_workspace(attention_workspace_storage);
     ninfer::Tensor attention_heads = attention.view({kHeadDim, kQHeads, lane_tokens, batch});
-    IGNIS_PROFILE_OP("gqa_attention", ninfer::ops::gqa_attention(
+    void *lab_ticket = ignis::lab_gqa_before(*model, layer, rotated_query_heads,
+        rotated_key_heads, value_heads, gate.view({kHeadDim, kQHeads, lane_tokens, batch}),
+        positions_rows, valid_columns, kv_table_rows, batch_cache, envelope.max_visible_keys, stream);
+    IGNIS_PROFILE_OP("gqa_attention", ignis::gqa_attention_dispatch(*model,
         rotated_query_heads, rotated_key_heads, value_heads, positions_rows, valid_columns,
         kv_table_rows, gate.view({kHeadDim, kQHeads, lane_tokens, batch}), attention_scale,
         batch_cache, envelope, attention_workspace, attention_heads, stream));
+    ignis::lab_gqa_after(*model, lab_ticket, attention_heads, stream);
 
     ninfer::Tensor residual(out_residual, ninfer::DType::BF16, {hidden, columns, 1, 1});
     error = cudaMemcpyAsync(out_residual, in_residual,
@@ -564,8 +618,18 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
                 cudaGetErrorString(error));
       return -1;
     }
-    output_and_mlp(*model, weights, attention, residual, post, fused, *model->decode_graph_scratch, mode, columns,
-                   stream);
+    if(recording_segment){
+      // End the GQA reference after the ORIGINAL output projection/residual
+      // add, before the MLP can mutate this same residual buffer.
+      IGNIS_PROFILE_OP("linear.output",ignis::trellis_body::linear(*model,weights.trellis.tail.output,
+          attention,residual.data,static_cast<uint32_t>(hidden),IGNIS_TRELLIS_ADD,stream));
+      ignis::lab_segment_after(*model,segment_ticket,stream);
+      const auto post_norm=weight_tensor(weights.post_attention_norm,ninfer::DType::BF16,{hidden});
+      ignis::segment_mlp(*model,layer,post_norm,residual,post,fused,stream);
+    }else{
+      output_and_mlp(*model, weights, attention, residual, post, fused, *model->decode_graph_scratch, mode, columns,
+                     stream);
+    }
     return 0;
   } catch (const std::exception &error) {
     set_error(std::string(op) + ": " + error.what());

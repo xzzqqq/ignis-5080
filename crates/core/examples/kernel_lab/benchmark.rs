@@ -65,6 +65,7 @@ pub fn run(model: &Model, pool: &SeqPool, settings: &Settings, case: &Value,
     }
     let decode_ms: f64 = rounds.iter().map(|r|r["ms"].as_f64().unwrap()).sum();
     Ok(json!({"tier":"forward","id":case["id"],"input_tokens":prompt.len(),
+        "gqa":ignis_core::lab_trace::gqa_status(model),"segments":ignis_core::lab_trace::segment_status(model),
         "prefill_ms":prefill_ms,"decode_ms":decode_ms,"rounds":rounds,
         "tokens":tokens,"output_tokens":tokens.len(),"finish_reason":finish,"stop_token":stop_token,
         "thinking_open_at_end":starts_in_reasoning && thinking.closed_at().is_none(),"logits_sha256":hash(&logits.iter().flat_map(|v|v.to_le_bytes()).collect::<Vec<_>>()),

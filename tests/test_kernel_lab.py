@@ -18,7 +18,7 @@ class CandidateBuildTests(unittest.TestCase):
             (source / 'kernel/include').mkdir()
             for name in builder.SOURCES:
                 (source / 'kernel/src' / name).write_text('original')
-            for name in ('ignis_trellis_candidate.h','ignis_trellis_linear.h'):
+            for name in ('ignis_trellis_candidate.h','ignis_trellis_linear.h','ignis_gqa_candidate.h','ignis_segment_candidate.h','ignis_mlp_segment.h','ignis_gqa_segment.h','ignis_gdn_segment.h'):
                 (source/'kernel/include'/name).write_text('abi')
             shared=source/'kernel/src/shared.cuh';shared.write_text('shared')
             def deps(src,name,*args):
@@ -49,6 +49,36 @@ class CandidateBuildTests(unittest.TestCase):
                 Path(third['path']).write_bytes(b'corrupt')
                 with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
                     builder.build(source, base / 'out', 'nvcc')
+
+
+    def test_freeze_uses_exact_transitive_local_dependencies(self):
+        import tempfile
+        from unittest.mock import patch
+        spec=importlib.util.spec_from_file_location('candidate_builder_freeze',ROOT/'scripts/build_trellis_candidate.py')
+        builder=importlib.util.module_from_spec(spec);spec.loader.exec_module(builder)
+        with tempfile.TemporaryDirectory() as t:
+            source=(Path(t)/'source').resolve();(source/'kernel/src').mkdir(parents=True)
+            nested=source/'kernel/vendor/src/ops/kernel/hq_codec.cuh'
+            nested.parent.mkdir(parents=True);nested.write_text('codec')
+            unrelated=source/'kernel/vendor/src/ops/kernel/unrelated.cuh';unrelated.write_text('other')
+            outside=Path(t)/'toolkit.h';outside.write_text('external')
+            deps={str(nested):'codec',str(outside):'external'}
+            with patch.object(builder,'dependencies',return_value=deps):
+                files=builder.freeze_inputs(source,'nvcc')
+            self.assertIn(nested,files);self.assertNotIn(unrelated,files);self.assertNotIn(outside,files)
+            self.assertIn(source/'kernel/src/lab_gqa_candidate.cu',files)
+            self.assertIn(source/'kernel/include/ignis_gqa_candidate.h',files)
+
+    def test_gqa_hot_source_admission_is_explicit(self):
+        import sys
+        sys.path.insert(0,str(ROOT/'scripts'))
+        from lab_support.common import host_changes
+        supported=['kernel/src/lab_gqa_candidate.cu','kernel/src/lab_gqa_candidate_policy.cuh',
+            'kernel/include/ignis_gqa_hq_reduce.cuh','kernel/vendor/src/ops/kernel/hq_codec.cuh']
+        for path in supported:self.assertEqual(host_changes({path:'before'},{path:'after'}),[])
+        for path in ['kernel/include/ignis_gqa_candidate.h','kernel/vendor/src/core/tensor.h',
+                     'kernel/vendor/manifest.json','kernel/src/gqa_candidate.h']:
+            self.assertEqual(host_changes({path:'before'},{path:'after'}),[path])
 
 
 class EngineProtocolTests(unittest.TestCase):

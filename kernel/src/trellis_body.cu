@@ -3,6 +3,7 @@
 
 #include "lab_profile.h"
 #include "trellis_body.h"
+#include "lab_segment.h"
 
 #include "model_internal.h"
 
@@ -103,9 +104,11 @@ void output_and_mlp(const ignis_model &model, const TrellisTail &tail, const nin
                     ninfer::Tensor &fused, cudaStream_t stream) {
   const auto hidden = static_cast<uint32_t>(model.hidden);
   IGNIS_PROFILE_OP("linear.output", linear(model, tail.output, mixed, residual.data, hidden, IGNIS_TRELLIS_ADD, stream));
-  IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(residual, post_norm, model.rms_norm_eps, /*unit_offset=*/true, post, stream));
-  IGNIS_PROFILE_OP("mlp.swiglu", swiglu(model, tail.gate_proj, tail.up_proj, post, fused, stream));
-  IGNIS_PROFILE_OP("linear.down", linear(model, tail.down, fused, residual.data, hidden, IGNIS_TRELLIS_ADD, stream));
+  for(uint32_t layer=0;layer<model.layers.size();++layer){
+    const auto &t=model.layers[layer].kind==IGNIS_LAYER_GQA?model.layers[layer].gqa.trellis.tail:model.layers[layer].gdn.trellis.tail;
+    if(&t==&tail){ignis::segment_mlp(model,layer,post_norm,residual,post,fused,stream);return;}
+  }
+  throw std::runtime_error("unregistered MLP segment layer");
 }
 
 void output_head(const ignis_model &model, const ninfer::Tensor &normalized, ninfer::Tensor &logits,

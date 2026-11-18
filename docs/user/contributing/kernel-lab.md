@@ -3,14 +3,16 @@ title: "Kernel Lab"
 description: "Explore kernel edits with a resident model, real operator inputs and full-model feedback."
 ---
 
-Use Kernel Lab for repeated Trellis kernel experiments against a fixed model
+Use Kernel Lab for repeated kernel experiments against a fixed model
 and benchmark request. Run commands from the local worktree; they handle
 sync and remote execution through `scripts/remote.py`. The model stays on the
 remote GPU. Agents can collaborate, but one executor owns the session and GPU
 at a time; coordinate access before issuing commands.
 
-Hot loading covers Trellis linear/SwiGLU operations: GDN/GQA projections, MLP
-and the output head. Attention, GDN state updates and normalization remain fixed.
+Hot loading covers Trellis linear/SwiGLU operations, the complete C1/T8 HQ
+GQA attention launcher, and three finite layer segments (MLP, GQA and GDN). The same selected attention code runs in stateful replay
+and real forward graphs. Other attention shapes use builtin code; GDN state
+updates and normalization remain fixed.
 
 Create `.scratch/lab-settings.json` from the
 [configuration example](kernel-lab-reference.md#configure-once), then run:
@@ -24,6 +26,40 @@ Setup fixes the model, configuration and request. Select operators and token
 counts per command. The first use of a scope records its real inputs; later
 commands reuse compatible cached recordings. Recording costs are separate from
 operator timing.
+
+For GQA attention, select one layer explicitly:
+
+```sh
+python3 scripts/lab.py replay --candidate current --operator layer.3.attention --tokens-per-call 8 --save-as gqa-before
+# Edit kernel/src/lab_gqa_candidate_policy.cuh or supported GQA kernel sources.
+python3 scripts/lab.py compare --baseline gqa-before --candidate current --operator layer.3.attention --tokens-per-call 8
+```
+
+This records the actual rotated Q/K, V, gate, device positions and mask, and
+paged HQ KV plus residual/ring state before and after attention. Replay restores
+an isolated copy before each measured launch and reports BF16 output errors and
+exact state-byte differences separately. The initial scope is single-sequence,
+eight-column HQ attention, including masked tails; a pool configured for two
+lanes works. Recording all token widths or BF16 attention is unsupported. Full
+physical state images can be large: at context 65,536 with two pool lanes, one
+layer costs about 153 MiB per recorded call. Narrow the scope and budget disk
+space for the complete fixed request. See the [reference](kernel-lab-reference.md#stateful-gqa-attention-replay)
+for limits, candidate workspace ownership and supported source edits.
+
+To explore a larger boundary, select a finite block:
+
+```sh
+python3 scripts/lab.py replay --candidate current --operator layer.0.mlp_block --tokens-per-call 8
+python3 scripts/lab.py replay --candidate current --operator layer.3.gqa_block --operator layer.0.gdn_block --tokens-per-call 8
+```
+
+These boundaries include their input normalization and final residual add.
+GQA/GDN blocks exclude the following MLP. GDN replay retains all four commit
+record planes and verifies that persistent recurrent/conv state stays readonly.
+Candidates own the complete launch sequence and temporary layout inside each
+block. Block selectors cannot be mixed with legacy operator selectors in one
+command; issue separate commands for those scopes. See the
+[finite segment reference](kernel-lab-reference.md#finite-layer-segments).
 
 Repeat **edit → replay** for quick exploration. Replay reports timing and output
 errors against the recorded baseline. Numerical differences do not block timing;

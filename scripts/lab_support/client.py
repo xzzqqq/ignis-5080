@@ -49,13 +49,36 @@ def candidate_summary(value):
 def numerical_summary(rows):
     counts=('mismatches','total_elements','finite_elements','reference_nan','reference_inf','actual_nan','actual_inf')
     result={field:sum(r.get('diagnostics',{}).get(field,r.get(field,0)) for r in rows) for field in counts}
-    result.update(records=len(rows),mismatch_records=sum(r.get('mismatches',0)>0 for r in rows))
+    result.update(records=len(rows),mismatch_records=sum(r.get('diagnostics',{}).get('mismatches',r.get('mismatches',0))>0 for r in rows))
     for source,target in (('max_abs_error','max_abs_error'),('relative_l2','max_record_relative_l2')):
         values=[r.get('diagnostics',{}).get(source) for r in rows]
         finite=[v for v in values if v is not None]
         result[target]=max(finite) if finite else None
         result['undefined_'+source+'_records']=sum(v is None for v in values)
     result['zero_reference_records']=sum(bool(r.get('diagnostics',{}).get('relative_l2_zero_reference')) for r in rows)
+    state=[r['state_diagnostics'] for r in rows if 'state_diagnostics' in r]
+    if state:
+        result['state']=dict(records=len(state),mismatched_bytes=sum(r['mismatched_bytes'] for r in state),
+            checked_bytes=sum(r['checked_bytes'] for r in state),exact_match=all(r['exact_match'] for r in state))
+        implementations=sorted({r.get('implementation','unknown') for r in rows if 'state_diagnostics' in r})
+        component='native_segments' if any(r.get('kind')=='segment' for r in rows) else 'native_attention'
+        result[component]=dict(implementations=implementations,
+            candidate_applied=any(r.get('candidate_applied',False) for r in rows if 'state_diagnostics' in r),
+            scope='three finite C1/T8 blocks' if component=='native_segments' else 'C1/T8/HQ',unsupported_shapes='builtin')
+        if component=='native_segments':
+            preservation=defaultdict(list)
+            for row in rows:
+                for binding in row.get('state_diagnostics',{}).get('bindings',[]):
+                    preservation[binding['binding']].append(binding)
+            result['state']['bindings']={name:dict(mismatched_bytes=sum(b['mismatched_bytes'] for b in values),
+                checked_bytes=sum(b['checked_bytes'] for b in values),readonly=all(b['readonly'] for b in values))
+                for name,values in preservation.items()}
+            result['state']['readonly_mismatched_bytes']=sum(b['mismatched_bytes'] for b in result['state']['bindings'].values() if b['readonly'])
+            result['state']['mutable_mismatched_bytes']=sum(b['mismatched_bytes'] for b in result['state']['bindings'].values() if not b['readonly'])
+            outputs=defaultdict(list)
+            for row in rows:
+                for output in row.get('outputs',[]):outputs[output['binding']].append(output)
+            result['outputs']={name:numerical_summary(values) for name,values in outputs.items()}
     return result
 
 
@@ -104,7 +127,7 @@ def forward_summary(value):
 
 
 def replay_summary(value):
-    result={k:value[k] for k in ('passed','records','performance_records','warmup','samples','numerical_match','capture_trajectory_match') if k in value}
+    result={k:value[k] for k in ('passed','records','performance_records','warmup','samples','numerical_match','state_match','capture_trajectory_match') if k in value}
     result['numerical']=numerical_summary(value.get('diagnostics',[]))
     result['timing_numerical']=numerical_summary(value.get('timings',[]))
     result['timing']=timing_summary(value.get('timings',[]))

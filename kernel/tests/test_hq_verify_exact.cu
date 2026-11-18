@@ -27,6 +27,11 @@
 // of the partials must match, and with the append so must every byte the
 // kernel wrote into the cache.
 //
+// The owned HQ27 fixed-256/D256 reducer is also checked against the unchanged
+// generic reducer on independent reference partials, aliasing gate/output,
+// nonfinite values, underflow/subnormal denominators, and a 257-split boundary.
+// No expected output comes from the candidate.
+//
 // ADR 0006 / docs/agents/testing.md: no SKIP_RETURN_CODE; a missing GPU, a
 // kernel error or a missing fixture fails this test.
 
@@ -40,6 +45,8 @@
 #include <vector>
 
 #include "ops/kernel/gqa_attention_decode_hq.cuh"
+#include "ignis_gqa_hq_reduce.cuh"
+
 
 using namespace ninfer;
 using namespace ninfer::ops;
@@ -196,6 +203,41 @@ void launch(const Case& c, const __nv_bfloat16* q, CacheInput input, const std::
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+// The unchanged generic 256-thread/D64 reducer is the exact oracle for
+// the independent HQ27 fixed 256-thread/D256 specialization.
+void launch_reduce(bool candidate, const Case& c, const __nv_bfloat16* acc,
+                   const float* m, const float* l, const std::int32_t* pos,
+                   const std::int32_t* valid, const __nv_bfloat16* gate,
+                   __nv_bfloat16* out, cudaStream_t stream = nullptr) {
+    const int lanes = static_cast<int>(c.windows.size());
+    const dim3 grid(Geometry::QHeads, 4, c.tokens * lanes);
+    const dim3 candidate_grid(Geometry::QHeads, kGqaHeadDim / kIgnisGqaHqReduceDChunk,
+                              c.tokens * lanes);
+    const auto selected = [&]<bool Multi, bool Mask, bool Offset>() {
+        if (candidate) {
+            ignis_gqa_hq_reduce_kernel<Geometry, kIgnisGqaHqReduceDChunk, false, Multi, Mask, Offset>
+                <<<candidate_grid, kIgnisGqaHqReduceThreads, 0, stream>>>(acc, m, l, pos, valid, gate, c.tokens, c.full_width,
+                                          c.column_begin, lanes, c.splits, out);
+        } else {
+            gqa_attention_small_t_reduce_output_kernel<Geometry, 64, false, Multi, Mask, Offset>
+                <<<grid, 256, 0, stream>>>(acc, m, l, pos, valid, gate, c.tokens, c.full_width,
+                                          c.column_begin, lanes, c.splits, out);
+        }
+    };
+    const int flags = (lanes > 1 ? 4 : 0) | (!c.valid.empty() ? 2 : 0) | (c.column_begin != 0 ? 1 : 0);
+    switch (flags) {
+    case 0: selected.template operator()<false, false, false>(); break;
+    case 1: selected.template operator()<false, false, true>(); break;
+    case 2: selected.template operator()<false, true, false>(); break;
+    case 3: selected.template operator()<false, true, true>(); break;
+    case 4: selected.template operator()<true, false, false>(); break;
+    case 5: selected.template operator()<true, false, true>(); break;
+    case 6: selected.template operator()<true, true, false>(); break;
+    default: selected.template operator()<true, true, true>(); break;
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
 template <typename T>
 std::vector<std::uint8_t> to_host(const T* d, std::size_t bytes) {
     std::vector<std::uint8_t> h(bytes);
@@ -325,6 +367,7 @@ void run_case(const Case& c, const Rows& rows, const __nv_bfloat16* d_rows) {
     const auto codes_k0 = to_host(kv.codes_k, code_bytes), codes_v0 = to_host(kv.codes_v, code_bytes);
     const auto meta_k0 = to_host(kv.meta_k, meta_bytes), meta_v0 = to_host(kv.meta_v, meta_bytes);
     std::vector<std::uint8_t> side_k0, side_v0;
+    const auto ring0 = c.residual ? to_host(kv.ring_valid, lanes * kRingWords * 4) : std::vector<std::uint8_t>{};
     if (c.residual) { side_k0 = to_host(kv.residual_k, side_bytes); side_v0 = to_host(kv.residual_v, side_bytes); }
     auto restore = [&]() {
         CUDA_CHECK(cudaMemcpy(kv.codes_k, codes_k0.data(), code_bytes, cudaMemcpyHostToDevice));
@@ -335,12 +378,13 @@ void run_case(const Case& c, const Rows& rows, const __nv_bfloat16* d_rows) {
             CUDA_CHECK(cudaMemcpy(kv.residual_k, side_k0.data(), side_bytes, cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(kv.residual_v, side_v0.data(), side_bytes, cudaMemcpyHostToDevice));
         }
+        if (c.residual) CUDA_CHECK(cudaMemcpy(kv.ring_valid, ring0.data(), ring0.size(), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemset(d_acc, 0xAB, acc_bytes));
         CUDA_CHECK(cudaMemset(d_m, 0xAB, stat_bytes));
         CUDA_CHECK(cudaMemset(d_l, 0xAB, stat_bytes));
     };
     struct Out {
-        std::vector<std::uint8_t> acc, m, l, codes_k, codes_v, meta_k, meta_v, side_k, side_v;
+        std::vector<std::uint8_t> acc, m, l, codes_k, codes_v, meta_k, meta_v, side_k, side_v, ring;
     };
     auto capture = [&]() {
         Out o;
@@ -352,6 +396,7 @@ void run_case(const Case& c, const Rows& rows, const __nv_bfloat16* d_rows) {
         o.meta_k  = to_host(kv.meta_k, meta_bytes);
         o.meta_v  = to_host(kv.meta_v, meta_bytes);
         if (c.residual) { o.side_k = to_host(kv.residual_k, side_bytes); o.side_v = to_host(kv.residual_v, side_bytes); }
+        if (c.residual) o.ring = to_host(kv.ring_valid, ring0.size());
         return o;
     };
     auto run = [&](bool throughput) {
@@ -385,7 +430,7 @@ void run_case(const Case& c, const Rows& rows, const __nv_bfloat16* d_rows) {
                       d_l_n = differing(ref.l, fast.l);
     const std::size_t d_cache = differing(ref.codes_k, fast.codes_k) + differing(ref.codes_v, fast.codes_v) +
                                 differing(ref.meta_k, fast.meta_k) + differing(ref.meta_v, fast.meta_v) +
-                                differing(ref.side_k, fast.side_k) + differing(ref.side_v, fast.side_v);
+                                differing(ref.side_k, fast.side_k) + differing(ref.side_v, fast.side_v) + differing(ref.ring, fast.ring);
     const std::size_t appended = differing(codes_k0, ref.codes_k) + differing(codes_v0, ref.codes_v);
     std::printf("%-44s partial bytes differing: acc %zu of %zu, m %zu, l %zu; cache bytes differing %zu "
                 "(append changed %zu code bytes)\n",
@@ -395,6 +440,103 @@ void run_case(const Case& c, const Rows& rows, const __nv_bfloat16* d_rows) {
           std::string(c.name) + ": the throughput route's partials differ from the reference route's");
     check(d_cache == 0, std::string(c.name) + ": the routes left different cache bytes");
     check(!c.append || appended > 0, std::string(c.name) + ": the fused append wrote nothing");
+
+    const auto float_bits = [](std::uint32_t bits) { float value; std::memcpy(&value, &bits, 4); return value; };
+    // The independent original partial reference is the fixed reducer input;
+    // never derive expected final output from the cached-weight candidate.
+    __nv_bfloat16 *d_gate, *d_reduce_original, *d_reduce_candidate;
+    const std::size_t output_bytes = static_cast<std::size_t>(q_elems) * 2;
+    CUDA_CHECK(cudaMalloc(&d_gate, output_bytes));
+    CUDA_CHECK(cudaMalloc(&d_reduce_original, output_bytes));
+    CUDA_CHECK(cudaMalloc(&d_reduce_candidate, output_bytes));
+    fill_bf16_kernel<<<static_cast<unsigned>((q_elems + 255) / 256), 256>>>(d_gate, q_elems, 0xA341316Cu, 8.0f);
+    CUDA_CHECK(cudaGetLastError());
+    const auto gate0 = to_host(d_gate, output_bytes);
+    const auto upload_partials = [&](const Out& x) {
+        CUDA_CHECK(cudaMemcpy(d_acc, x.acc.data(), acc_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_m, x.m.data(), stat_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_l, x.l.data(), stat_bytes, cudaMemcpyHostToDevice));
+    };
+    const auto reduce_gate = [&](const char* variant, const Out& inputs, bool alias,
+                                 const std::vector<std::uint8_t>& gate_bits) {
+        upload_partials(inputs);
+        CUDA_CHECK(cudaMemcpy(d_gate, gate_bits.data(), output_bytes, cudaMemcpyHostToDevice));
+        if (alias) {
+            CUDA_CHECK(cudaMemcpy(d_reduce_original, gate_bits.data(), output_bytes, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_reduce_candidate, gate_bits.data(), output_bytes, cudaMemcpyHostToDevice));
+        } else {
+            CUDA_CHECK(cudaMemset(d_reduce_original, 0xA5, output_bytes));
+            CUDA_CHECK(cudaMemset(d_reduce_candidate, 0xA5, output_bytes));
+        }
+        launch_reduce(false, c, d_acc, d_m, d_l, d_pos, d_valid,
+            alias ? d_reduce_original : d_gate, d_reduce_original);
+        const auto expected = to_host(d_reduce_original, output_bytes);
+        launch_reduce(true, c, d_acc, d_m, d_l, d_pos, d_valid,
+            alias ? d_reduce_candidate : d_gate, d_reduce_candidate);
+        const auto actual = to_host(d_reduce_candidate, output_bytes);
+        const std::size_t differences = differing(expected, actual);
+        std::printf("REDUCE_GATE %s variant %s alias %d output_bytes %zu differing_bytes %zu\n",
+            c.name, variant, alias ? 1 : 0, output_bytes, differences);
+        check(differences == 0, std::string(c.name) + ": reducer output mismatch");
+        return expected;
+    };
+    reduce_gate("real-original-partials", ref, false, gate0);
+    reduce_gate("real-original-partials", ref, true, gate0);
+    {
+        std::vector<std::uint8_t> special_gate = gate0;
+        std::vector<std::uint16_t> gb(special_gate.size() / 2);
+        std::memcpy(gb.data(), special_gate.data(), special_gate.size());
+        for (std::size_t i = 0; i < special_gate.size() / 2; ++i) {
+            if (i % 37 == 0) gb[i] = 0x7FC1u;
+            else if (i % 41 == 0) gb[i] = 0x7F80u;
+            else if (i % 43 == 0) gb[i] = 0xFF80u;
+        }
+        std::memcpy(special_gate.data(), gb.data(), special_gate.size());
+        if (c.splits > Geometry::DecodeSplits) {
+            auto negative = pos;
+            for (int b = 0; b < lanes; ++b) negative[b * c.full_width + c.column_begin + c.tokens - 1] = -1;
+            CUDA_CHECK(cudaMemcpy(d_pos, negative.data(), negative.size() * 4, cudaMemcpyHostToDevice));
+        }
+        for (int variant = 0; variant < 4; ++variant) {
+            Out edge = ref;
+            std::vector<float> em(edge.m.size() / 4), el(edge.l.size() / 4);
+            std::vector<std::uint16_t> ea(edge.acc.size() / 2);
+            std::memcpy(em.data(), edge.m.data(), edge.m.size());
+            std::memcpy(el.data(), edge.l.data(), edge.l.size());
+            std::memcpy(ea.data(), edge.acc.data(), edge.acc.size());
+            for (std::size_t i = 0; i < edge.m.size() / 4; ++i) {
+                em[i] = variant == 0 ? float_bits(0xFF800000u) : -static_cast<float>((i * 17) % 201);
+                el[i] = variant == 0 ? 0.0f : 0.25f * static_cast<float>(1 + i % 7);
+                if (variant == 3) {
+                    const std::size_t split = (i / (Geometry::QHeads * c.tokens)) % c.splits;
+                    em[i] = split == 0 ? 0.0f : -102.0f;
+                    el[i] = split == 0 ? 0.0f : 1.0f;
+                }
+                if (variant == 2) {
+                    if (i % 17 == 0) el[i] = float_bits(0x7FC12345u);
+                    else if (i % 13 == 0) el[i] = -1.0f;
+                    else if (i % 11 == 0) el[i] = -0.0f;
+                    else if (i % 7 == 0) el[i] = 0.0f;
+                    if (i % 19 == 0) em[i] = float_bits(0x7FC54321u);
+                }
+            }
+            for (std::size_t i = 0; i < edge.acc.size() / 2; ++i) {
+                if (variant == 3) ea[i] = 0x3F80u;
+                else if (variant == 0 || i % 101 == 0) ea[i] = 0x7FC1u;
+                else if (i % 103 == 0) ea[i] = 0x7F80u;
+                else if (i % 107 == 0) ea[i] = 0xFF80u;
+                else ea[i] = static_cast<std::uint16_t>(0x3F00u + (i % 128));
+            }
+            const char* name = variant == 0 ? "all-neutral" : variant == 1 ? "underflow-inf-nan-acc" : variant == 2 ? "mixed-l-m-nonfinite" : "subnormal-denominator";
+            std::memcpy(edge.m.data(), em.data(), edge.m.size());
+            std::memcpy(edge.l.data(), el.data(), edge.l.size());
+            std::memcpy(edge.acc.data(), ea.data(), edge.acc.size());
+            reduce_gate(name, edge, false, special_gate);
+            reduce_gate(name, edge, true, special_gate);
+        }
+        CUDA_CHECK(cudaMemcpy(d_pos, pos.data(), pos.size() * 4, cudaMemcpyHostToDevice));
+    }
+    CUDA_CHECK(cudaFree(d_gate)); CUDA_CHECK(cudaFree(d_reduce_original)); CUDA_CHECK(cudaFree(d_reduce_candidate));
 
     CUDA_CHECK(cudaFree(d_tables));
     CUDA_CHECK(cudaFree(d_table_rows));
@@ -446,12 +588,23 @@ int main() {
         {"1 lane, 70000 keys, width 8, append, 40 splits", {70000}, 8, 8, 0, {}, false, true, true, 40},
     };
     for (const Case& c : cases) { run_case(c, rows, d_rows); }
+    const std::vector<Case> additional = {
+        {"append-C1-T8-5000", {5000}, 8, 8, 0, {}, false, true, true},
+        {"append-C1-T8-19992", {19992}, 8, 8, 0, {}, false, true, true},
+        {"append-C1-T8-70000", {70000}, 8, 8, 0, {}, false, true, true},
+        {"cached-C1-T8-19992", {19992}, 8, 8, 0, {}, false, true, false},
+        {"append-C1-T1-19992", {19992}, 1, 1, 0, {}, false, true, true},
+        {"append-C1-T5-19992", {19992}, 5, 5, 0, {}, false, true, true},
+        {"append-C2-T8-19992", {19992,19992}, 8, 8, 0, {}, false, true, true},
+    };
+    for (const Case& c : additional) run_case(c, rows, d_rows);
+    run_case({"direct-reducer-257-splits", {8}, 1, 1, 0, {}, false, false, false, 257}, rows, d_rows);
     CUDA_CHECK(cudaFree(d_rows));
 
     if (g_failed != 0) {
-        std::fprintf(stderr, "test_hq_verify_exact: %d failures\n", g_failed);
+        std::fprintf(stderr, "hq_verify_exact: %d failures\n", g_failed);
         return EXIT_FAILURE;
     }
-    std::printf("test_hq_verify_exact: ALL PASSED\n");
+    std::printf("hq_verify_exact: ALL PASSED\n");
     return 0;
 }

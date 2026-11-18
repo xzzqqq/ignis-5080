@@ -301,6 +301,9 @@ target_link_libraries(ignis_vendor PUBLIC CUDA::cudart)
 file(GLOB_RECURSE IGNIS_KERNEL_SRCS CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu
 )
+list(FILTER IGNIS_KERNEL_SRCS EXCLUDE REGEX "/lab_gqa_candidate[.]cu$")
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/lab_gqa_segment.cu
+  PROPERTIES COMPILE_DEFINITIONS IGNIS_SEGMENT_BUILTIN=1)
 add_library(ignis_kernel STATIC ${IGNIS_KERNEL_SRCS})
 # No PREFIX override: the platform default is what crates/artifact/build.rs
 # expects on each host — "" on MSVC (ignis_kernel.lib), "lib" on Linux, where
