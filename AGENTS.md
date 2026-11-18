@@ -25,6 +25,10 @@ checks and forward measurements when they help diagnose issues or evaluate
 combined changes. Run [full acceptance](docs/agents/testing.md) at the end of an optimization
 round on the accumulated changes, not after every optimization point.
 
+Operator boundaries and hot-reload coverage are tooling conveniences, not
+optimization constraints. Fusion, splitting, cross-operator changes and
+host-side changes are allowed within the task scope.
+
 ## Numerical correctness
 
 Choose checks according to what the transformation changes:
