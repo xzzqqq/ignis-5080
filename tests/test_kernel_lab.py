@@ -74,9 +74,13 @@ class CandidateBuildTests(unittest.TestCase):
         sys.path.insert(0,str(ROOT/'scripts'))
         from lab_support.common import host_changes
         supported=['kernel/src/lab_gqa_candidate.cu','kernel/src/lab_gqa_candidate_policy.cuh',
+            'kernel/src/gqa_hq_decode_impl.cuh','kernel/src/gqa_hq_decode_policy.cuh',
+            'kernel/src/gqa_token_mixer_impl.cuh',
             'kernel/include/ignis_gqa_hq_reduce.cuh','kernel/vendor/src/ops/kernel/hq_codec.cuh']
         for path in supported:self.assertEqual(host_changes({path:'before'},{path:'after'}),[])
         for path in ['kernel/include/ignis_gqa_candidate.h','kernel/vendor/src/core/tensor.h',
+                     'kernel/include/ignis_gqa_native.h','kernel/src/gqa_decode_hq.cu',
+                     'kernel/src/gqa_native_segment.cu',
                      'kernel/vendor/manifest.json','kernel/src/gqa_candidate.h']:
             self.assertEqual(host_changes({path:'before'},{path:'after'}),[path])
 

@@ -281,6 +281,31 @@ uint64_t outer_bytes(uint64_t T, uint64_t B, bool head_every_column) {
          word(1);
 }
 
+// Independent native fixed-profile ledger. Do not ask the native segment/model
+// query whose arena bound is under test. Lower-level TL queries retain the
+// device's real split/residency choice, as expected_line already does.
+uint64_t native_attention_bytes() {
+  constexpr uint64_t splits = 85, tokens = 8, heads = 24, dim = 256;
+  return word(dim * heads * tokens * splits) + 2 * word(heads * tokens * splits);
+}
+
+uint64_t native_gqa_and_tail_bytes() {
+  constexpr uint64_t t = 8;
+  const uint64_t counters = aligned(256 + 4ull * (IGNIS_TRELLIS_MAX_OUT / 128));
+  const uint64_t single_kv = ignis_trellis_workspace_bytes(kHidden, kKvWidth, 1, t);
+  // Fixed-S PairStore retains the single-KV S. Both weights have private XR,
+  // inverse scale and partial planes; only the fixed counter prefix is shared.
+  // Every payload term at these widths is already 256-aligned.
+  const uint64_t pair = counters + 2 * (single_kv - counters);
+  const uint64_t linear = std::max({pair, single_kv,
+      ignis_trellis_workspace_bytes(kHidden, 2 * kQWidth, 1, t),
+      ignis_trellis_workspace_bytes(kQWidth, kHidden, 1, t)});
+  // Nine allocations: normalized, Q, gate, K, V, RQ, RK, attention, Q|gate.
+  const uint64_t intermediate = bf16(kHidden * t) + 6 * bf16(kQWidth * t) + 3 * bf16(kKvWidth * t);
+  return intermediate + aligned(linear) + native_attention_bytes() +
+         bf16(kHidden * t) + bf16(kFfn * t);  // live post/fused MLP tail
+}
+
 // The GQA layer: normalized, post; query, gate, rotated query, attention;
 // key, value, rotated key; positions and KV rows; fused; the attention's
 // query; and `q_proj`'s interleaved q | gate before its split.
@@ -288,8 +313,14 @@ uint64_t gqa_bytes(uint64_t T, uint64_t B, uint32_t max_context, uint64_t *atten
   const uint64_t c = T * B;
   *attention = aligned(ignis_gqa_attention_capacity_bytes(
       ninfer::DType::U8, {1, max_context}, static_cast<int32_t>(B), 1, static_cast<int32_t>(T)));
-  return 2 * bf16(kHidden * c) + 4 * bf16(kQWidth * c) + 3 * bf16(kKvWidth * c) + word(c) + word(B) +
-         bf16(kFfn * c) + *attention + bf16(2ull * kQWidth * c);
+  // The reservation covers both the decomposed B-lane path and the C1
+  // native path, even when max lanes is larger than one.
+  const bool native_supported = T >= 8 && max_context > 0 && max_context <= 1048576;
+  if (native_supported) *attention = std::max(*attention, native_attention_bytes());
+  const uint64_t decomposed =
+      2 * bf16(kHidden * c) + 4 * bf16(kQWidth * c) + 3 * bf16(kKvWidth * c) + word(c) + word(B) +
+      bf16(kFfn * c) + *attention + bf16(2ull * kQWidth * c);
+  return native_supported ? std::max(decomposed, native_gqa_and_tail_bytes()) : decomposed;
 }
 
 // The GDN layer: h, post; qkv and its convolution; query, key; value, z, the
@@ -378,6 +409,20 @@ int main() {
     check(p.reserved.decode_graph_bytes == decode_graph,
           "decode_graph is its closed form (" + std::to_string(p.reserved.decode_graph_bytes) + " vs " +
               std::to_string(decode_graph) + ")");
+    // B1 must reserve the native chain; a wider maximum-lane plan keeps
+    // its own outer buffers plus max(native C1 peak, decomposed B-lane peak).
+    for (uint32_t lanes : {1u, 8u}) {
+      const Plan other = plan(trellis_body(4), four, lanes,
+                              IGNIS_SPECULATIVE_VERIFY_ONLY, kWindow, kContext);
+      check(other.rc == 0, "native arena lane coverage plans: " + other.error);
+      const uint64_t layer_peak = std::max(
+          gqa_bytes(kWindow + 1, lanes, kContext, &attention),
+          gdn_bytes(kWindow + 1, lanes, &gating, &recurrence));
+      const uint64_t expected = outer_bytes(kWindow + 1, lanes, true) + layer_peak + 2 * 4 * lanes;
+      check(other.reserved.decode_graph_bytes == expected,
+            "native/decomposed arena closed form at B=" + std::to_string(lanes) + " (" +
+                std::to_string(other.reserved.decode_graph_bytes) + " vs " + std::to_string(expected) + ")");
+    }
   }
 
   // The served body: no trellis line; the trellis endpoints alone: one.

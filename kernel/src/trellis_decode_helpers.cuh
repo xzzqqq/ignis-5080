@@ -231,6 +231,14 @@ __device__ void reduce_block(const DecodeParams &p, int cb) {
       for (int q = 0; q < 4; ++q) g[q] = ignis_moe::silu(g[q]) * u[q];
     }
     store_bf16x4(p.y + static_cast<size_t>(t) * p.ldy + cb * 128 + 4 * lane, g, p.epilogue == kAdd);
+    if (p.epilogue == kPairStore) {
+      // Both weights have arrived, as for SwiGLU, but remain independent.
+      float u[4];
+      sum_splits(p, t, 1, cb, u);
+      rotate_out(u, p.w[1].svh, cb);
+      const size_t plane = static_cast<size_t>(p.tokens) * p.ldy;
+      store_bf16x4(p.y + plane + static_cast<size_t>(t) * p.ldy + cb * 128 + 4 * lane, u, false);
+    }
   }
 }
 
@@ -261,8 +269,10 @@ __device__ __forceinline__ void finish(const DecodeParams &p, const Smem &s, con
     for (int t = warp; t < tokens; t += kWarps) {
       const float4 q = *reinterpret_cast<const float4 *>(s.o + t * kORow + 4 * lane);
       float v[4] = {q.x, q.y, q.z, q.w};
-      rotate_out(v, p.w[0].svh, cb);
-      store_bf16x4(p.y + static_cast<size_t>(t) * p.ldy + cb * 128 + 4 * lane, v, p.epilogue == kAdd);
+      const int output_weight = p.epilogue == kPairStore ? wsel : 0;
+      rotate_out(v, p.w[output_weight].svh, cb);
+      const size_t plane = static_cast<size_t>(output_weight) * tokens * p.ldy;
+      store_bf16x4(p.y + plane + static_cast<size_t>(t) * p.ldy + cb * 128 + 4 * lane, v, p.epilogue == kAdd);
     }
     __syncthreads();
     return;
@@ -284,7 +294,8 @@ __device__ __forceinline__ void finish(const DecodeParams &p, const Smem &s, con
   __threadfence();
   __syncthreads();
   if (threadIdx.x == 0) {
-    const uint32_t expected = static_cast<uint32_t>(p.splits * (p.epilogue == kSwiGlu ? 2 : 1));
+    const uint32_t expected = static_cast<uint32_t>(
+        p.splits * ((p.epilogue == kSwiGlu || p.epilogue == kPairStore) ? 2 : 1));
     *s_last = atomicAdd(&p.arrivals[cb], 1u) == expected - 1 ? 1 : 0;
   }
   __syncthreads();

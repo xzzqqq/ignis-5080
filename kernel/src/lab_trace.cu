@@ -1,4 +1,5 @@
 // Offline, model-owned capture/replay. No serving route enables it.
+#include "ignis_gqa_native.h"
 #include "lab_trace.h"
 #include "gqa_candidate.h"
 #include "lab_segment.h"
@@ -822,7 +823,9 @@ extern "C" int32_t ignis_lab_gqa_replay(ignis_model *m,const ignis_lab_gqa_view 
     const ninfer::ops::GqaExecutionEnvelope envelope{1,view->max_keys};
     const auto workspace_bytes=ignis::gqa_candidate_applies(*m,tensors[0],cache)
         ? ignis::gqa_candidate_workspace_bytes(*m,envelope.max_visible_keys)
-        : ninfer::ops::gqa_attention_workspace_capacity_bytes(kIgnisGqaQHeads,cache.dtype,envelope,1,8,8);
+        : std::max<uint64_t>(ignis::gqa_native_attention_applies(*m,tensors[0],cache)
+              ?ignis_gqa_native_workspace(envelope.max_visible_keys):0,
+            ninfer::ops::gqa_attention_workspace_capacity_bytes(kIgnisGqaQHeads,cache.dtype,envelope,1,8,8));
     Device workspace(std::max<size_t>(workspace_bytes,1));
     // Immutable inputs and a pristine state image stay resident throughout
     // repetitions; only isolated mutable planes are restored between launches.

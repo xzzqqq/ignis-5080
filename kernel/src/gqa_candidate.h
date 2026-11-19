@@ -4,6 +4,7 @@
 struct ignis_model;
 namespace ignis {
 bool gqa_candidate_applies(const ignis_model &, const ninfer::Tensor &, const ninfer::PagedKVBatchLayerView &);
+bool gqa_native_attention_applies(const ignis_model &, const ninfer::Tensor &, const ninfer::PagedKVBatchLayerView &);
 uint64_t gqa_candidate_workspace_bytes(const ignis_model &, uint32_t max_keys);
 void gqa_attention_dispatch(const ignis_model &, const ninfer::Tensor &q, const ninfer::Tensor &k,
     const ninfer::Tensor &v, const ninfer::Tensor &positions, const ninfer::Tensor &valid,

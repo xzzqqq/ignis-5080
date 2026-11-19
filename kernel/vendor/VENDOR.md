@@ -119,6 +119,18 @@ beyond a recorded patch — is our own implementation and carries no provenance
 claim (ADR 0010). The leaf's own code lives in `kernel/src/`,
 `kernel/include/` and `kernel/tests/`, never here.
 
+### HQ27 split reduction specialization
+
+The generic reducer in `src/ops/kernel/gqa_attention_decode.cuh` remains
+verbatim and serves every other geometry/dtype and the independent test
+oracle. The recorded HQ27 launcher patch selects the owned adaptation in
+`kernel/include/ignis_gqa_hq_reduce.cuh`: fixed 256 threads/D256 columns,
+identical shared FP32 weights and the original 256-leaf reduction tree. Its
+upstream commit/path/license are recorded in the header and `kernel/NOTICE`.
+The RTX 5080 decode profile and exact replay evidence are in
+`docs/findings/2026-11-18-gqa-exact-replay-and-integer-cache.md` (ADR 0031).
+This preserves numerical reference parity; no correctness behavior changes.
+
 ## What is vendored today
 
 P1-06 (GitHub #42) vendors the substrate the op families are built on:
@@ -563,3 +575,21 @@ pinned commit:
 2. `scripts/vendor-ninfer.ps1 repin` and set `reference.commit`;
 3. `scripts/vendor-ninfer.ps1 sync` (re-apply and re-record any patch);
 4. `kernel/build.ps1 -Test` — the leaf's op tests are the acceptance.
+
+
+### 2026-11-19: native GQA verify path (ADR 0031 / ADR 0037)
+
+The upstream pin is unchanged. Recorded patches to `hq_codec.cuh`,
+`gqa_attention_decode_bf16.cuh` and `rope.cuh` retain their prior reasons and add
+this round's measured changes: exact four-lane Rice decoding with whole-warp
+general-k fallback, reuse of the encoder FWHT for side stores, and optional
+query preparation, input stride and FP32 partial plumbing. Native launch,
+partition and late-transform policy live in the owned `kernel/src/gqa_*`
+implementation; generic defaults remain available.
+
+The HQ address fix replaces the fixed 128-entry page preload with per-tile
+block-table lookup. A 40,000-key/four-split input spans 157 pages in one split;
+cached and append regressions in `test_hq_verify_exact` cover that bound.
+Linear page preloading retains its existing route. Measurements, numerical
+analysis and final validation are in
+`docs/findings/2026-11-19-gqa-uniform-fp32.md`.

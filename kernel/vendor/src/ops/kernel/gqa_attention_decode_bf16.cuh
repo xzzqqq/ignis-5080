@@ -35,22 +35,26 @@
 #include "ops/kernel/hq_codec.cuh"
 
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops {
 
 template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bool Masked,
-          typename CacheInput, typename KvSource, bool IgnisThroughput = true>
+          typename CacheInput, typename KvSource, bool IgnisThroughput = true,
+          typename Partial = __nv_bfloat16, bool LateIfwht = false, bool QAlreadyRotated = false,
+          bool WriteInactivePartials = true, bool Decode4Lane = false>
 __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_kernel(
     const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, KvSource kv,
     const std::int32_t* block_tables, const std::int32_t* valid_columns,
     const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t tokens,
     std::int32_t full_width, std::int32_t column_begin, std::int32_t logical_capacity, float scale,
-    __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
+    Partial* partial_acc, float* partial_m, float* partial_l) {
     pdl::sync();
     static_assert(TokenTile >= 1 && TokenTile <= 8);
     static_assert(WarpsPerCta >= 1 && WarpsPerCta <= 4);
     static_assert(KvSource::hq == KvSource::rotated, "hq tiles only exist in the rotated frame");
     static_assert(!KvSource::rotated || kHqHeadDim == kGqaHeadDim);
+    static_assert(!QAlreadyRotated || KvSource::rotated);
 
     constexpr int Wc      = WarpsPerCta;
     constexpr int Br      = Wc * 16;
@@ -81,7 +85,9 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
 
     __shared__ __align__(16) __nv_bfloat16 qkv_s[QkvRows * D];
     __shared__ __align__(16) __nv_bfloat16 p_s[Wc * 16 * Bc];
-    __shared__ std::int32_t physical_pages_s[PageIds];
+    // HQ resolves its page at each tile (or per row in the slow route),
+    // so its supported window is not bounded by a 128-entry shared array.
+    __shared__ std::int32_t physical_pages_s[KvSource::hq ? 1 : PageIds];
     __shared__ std::int8_t signs_s[KvSource::rotated ? kGqaHeadDim : 1];
     // Throughput form (ignis, GitHub #268): one role of one tile, [codes | meta],
     // staged by cp.async one phase ahead. The 32 rows of a tile share one page,
@@ -147,7 +153,7 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
             gqa_small_t_tc_row_to_qt<Geometry>(row, tokens, kv_head, q_head, token);
             if (gqa_valid_q_head<Geometry>(kv_head, q_head)) {
                 partial_acc[gqa_partial_acc_index<Geometry>(q_head, d, token, split, tokens)] =
-                    __float2bfloat16(0.0f);
+                    static_cast<Partial>(0.0f);
             }
         }
     };
@@ -176,7 +182,7 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
         // (the shared reducer may read partials buffers that carry earlier,
         // non-zero contents); the bf16 route leaves them unwritten and relies
         // on the engine's zero-initialized partial workspace instead.
-        if constexpr (KvSource::hq) { write_neutral(); }
+        if constexpr (KvSource::hq && WriteInactivePartials) { write_neutral(); }
         return;
     }
 
@@ -184,8 +190,20 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
     const bool tile_split   = logical_tiles >= active_split_count;
     const int units_per_split =
         tile_split ? div_up(logical_tiles, active_split_count) : div_up(window, active_split_count);
-    const int split_start = split * units_per_split * (tile_split ? Bc : 1);
-    const int split_limit = split_start + units_per_split * (tile_split ? Bc : 1);
+    int split_start = split * units_per_split * (tile_split ? Bc : 1);
+    int split_limit = split_start + units_per_split * (tile_split ? Bc : 1);
+#if defined(IGNIS_GQA_BALANCED_TILES) && IGNIS_GQA_BALANCED_TILES
+    // Candidate-only tile distribution: first r splits own q+1 tiles.
+    if constexpr (KvSource::hq && Geometry::QHeads == 24) {
+        if (window >= 1 && window <= 70000 && tile_split) {
+            const int q = logical_tiles / active_split_count;
+            const int r = logical_tiles % active_split_count;
+            const int begin = split * q + (split < r ? split : r);
+            split_start = begin * Bc;
+            split_limit = (begin + q + (split < r ? 1 : 0)) * Bc;
+        }
+    }
+#endif
     const int split_end   = (split_limit < window) ? split_limit : window;
     if (split_start >= split_end) {
         write_neutral();
@@ -195,8 +213,10 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
     const int key_blocks = div_up(split_end - first_tile, Bc);
     const int first_page = first_tile >> kPagedKVPageShift;
     const int page_count = ((split_end - 1) >> kPagedKVPageShift) - first_page + 1;
-    for (int page = tid; page < page_count; page += Threads) {
-        physical_pages_s[page] = block_table[first_page + page];
+    if constexpr (!KvSource::hq) {
+        for (int page = tid; page < page_count; page += Threads) {
+            physical_pages_s[page] = block_table[first_page + page];
+        }
     }
 
     if constexpr (KvSource::rotated) {
@@ -245,17 +265,17 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                     static_cast<std::int64_t>(t) * Geometry::KVHeads * kGqaHeadDim;
                 const __nv_bfloat16* src = (role_v ? input.v : input.k) + base +
                                            gqa_kv_new_index<Geometry>(kv_head, 0, 0);
+                __nv_bfloat16* side_out = kv.residual_k != nullptr
+                    ? hq_residual_row<Geometry>(role_v ? kv.residual_v : kv.residual_k,
+                                                table_row, kv_head, p)
+                    : nullptr;
                 hq_encode_row_warp(src, signs_s, 0, u, syms,
                                    hq_row_codes_mut<Geometry>(role_v ? kv.codes_v : kv.codes_k,
                                                               block_table, kv_head, p),
                                    hq_row_meta_mut<Geometry>(role_v ? kv.meta_v : kv.meta_k,
                                                              block_table, kv_head, p),
-                                   hq_dither_row_seed(kv_head, p, role_v));
+                                   hq_dither_row_seed(kv_head, p, role_v), side_out);
                 if (kv.residual_k != nullptr) {
-                    hq_store_rotated_row_warp(
-                        src, signs_s,
-                        hq_residual_row<Geometry>(role_v ? kv.residual_v : kv.residual_k,
-                                                  table_row, kv_head, p));
                     hq_ring_mark_valid(const_cast<std::uint32_t*>(ring_valid_row), p);
                 }
             }
@@ -287,7 +307,7 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
     auto hq_stage_role = [&](int kb, bool role_v) {
         if constexpr (kFast) {
             const int k0   = first_tile + kb * Bc;
-            const int page = physical_pages_s[(k0 >> kPagedKVPageShift) - first_page];
+            const int page = block_table[k0 >> kPagedKVPageShift];
             const std::uint8_t* codes =
                 (role_v ? kv.codes_v : kv.codes_k) +
                 paged_kv_element_offset<kHqCodePlaneExtent, Geometry::KVHeads>(
@@ -336,7 +356,7 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
     }
     __syncthreads();
 
-    if constexpr (KvSource::rotated) {
+    if constexpr (KvSource::rotated && !QAlreadyRotated) {
         // Rotate the staged q rows into the codec frame before any QK MMA reads
         // them: bf16 -> FWHT(+signs) -> bf16, the same single rounding the fill
         // side applies to K/V. Zero-padded tail rows stay exactly zero.
@@ -385,7 +405,8 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
     const bool mma_warp = !kFast || warp_row0 < kQRows;
     if constexpr (kFast) { ninfer::ops::cp_wait<0>(); }  // tile 0's staged rows
     __syncthreads();
-    int physical_page = physical_pages_s[0];
+    int physical_page = 0;
+    if constexpr (!KvSource::hq) { physical_page = physical_pages_s[0]; }
     float acc[PVNt][4];
 #pragma unroll
     for (int n = 0; n < PVNt; ++n) {
@@ -410,6 +431,78 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
             // (one 16 B copy per lane chunk, same swizzle); ring slots whose
             // validity bit was cleared (rollback / prefix-restore trims) fall
             // back to the codec path.
+            if constexpr (kFast && Decode4Lane) {
+                static_assert(Bc == 32 && Threads == 128, "private four-lane B32/128 shape");
+                // One warp owns eight contiguous rows in BOTH modes.
+                const bool role_v = role_first != 0; // kFast invokes one role at a time
+                const int key_l4 = warp * 8 + (lane >> 2);
+                const int key4 = k0 + key_l4;
+                const bool in4 = key4 >= split_start && key4 < split_end;
+                const bool side4 = in4 && kv.residual_k != nullptr &&
+                    (key4 < static_cast<int>(kGqaHqSinkKeys) ||
+                     (key4 >= window-static_cast<int>(kGqaHqRecentKeys) && hq_ring_slot_valid(ring_valid_row,key4)));
+                const bool codec4 = in4 && !side4;
+                uint2 metadata4 = make_uint2(0u,0u);
+                if (codec4) { metadata4 = load_vec<uint2>(stage+kHqStageCodes+key_l4*kHqMetaBytes); }
+                const unsigned used4 = ((metadata4.x >> 24) & 0xffu) | ((metadata4.y & 3u) << 8);
+                const unsigned rice4 = (metadata4.x >> 16) & 15u;
+                const bool eligible4 = !codec4 || used4 == 0 || rice4 == 0 || rice4 > kHqMaxRiceK;
+                const bool use4 = __all_sync(FullMask,eligible4);
+                if (use4) {
+                    const int lane4 = lane & 3;
+                    auto* row_dst = (role_v ? v_s : k_s)+key_l4*D;
+                    if (side4) {
+                        const auto* side = hq_residual_row<Geometry>(role_v ? kv.residual_v : kv.residual_k,
+                            table_row,kv_head,key4);
+#pragma unroll
+                        for (int j = 0; j < 8; ++j) {
+                            const int w = lane4+4*j;
+                            store_vec(row_dst+((w^(key_l4&7))<<3),load_vec<int4>(side+w*8));
+                        }
+                    } else if (!in4) {
+#pragma unroll
+                        for (int j = 0; j < 8; ++j) {
+                            const int w = lane4+4*j;
+                            store_vec(row_dst+((w^(key_l4&7))<<3),make_int4(0,0,0,0));
+                        }
+                    }
+                    hq_decode_row_group4_fast(stage+key_l4*kHqRowBudgetBytes,metadata4.x,metadata4.y,
+                        row_dst,lane4,key_l4&7,hq_dither_row_seed(kv_head,key4,role_v),codec4);
+                } else {
+                    // Whole-warp fallback, never an8-lane collective inside a
+                    // four-lane branch. Each phase owns four complete8-lane rows.
+#pragma unroll 1
+                    for (int phase = 0; phase < 2; ++phase) {
+                        const int lane8 = lane & 7;
+                        const int key_l8 = warp*8+phase*4+(lane >> 3);
+                        const int key8 = k0+key_l8;
+                        auto* row_dst = (role_v ? v_s : k_s)+key_l8*D;
+                        const bool in8 = key8 >= split_start && key8 < split_end;
+                        const bool side8 = in8 && kv.residual_k != nullptr &&
+                            (key8 < static_cast<int>(kGqaHqSinkKeys) ||
+                             (key8 >= window-static_cast<int>(kGqaHqRecentKeys) && hq_ring_slot_valid(ring_valid_row,key8)));
+                        const bool codec8 = in8 && !side8;
+                        if (side8) {
+                            const auto* side = hq_residual_row<Geometry>(role_v ? kv.residual_v : kv.residual_k,
+                                table_row,kv_head,key8);
+#pragma unroll
+                            for (int j = 0; j < 4; ++j) {
+                                const int w = lane8*4+j;
+                                store_vec(row_dst+((w^(key_l8&7))<<3),load_vec<int4>(side+w*8));
+                            }
+                        } else if (!in8) {
+#pragma unroll
+                            for (int j = 0; j < 4; ++j) {
+                                const int w = lane8*4+j;
+                                store_vec(row_dst+((w^(key_l8&7))<<3),make_int4(0,0,0,0));
+                            }
+                        }
+                        hq_decode_row_group_fast(stage+key_l8*kHqRowBudgetBytes,
+                            stage+kHqStageCodes+key_l8*kHqMetaBytes,row_dst,lane8,key_l8&7,
+                            hq_dither_row_seed(kv_head,key8,role_v),codec8);
+                    }
+                }
+            } else {
 #pragma unroll 1
             for (int slot = tid; slot < roles * Bc * 8; slot += Threads) {
                 const bool role_v = role_first + (slot >= Bc * 8 ? 1 : 0) != 0;
@@ -461,6 +554,7 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                                              lane8, key_l & 7,
                                              hq_dither_row_seed(kv_head, key, role_v), codec_row);
                 }
+            }
             }
             __syncthreads();
           }
@@ -723,6 +817,65 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
         }
     }
 
+    if constexpr (std::is_same_v<Partial, float>) {
+        if constexpr (LateIfwht || !KvSource::rotated) {
+            // Keep the MMA accumulator in FP32 and in its current frame.
+#pragma unroll
+            for (int n = 0; n < PVNt; ++n) {
+                const int d = n * 8 + 2 * lid;
+                const int row0 = warp_row0 + gid;
+                const int row1 = row0 + 8;
+                int q_head = 0, token = 0;
+                if (row0 < row_count) {
+                    gqa_small_t_tc_row_to_qt<Geometry>(row0, tokens, kv_head, q_head, token);
+                    const auto dst = gqa_partial_acc_index<Geometry>(q_head, d, token, split, tokens);
+                    partial_acc[dst] = acc[n][0];
+                    partial_acc[dst + 1] = acc[n][1];
+                }
+                if (row1 < row_count) {
+                    gqa_small_t_tc_row_to_qt<Geometry>(row1, tokens, kv_head, q_head, token);
+                    const auto dst = gqa_partial_acc_index<Geometry>(q_head, d, token, split, tokens);
+                    partial_acc[dst] = acc[n][2];
+                    partial_acc[dst + 1] = acc[n][3];
+                }
+            }
+        } else {
+            // Reuse the existing Q/K/V tile as 32 FP32 rows, in two waves.
+            // This changes no shared-memory capacity or attention arithmetic.
+            static_assert(QkvRows >= 64);
+            float* final_s = reinterpret_cast<float*>(qkv_s);
+            for (int begin = 0; begin < row_count; begin += 32) {
+#pragma unroll
+                for (int n = 0; n < PVNt; ++n) {
+                    const int d = n * 8 + 2 * lid;
+                    const int row0 = warp_row0 + gid;
+                    const int row1 = row0 + 8;
+                    if (row0 >= begin && row0 < begin + 32 && row0 < row_count) {
+                        final_s[(row0 - begin) * D + d] = acc[n][0];
+                        final_s[(row0 - begin) * D + d + 1] = acc[n][1];
+                    }
+                    if (row1 >= begin && row1 < begin + 32 && row1 < row_count) {
+                        final_s[(row1 - begin) * D + d] = acc[n][2];
+                        final_s[(row1 - begin) * D + d + 1] = acc[n][3];
+                    }
+                }
+                __syncthreads();
+                for (int local = warp; local < 32 && begin + local < row_count; local += Wc) {
+                    float reg[8];
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) { reg[j] = final_s[local * D + j * 32 + lane]; }
+                    hq_ifwht256_sign(reg, signs_s, 0, lane);
+                    int q_head = 0, token = 0;
+                    gqa_small_t_tc_row_to_qt<Geometry>(begin + local, tokens, kv_head, q_head, token);
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) {
+                        partial_acc[gqa_partial_acc_index<Geometry>(q_head, j * 32 + lane, token, split, tokens)] = reg[j];
+                    }
+                }
+                __syncthreads();
+            }
+        }
+    } else {
     // MMA fragments hold each row in four-lane groups. Stage the final split-local
     // accumulator through shared memory so partial_acc is written as contiguous d-vector stores.
 #pragma unroll
@@ -742,7 +895,7 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
     }
     __syncthreads();
 
-    if constexpr (KvSource::rotated) {
+    if constexpr (KvSource::rotated && !LateIfwht) {
         // Partials are written in the original frame: un-rotate each output row
         // once (FP32 registers over the staged bf16 row, one extra rounding)
         // before the contiguous partial stores, so the shared reducer and the
@@ -771,6 +924,7 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                 gqa_partial_acc_index<Geometry>(q_head, d, token, split, tokens);
             store_vec(&partial_acc[dst], load_vec<int4>(&qkv_s[row * D + d]));
         }
+    }
     }
     pdl::publish();
 }

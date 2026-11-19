@@ -538,9 +538,97 @@ struct GroupStats {
     std::vector<double> rel_l2;
 };
 
+// Explicit four-lane coverage: the ordinary fast-decoder tests above use
+// the old eight-lane helper. Mixed general-k rows require a whole-warp
+// two-phase fallback, including side/outside groups in that warp.
+template<bool Four>
+__global__ void codec4_mixed_kernel(const std::uint8_t* codes,const std::uint8_t* meta,
+    const int* kind,const __nv_bfloat16* side,__nv_bfloat16* out,unsigned* modes,int head,bool role_v){
+    const int lane=threadIdx.x&31,warp=threadIdx.x>>5;
+    auto special=[&](int row,int local,int width){
+        if(kind[row]==0)return;
+        for(int word=local;word<32;word+=width){
+            const uint4 value=kind[row]==1?reinterpret_cast<const uint4*>(side+row*256)[word]:make_uint4(0,0,0,0);
+            *reinterpret_cast<uint4*>(out+row*256+hq_swz_element(word*8,row&7))=value;
+        }
+    };
+    bool use4=false;
+    if constexpr(Four){
+        const int row=warp*8+(lane>>2);const bool codec=kind[row]==0;
+        uint2 mw=make_uint2(0,0);if(codec)mw=*reinterpret_cast<const uint2*>(meta+row*8);
+        const unsigned used=((mw.x>>24)&255u)|((mw.y&3u)<<8),k=(mw.x>>16)&15u;
+        use4=__all_sync(0xffffffffu,!codec||!used||k==0||k>kHqMaxRiceK);
+        if(lane==0)atomicAdd(modes+(use4?0:1),1u);
+        if((lane&3)==0&&codec&&used&&k>0&&k<=kHqMaxRiceK)atomicAdd(modes+2,1u);
+        if(use4){
+            special(row,lane&3,4);
+            hq_decode_row_group4_fast(codes+row*64,mw.x,mw.y,out+row*256,lane&3,row&7,
+                hq_dither_row_seed(head,1024+row,role_v),codec);
+        }
+    }
+    if(!use4){
+        for(int phase=0;phase<2;phase++){
+            const int row=warp*8+phase*4+(lane>>3);special(row,lane&7,8);
+            hq_decode_row_group_fast(codes+row*64,meta+row*8,out+row*256,lane&7,row&7,
+                hq_dither_row_seed(head,1024+row,role_v),kind[row]==0);
+        }
+    }
+}
+
+void check_codec4_mixed(){
+    constexpr int rows=32,elems=rows*256;
+    std::vector<std::uint8_t> codes(rows*64),meta(rows*8);
+    std::vector<int> kind(rows,0);
+    std::vector<std::uint16_t> side(elems),old(elems),four(elems);
+    for(int i=0;i<elems;i++)side[i]=i%17==0?0x8000u:std::uint16_t(0x3f00u+(i*17)%127);
+    for(int row=0;row<rows;row++){
+        std::fill(codes.begin()+row*64,codes.begin()+row*64+32,0xff);
+        auto*m=meta.data()+row*8;m[1]=0x3c;m[4]=1;m[5]=64;m[6]=128;m[7]=192;
+    }
+    // Legal k1 all-z0: each symbol10 in MSB-first order, exactly512bits.
+    // Two active general rows force two warps down the real8lane fallback.
+    for(int row:{8,16,24,25}){
+        std::fill(codes.begin()+row*64,codes.begin()+(row+1)*64,0xaa);
+        auto*m=meta.data()+row*8;m[2]=1;m[4]=0x1a;m[5]=128;m[6]=0;m[7]=128;
+    }
+    kind[2]=kind[9]=kind[24]=1; // k1 side row24 must not force fallback
+    kind[3]=kind[10]=kind[25]=2; // nor the k1 outside row25
+    std::fill(meta.begin()+4*8,meta.begin()+5*8,0); // never-written +0
+    meta[5*8+2]=9; // invalid-k +0
+    std::uint8_t *dc,*dm;int*dk;__nv_bfloat16 *ds,*a,*b;unsigned*mode;
+    CUDA_CHECK(cudaMalloc(&dc,codes.size()));CUDA_CHECK(cudaMalloc(&dm,meta.size()));
+    CUDA_CHECK(cudaMalloc(&dk,rows*sizeof(int)));CUDA_CHECK(cudaMalloc(&ds,elems*2));
+    CUDA_CHECK(cudaMalloc(&a,elems*2));CUDA_CHECK(cudaMalloc(&b,elems*2));CUDA_CHECK(cudaMalloc(&mode,3*sizeof(unsigned)));
+    CUDA_CHECK(cudaMemcpy(dc,codes.data(),codes.size(),cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dm,meta.data(),meta.size(),cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dk,kind.data(),rows*sizeof(int),cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(ds,side.data(),elems*2,cudaMemcpyHostToDevice));
+    for(int head:{0,3})for(bool role_v:{false,true}){
+        CUDA_CHECK(cudaMemset(a,0xff,elems*2));CUDA_CHECK(cudaMemset(b,0xff,elems*2));CUDA_CHECK(cudaMemset(mode,0,3*sizeof(unsigned)));
+        codec4_mixed_kernel<false><<<1,128>>>(dc,dm,dk,ds,a,mode,head,role_v);
+        codec4_mixed_kernel<true><<<1,128>>>(dc,dm,dk,ds,b,mode,head,role_v);
+        CUDA_CHECK(cudaGetLastError());CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(old.data(),a,elems*2,cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(four.data(),b,elems*2,cudaMemcpyDeviceToHost));
+        unsigned counts[3];CUDA_CHECK(cudaMemcpy(counts,mode,sizeof(counts),cudaMemcpyDeviceToHost));
+        size_t diff=0,special_bad=0;
+        for(int row=0;row<rows;row++)for(int d=0;d<256;d++){
+            const int at=row*256+(d^((row&7)<<3));diff+=old[at]!=four[at];
+            if(kind[row])special_bad+=four[at]!=(kind[row]==1?side[row*256+d]:0u);
+            if(row==4||row==5)special_bad+=four[at]!=0u;
+        }
+        std::printf("codec4 mixed head%d role%d: diff%zu special%zu; fast4warps%u fallback8warps%u active-k1rows%u\n",head,int(role_v),diff,special_bad,counts[0],counts[1],counts[2]);
+        check(diff==0&&special_bad==0,"codec4 mixed row output/side/neutral mismatch");
+        check(counts[0]==2&&counts[1]==2&&counts[2]==2,"codec4 regression did not exercise four-lane and legal-k1 fallback paths");
+    }
+    CUDA_CHECK(cudaFree(dc));CUDA_CHECK(cudaFree(dm));CUDA_CHECK(cudaFree(dk));CUDA_CHECK(cudaFree(ds));
+    CUDA_CHECK(cudaFree(a));CUDA_CHECK(cudaFree(b));CUDA_CHECK(cudaFree(mode));
+}
+
 } // namespace
 
 int main() {
+    check_codec4_mixed();
     cudaDeviceProp prop{};
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     std::printf("device: %s (sm_%d%d)\n", prop.name, prop.major, prop.minor);

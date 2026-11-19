@@ -50,7 +50,8 @@ The HQ27 split reducer specialization.
   retained. The unmodified generic reducer remains the bit-exact oracle in
   `ignis_kernel_hq_verify_exact_test`; this is an owned adaptation, not a
   byte-identical vendored file. Kernel Lab candidates use this helper; the
-  production dispatcher remains unchanged by the Lab extension.
+  production dispatcher remains unchanged by the Lab extension. See the measured
+  evidence in `docs/findings/2026-11-18-gqa-exact-replay-and-integer-cache.md`.
 
 ### `kernel/src/image/attn8.cu` (spec image-model/02 acceptance 4, GitHub #319)
 The image model's 8-bit DiT attention kernel (`ignis_image_attn`).
@@ -439,3 +440,6 @@ handle and launches the rowsplit kernel, with internal H2D/D2H copies and a
 kernel-abi-05 prefill surface). There is no reference equivalent (the
 reference's driver was the engine's op dispatch); this is the new C ABI
 surface for the bf16 logits GEMM (the W8-dequantized lm_head path).
+
+
+Additional local modifications (2026-11-19, ADR0031): measured GQA/HQ decode specializations, exact four-lane Rice helper and fallback, encoder-side FWHT reuse, optional query preparation/stride and FP32 partial plumbing, and an HQ page-table bound correction. The upstream pin and existing attribution/licenses are unchanged. Details and final validation status: docs/findings/2026-11-19-gqa-uniform-fp32.md.

@@ -241,6 +241,15 @@ int32_t check_call(const char *op, const DeviceState &st, const void *x, uint32_
   return 0;
 }
 
+// Private GQA pair: preserve each single-KV call's input partition, while
+// reserving both independent XR/inv and partial planes until the pair finishes.
+Layout pair_store_layout(uint32_t in, uint32_t out, uint32_t tokens, int resident) {
+  Layout l = layout(in, out, 2, tokens, resident);
+  l.splits = decode_splits(in, out / 128, resident);
+  l.bytes = align256(l.partials + 4ull * l.splits * tokens * 2 * out);
+  return l;
+}
+
 // The rotation of `weights` weights' activations, into the call's layout.
 int32_t rotate(const char *op, const void *x, const ignis_trellis_weight *const *w, int weights, uint32_t tokens,
                bool decode, const Layout &l, const ignis_trellis_workspace *ws, cudaStream_t stream) {
@@ -261,11 +270,22 @@ int32_t rotate(const char *op, const void *x, const ignis_trellis_weight *const 
 
 int32_t run(const char *op, const DeviceState &st, const ignis_trellis_weight *gate, const ignis_trellis_weight *up,
             const void *x, uint32_t tokens, void *y, uint32_t ldy, int epilogue, const ignis_trellis_workspace *ws,
-            void *stream_ptr) {
+            void *stream_ptr, int fixed_splits = 0) {
   const cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
   const int weights = up == nullptr ? 1 : 2;
   const uint32_t in = gate->in, out = gate->out;
-  const Layout l = layout(in, out, static_cast<uint32_t>(weights), tokens, decode_resident(st, tokens, wide_call(gate, up)));
+  const int resident = decode_resident(st, tokens, wide_call(gate, up));
+  Layout l = epilogue == kPairStore ? pair_store_layout(in, out, tokens, resident) :
+      layout(in, out, static_cast<uint32_t>(weights), tokens, resident);
+  if (fixed_splits != 0) {
+    // Only the private finite GQA Q STORE entry may override its partition.
+    if (weights != 1 || in != 5120 || out != 12288 || tokens != 8 || epilogue != kStore ||
+        fixed_splits < 1 || fixed_splits > static_cast<int>(in / 128))
+      return fail(std::string(op) + ": invalid private Q split override");
+    l.splits = fixed_splits;
+    l.bytes = align256(l.partials + 4ull * l.splits * tokens * out);
+    if (ws->bytes < l.bytes) return fail(std::string(op) + ": private Q workspace too small");
+  }
   char *base = static_cast<char *>(ws->base);
   uint32_t *counters = reinterpret_cast<uint32_t *>(base);
   const ignis_trellis_weight *ws_list[2] = {gate, up};
@@ -373,6 +393,16 @@ extern "C" uint64_t ignis_trellis_workspace_bytes(uint32_t in, uint32_t out, uin
   return layout(in, out, weights, tokens, decode_resident(st, tokens, false)).bytes;
 }
 
+// A native finite chain may use a transient arena also written by other ops.
+// Reset only the shared synchronization prefix; all payload regions are overwritten.
+extern "C" int32_t ignis_gqa_native_trellis_reset(const ignis_trellis_workspace *ws,void *stream) {
+  if(!ws || !ws->base || ws->bytes<kCounterBytes)
+    return fail("ignis_gqa_native_trellis_reset: no counter workspace");
+  const cudaError_t rc=cudaMemsetAsync(ws->base,0,kCounterBytes,static_cast<cudaStream_t>(stream));
+  if(rc!=cudaSuccess)return fail(std::string("ignis_gqa_native_trellis_reset: ")+cudaGetErrorString(rc));
+  return 0;
+}
+
 extern "C" int32_t ignis_trellis_workspace_init(const ignis_trellis_workspace *ws, void *stream) {
   if (ws == nullptr || ws->base == nullptr || ws->bytes < 256) {
     return fail("ignis_trellis_workspace_init: no workspace");
@@ -406,6 +436,60 @@ extern "C" int32_t ignis_trellis_linear_swiglu(const ignis_trellis_weight *gate,
   if (require_prepared(op, &st) != 0) return -1;
   if (check_call(op, st, x, tokens, h, ldh, gate->out, workspace, gate->in, 2, wide_call(gate, up)) != 0) return -1;
   return run(op, st, gate, up, x, tokens, h, ldh, kSwiGlu, workspace, stream);
+}
+
+// Private finite GQA Q partition: query and run share the same split count.
+namespace { constexpr int kGqaPrivateQSplits = 3; }
+extern "C" uint64_t ignis_gqa_native_q_fixed_workspace() {
+  DeviceState st;
+  if(require_prepared("ignis_gqa_native_q_fixed_workspace",&st)!=0)return 0;
+  const Layout l=layout(5120,12288,1,8,decode_resident(st,8,false));
+  return align256(l.partials+4ull*kGqaPrivateQSplits*8*12288);
+}
+extern "C" int32_t ignis_gqa_native_q_fixed_splits(const ignis_trellis_weight *query,
+    const void *x, void *qgate, const ignis_trellis_workspace *ws, void *stream) {
+  const char *op = "ignis_gqa_native_q_fixed_splits";
+  if (check_weight(op, "query", query) != 0) return -1;
+  if (query->in != 5120 || query->out != 12288)
+    return fail("ignis_gqa_native_q_fixed_splits: requires 5120-to-12288 query weight");
+  DeviceState st;
+  if (require_prepared(op, &st) != 0) return -1;
+  if (check_call(op, st, x, 8, qgate, 12288, 12288, ws, 5120, 1,
+                 wide_call(query, nullptr)) != 0) return -1;
+  return run(op, st, query, nullptr, x, 8, qgate, 12288, kStore, ws, stream, kGqaPrivateQSplits);
+}
+
+// Private finite-GQA entry points, declared only by the candidate segment TU.
+// No public ABI or non-GQA call is extended to request kPairStore.
+extern "C" uint64_t ignis_gqa_native_kv_pair_workspace() {
+  DeviceState st;
+  if (require_prepared("ignis_gqa_native_kv_pair_workspace", &st) != 0) return 0;
+  return pair_store_layout(5120, 1024, 8, decode_resident(st, 8, false)).bytes;
+}
+
+extern "C" int32_t ignis_gqa_native_kv_pair(const ignis_trellis_weight *key,
+    const ignis_trellis_weight *value, const void *x, void *k, void *v,
+    const ignis_trellis_workspace *ws, void *stream) {
+  const char *op = "ignis_gqa_native_kv_pair";
+  if (check_weight(op, "key", key) != 0 || check_weight(op, "value", value) != 0) return -1;
+  if (key->in != 5120 || value->in != 5120 || key->out != 1024 || value->out != 1024)
+    return fail("ignis_gqa_native_kv_pair: requires two 5120-to-1024 weights");
+  if (k == nullptr || v == nullptr || static_cast<char *>(v) != static_cast<char *>(k) + 8ull * 1024 * 2)
+    return fail("ignis_gqa_native_kv_pair: output must be planar contiguous K/V");
+  DeviceState st;
+  if (require_prepared(op, &st) != 0) return -1;
+  const bool wide = wide_call(key, value);
+  if (check_call(op, st, x, 8, k, 1024, 1024, ws, 5120, 2, wide) != 0) return -1;
+  const int key_resident = decode_resident(st, 8, wide_call(key, nullptr));
+  const int value_resident = decode_resident(st, 8, wide_call(value, nullptr));
+  if (key_resident != value_resident) {
+    // Preserve the original per-weight split counts if residency classes differ.
+    if (ignis_trellis_linear(key, x, 8, k, 1024, IGNIS_TRELLIS_STORE, ws, stream) != 0) return -1;
+    return ignis_trellis_linear(value, x, 8, v, 1024, IGNIS_TRELLIS_STORE, ws, stream);
+  }
+  const Layout required = pair_store_layout(5120, 1024, 8, key_resident);
+  if (ws->bytes < required.bytes) return fail("ignis_gqa_native_kv_pair: workspace too small");
+  return run(op, st, key, value, x, 8, k, 1024, kPairStore, ws, stream);
 }
 
 extern "C" int32_t ignis_trellis_reconstruct(const ignis_trellis_weight *w, void *w_f16, void *stream) {

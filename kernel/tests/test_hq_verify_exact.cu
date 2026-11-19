@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -186,6 +187,7 @@ struct Case {
     bool residual;
     bool append;
     int splits = kSplits;      // the launch's split capacity (grid.y); serving uses 4..85
+    bool codec4 = false;       // focused explicit production4lane specialization
 };
 
 template <typename CacheInput, bool Throughput>
@@ -194,11 +196,16 @@ void launch(const Case& c, const __nv_bfloat16* q, CacheInput input, const std::
             const std::int32_t* table_rows, int table_stride, __nv_bfloat16* acc, float* m,
             float* l) {
     const dim3 grid(kHeads, c.splits, static_cast<unsigned>(c.windows.size()));
+    auto selected = [&]<bool Four>() {
     gqa_attention_small_t_tc_partial_bf16_kernel<Geometry, kTokenTile, 4, true, true, CacheInput,
-                                                 GqaTcKVHq, Throughput>
+                                                 GqaTcKVHq, Throughput,__nv_bfloat16,false,false,true,Four>
         <<<grid, kGqaHqDecodeThreads>>>(q, input, pos, kv, tables, valid, table_rows, table_stride,
                                         c.tokens, c.full_width, c.column_begin, 262144,
                                         1.0f / 16.0f, acc, m, l);
+    };
+    if constexpr(Throughput){
+        if(c.codec4)selected.template operator()<true>();else selected.template operator()<false>();
+    }else selected.template operator()<false>();
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }
@@ -339,6 +346,26 @@ void run_case(const Case& c, const Rows& rows, const __nv_bfloat16* d_rows) {
             d_rows, rows.layers, rows.per_block, d_tables, pages_per_lane, d_windows, lanes, max_window, kv);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    if(c.codec4){
+        // Key72 is older than recent512 and after sink32 in this1023-key case:
+        // its legal k1 stream MUST be read by codec, not a residual side row.
+        check(lanes==1&&c.windows[0]==1023&&c.residual&&!c.append,
+              "codec4 focused fixture geometry changed");
+        for(int head=0;head<kHeads;head++)for(int key:{72,73,74}){
+            std::uint8_t code[64],meta[8]={0,0x3c,1,0,0x1a,128,0,128};
+            std::fill(code,code+64,0xaa); // k1 z0 symbols10, used512
+            if(key==73)std::fill(meta,meta+8,0); // used0
+            if(key==74)meta[2]=9; // unsupported-k neutral
+            const int page=tables[key/64];
+            const std::size_t row=(static_cast<std::size_t>(page)*kHeads+head)*64+(key&63);
+            for(bool role_v:{false,true}){
+                CUDA_CHECK(cudaMemcpy((role_v?kv.codes_v:kv.codes_k)+row*64,code,64,cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy((role_v?kv.meta_v:kv.meta_k)+row*8,meta,8,cudaMemcpyHostToDevice));
+            }
+        }
+        std::printf("codec4 production flag=true: k1 key72 is codec-only; used0/invalid keys73/74; side/ring/outside mixed\n");
     }
 
     const long long q_elems = static_cast<long long>(lanes) * c.full_width * Geometry::QHeads * kGqaHeadDim;
@@ -560,12 +587,99 @@ void run_case(const Case& c, const Rows& rows, const __nv_bfloat16* d_rows) {
     CUDA_CHECK(cudaFree(d_l));
 }
 
+
+// The late transform must not apply HQ signs to a forced +0 row. Compare
+// only forced-zero outputs with the unchanged reducer; valid mathematical
+// attention rows are not required to match a different arithmetic order.
+void run_late_forced_zero_regression() {
+    constexpr int tokens = 8, splits = 4;
+    constexpr std::size_t rows = Geometry::QHeads * tokens;
+    constexpr std::size_t elements = rows * kGqaHeadDim;
+    constexpr std::size_t partial_elements = elements * splits;
+    constexpr std::size_t stats = rows * splits;
+    __nv_bfloat16 *d_bf16, *d_gate, *d_expected, *d_actual;
+    float *d_fp32, *d_m, *d_l;
+    std::int32_t *d_pos, *d_valid;
+    CUDA_CHECK(cudaMalloc(&d_bf16, partial_elements * 2));
+    CUDA_CHECK(cudaMalloc(&d_fp32, partial_elements * 4));
+    CUDA_CHECK(cudaMalloc(&d_gate, elements * 2));
+    CUDA_CHECK(cudaMalloc(&d_expected, elements * 2));
+    CUDA_CHECK(cudaMalloc(&d_actual, elements * 2));
+    CUDA_CHECK(cudaMalloc(&d_m, stats * 4));
+    CUDA_CHECK(cudaMalloc(&d_l, stats * 4));
+    CUDA_CHECK(cudaMalloc(&d_pos, tokens * 4));
+    CUDA_CHECK(cudaMalloc(&d_valid, 4));
+    CUDA_CHECK(cudaMemset(d_bf16, 0, partial_elements * 2));
+    CUDA_CHECK(cudaMemset(d_fp32, 0, partial_elements * 4));
+    for (int variant = 0; variant < 3; ++variant) {
+        const bool neutral = variant == 1, zero_mass = variant == 2;
+        const int valid = neutral ? 0 : zero_mass ? 8 : 7;
+        const char* label = neutral ? "neutral-bypass" : zero_mass ? "zero-mass-gate" : "masked-zero-gate";
+        std::vector<float> m(stats, -std::numeric_limits<float>::infinity()), l(stats, 0.0f);
+        if (!neutral) {
+            // One finite maximum for every nominal query; only split zero
+            // contributes. This forces a finite head_m even for masked rows.
+            for (std::size_t row = 0; row < rows; ++row) {
+                m[row] = 0.0f;
+                l[row] = zero_mass ? 0.0f : 1.0f;
+            }
+        }
+        std::int32_t positions[tokens];
+        for (int token = 0; token < tokens; ++token)
+            positions[token] = token < valid ? token : valid ? valid - 1 : 0;
+        std::vector<std::uint16_t> gate(elements, 0);
+        const std::size_t special = (valid < tokens ? valid : 0) * Geometry::QHeads * kGqaHeadDim;
+        gate[special] = 0x7FC1u;
+        gate[special + 1] = 0x7F80u;
+        gate[special + 2] = 0xFF80u;
+        CUDA_CHECK(cudaMemcpy(d_m, m.data(), stats * 4, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_l, l.data(), stats * 4, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_pos, positions, tokens * 4, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_valid, &valid, 4, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_gate, gate.data(), elements * 2, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(d_expected, 0xA5, elements * 2));
+        CUDA_CHECK(cudaMemset(d_actual, 0xA5, elements * 2));
+        gqa_attention_small_t_reduce_output_kernel<Geometry,64,false,false,true,false>
+            <<<dim3(Geometry::QHeads,4,tokens),256>>>(d_bf16,d_m,d_l,d_pos,d_valid,
+                d_gate,tokens,tokens,0,1,splits,d_expected);
+        ignis_gqa_hq_reduce_kernel<Geometry,256,false,false,true,false,float,true>
+            <<<dim3(Geometry::QHeads,1,tokens),kIgnisGqaHqReduceThreads>>>(d_fp32,d_m,d_l,d_pos,d_valid,
+                d_gate,tokens,tokens,0,1,splits,d_actual);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<std::uint16_t> expected(elements), actual(elements);
+        CUDA_CHECK(cudaMemcpy(expected.data(), d_expected, elements * 2, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(actual.data(), d_actual, elements * 2, cudaMemcpyDeviceToHost));
+        const std::size_t begin = neutral || zero_mass ? 0 : valid * Geometry::QHeads * kGqaHeadDim;
+        std::size_t differences = 0, reference_nan = 0;
+        for (std::size_t i = begin; i < elements; ++i) {
+            const bool nan = (expected[i] & 0x7F80u) == 0x7F80u && (expected[i] & 0x7Fu);
+            reference_nan += nan;
+            if (nan) {
+                differences += !((actual[i] & 0x7F80u) == 0x7F80u && (actual[i] & 0x7Fu));
+            } else {
+                // Canonical +0 is an exact mask/zero-path contract here.
+                differences += expected[i] != 0 || actual[i] != expected[i];
+            }
+        }
+        std::printf("LATE_ZERO %s checked %zu differences %zu reference_nan %zu\n",
+                    label, elements - begin, differences, reference_nan);
+        check(reference_nan == (neutral ? 0u : 1u), std::string(label) + ": oracle did not exercise gate semantics");
+        check(differences == 0, std::string(label) + ": forced-zero or gate semantics changed");
+    }
+    CUDA_CHECK(cudaFree(d_bf16)); CUDA_CHECK(cudaFree(d_fp32));
+    CUDA_CHECK(cudaFree(d_gate)); CUDA_CHECK(cudaFree(d_expected)); CUDA_CHECK(cudaFree(d_actual));
+    CUDA_CHECK(cudaFree(d_m)); CUDA_CHECK(cudaFree(d_l));
+    CUDA_CHECK(cudaFree(d_pos)); CUDA_CHECK(cudaFree(d_valid));
+}
+
 } // namespace
 
 int main() {
     cudaDeviceProp prop{};
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     std::printf("device: %s (sm_%d%d)\n", prop.name, prop.major, prop.minor);
+    run_late_forced_zero_regression();
     const Rows rows = load_rows(IGNIS_HQ_KV_FIXTURE_PATH);
     __nv_bfloat16* d_rows;
     CUDA_CHECK(cudaMalloc(&d_rows, rows.bits.size() * 2));
@@ -584,6 +698,11 @@ int main() {
         // Fewer splits than the 85 of the serving envelope's capacity: long
         // per-split tile loops, and the capacity clamping the active count.
         {"2 lanes, 20000/17000 keys, 4 splits, residual", {20000, 17000}, 8, 8, 0, {}, false, true, false, 4},
+        // Static geometry proof: ceil(40000/32)/4 -> 313 tiles/split;
+        // the first split spans 157 pages, beyond the old shared[128].
+        // Only run with the fixed HQ address path; never execute the old OOB.
+        {"1 lane, 40000 keys, 4 splits, residual", {40000}, 8, 8, 0, {}, false, true, false, 4},
+        {"1 lane, 40000 keys, 4 splits, append, residual", {40000}, 8, 8, 0, {}, false, true, true, 4},
         {"3 lanes, mixed, masked, append, 23 splits", {5000, 1200, 33}, 8, 8, 0, {8, 6, 3}, true, true, true, 23},
         {"1 lane, 70000 keys, width 8, append, 40 splits", {70000}, 8, 8, 0, {}, false, true, true, 40},
     };
@@ -598,6 +717,7 @@ int main() {
         {"append-C2-T8-19992", {19992,19992}, 8, 8, 0, {}, false, true, true},
     };
     for (const Case& c : additional) run_case(c, rows, d_rows);
+    run_case({"codec4-explicit-mixed-k1-side-zero-outside", {1023}, 8, 8, 0, {}, false, true, false, 4, true}, rows, d_rows);
     run_case({"direct-reducer-257-splits", {8}, 1, 1, 0, {}, false, false, false, 257}, rows, d_rows);
     CUDA_CHECK(cudaFree(d_rows));
 
