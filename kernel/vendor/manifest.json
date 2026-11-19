@@ -477,8 +477,8 @@
       "sha256": "50917d11e7e30b4afcac8b946962a78f8e29b56b31ec5a1feba01bfc7ae2db94",
       "patch": {
         "diff": "patches/src/ops/kernel/gqa_attention_decode_bf16.cuh.diff",
-        "sha256": "11935bce0fa433fb5a47316b63d5e77054491253b7ad9d36d5f6883520cbba1e",
-        "reason": "ADR 0031, GitHub #268: the hq-e8-2b verify route of the small-T kernel measured 6.2 us per GQA layer per 1K keys per lane against a 0.96 us MMA floor (docs/findings/2026-09-24-hq-attention-at-long-context.md), and Nsight Compute at 8 lanes x 30K put 80% of its instructions in the tile decode at 35% issue, latency-bound at 8 warps per SM with the q fragments and accumulators holding 192 of 255 registers. The throughput form (IgnisThroughput, default) at <= 48 query rows (27B at width 8; wider geometries run the reference form): q kept in shared memory while K and V take turns in one tile, each role's code rows staged one phase ahead by cp.async, hq_decode_row_group_fast called by every warp at once, paired fragment loads; IgnisThroughput = false is the reference hq route, unchanged. Bit-exact against it: ignis_kernel_hq_verify_exact_test (11 shapes: widths 1-8, masks, offsets, permuted table rows, residual window with cleared ring slots, the fused append, split capacities 4/23/40/85; every partial and cache byte). Kernel alone: 8 lanes x 30K 1679 -> 890 us, 1 lane x 59K 368 -> 201 us. docs/findings/2026-09-24-hq-verify-decode-cost.md."
+        "sha256": "7ece0462600838ef25084aee40507a67e2e129aef11b49c458c31adfa715ba63",
+        "reason": "ADR 0031, GitHub #268: the hq-e8-2b verify route of the small-T kernel measured 6.2 us per GQA layer per 1K keys per lane against a 0.96 us MMA floor (docs/findings/2026-09-24-hq-attention-at-long-context.md), and Nsight Compute at 8 lanes x 30K put 80% of its instructions in the tile decode at 35% issue, latency-bound at 8 warps per SM with the q fragments and accumulators holding 192 of 255 registers. The throughput form (IgnisThroughput, default) at <= 48 query rows (27B at width 8; wider geometries run the reference form): q kept in shared memory while K and V take turns in one tile, each role's code rows staged one phase ahead by cp.async, hq_decode_row_group_fast called by every warp at once, paired fragment loads; IgnisThroughput = false is the reference hq route, unchanged. Bit-exact against it: ignis_kernel_hq_verify_exact_test (11 shapes: widths 1-8, masks, offsets, permuted table rows, residual window with cleared ring slots, the fused append, split capacities 4/23/40/85; every partial and cache byte). Kernel alone: 8 lanes x 30K 1679 -> 890 us, 1 lane x 59K 368 -> 201 us. docs/findings/2026-09-24-hq-verify-decode-cost.md.\n\n2026-11-19 GQA round (ADR0031): opt-in parameters for already HQ-prepared Q, FP32 partial numerators/late IFWHT, masked neutral semantics, inactive-work elimination and exact four-lane decode support; generic/default contracts retained. HQ tiles address the current block table directly instead of overflowing a fixed128-page shared preload: W40000/S4 spans157 pages per split, covered by new cached/append cases in test_hq_verify_exact. Non-HQ linear page preload is unchanged. Owned native/Lab planning and reducer carry the measured partition policy; this patch does not claim a universal hardware-independent split optimum. See docs/findings/2026-11-19-gqa-uniform-fp32.md for paired real-record/block measurements and numerical evidence; final acceptance is recorded there at round close."
       }
     },
     {
@@ -523,8 +523,8 @@
       "sha256": "bf75965478c764367af55406315af3f82538db965aa1f5d8c83a7bd602760e4a",
       "patch": {
         "diff": "patches/src/ops/kernel/hq_codec.cuh.diff",
-        "sha256": "4e91b45a8243e7b2c1654a622f9488347d91138a02bfa57b166171a695446075",
-        "reason": "Retains the recorded HQ decode performance patches. Correctness: store the FP16 row norm as one aligned 16-bit word; split byte stores corrupt its low byte in the Linux CUDA build. Regressions: ignis_kernel_kv_append_format_test (710 norm mismatches) and ignis_hq_codec_test (FP64 oracle mismatch)."
+        "sha256": "1641ccb70dfae498d96f219ac5e98393eaf5d8aeb4aa1d8eb5ec699d0ae83e61",
+        "reason": "Retains recorded HQ decode performance and aligned FP16 norm correctness patches. Performance (ADR0031): the exclusive RTX5080 real decode profile and fixed exact Append replay in docs/findings/2026-11-18-gqa-exact-replay-and-integer-cache.md identify Rice loop/control headroom; unroll2 preserves symbols/FP arithmetic and reduces dynamic instructions. Correctness regressions remain ignis_kernel_kv_append_format_test and ignis_hq_codec_test; exact specialization is checked by ignis_kernel_hq_verify_exact_test.\n\n2026-11-19 GQA round (ADR0031): four-lane/four-u32-chain exact k0 decoder with whole-warp eight-lane fallback for legal general-k streams; prompt/default contracts retained. The encoder fixes Rice k=0 because 256 symbols under a512-bit budget cannot benefit from k>=1 (k1 only ties on binary symbols; larger k cannot fit); accepted integer output/code bytes remain unchanged. Decode append optionally stores the same unquantized BF16 side row from its existing FWHT registers, avoiding a repeated transform; default-null output preserves other encoder callers. Focused mixed-k/side/used0/inactive diagnostics and production partial regression tests cover the opted-in path. See docs/findings/2026-11-19-gqa-uniform-fp32.md; complete forward/service acceptance is recorded there at round close."
       }
     },
     {
@@ -570,7 +570,12 @@
     },
     {
       "path": "src/ops/kernel/rope.cuh",
-      "sha256": "ea5a011e8caeb6faed8c35d3101ab4578f78a0cd2499230bde57bdfe5a7c0c4c"
+      "sha256": "ea5a011e8caeb6faed8c35d3101ab4578f78a0cd2499230bde57bdfe5a7c0c4c",
+      "patch": {
+        "diff": "patches/src/ops/kernel/rope.cuh.diff",
+        "sha256": "588e2c91d4b53a380847da6dd8a2b8d44ad83e1612d6fe18841cab64d52189a8",
+        "reason": "2026-11-19 GQA round (ADR0031): optional HQ query transform after the complete original BF16 norm/RoPE boundary, and optional interleaved-Q row stride, fuse repeated query preparation and remove segment copies. Defaults preserve ordinary norm/RoPE output and layout; candidate/builtin producer-consumer guards keep standalone attention and public contracts unchanged. Source/layout audits and actual block replay cover exact paths. See docs/findings/2026-11-19-gqa-uniform-fp32.md for evidence and final acceptance status."
+      }
     },
     {
       "path": "src/ops/kernel/sampling.cuh",
@@ -674,7 +679,12 @@
     },
     {
       "path": "src/ops/launcher/gqa_attention_decode.cu",
-      "sha256": "4e70d60c636682d10a8cf20530e487759ac45097698a065065dd524463014df4"
+      "sha256": "4e70d60c636682d10a8cf20530e487759ac45097698a065065dd524463014df4",
+      "patch": {
+        "diff": "patches/src/ops/launcher/gqa_attention_decode.cu.diff",
+        "sha256": "12bb019d3a8e2d0220d378e999ab344f2a58186aa22c127dabc04e4f041d6627",
+        "reason": "Performance (ADR 0031): route only HQ27 small-T reduction to the owned fixed256-thread/D256 kernel, retaining the original generic reducer and other geometry/dtypes. Real decode profile and exact warm replay show repeated stats/exp overhead; see docs/findings/2026-11-18-gqa-exact-replay-and-integer-cache.md. ignis_kernel_hq_verify_exact_test runs both reducers on independent original partials and nonfinite/alias/capacity boundaries."
+      }
     },
     {
       "path": "src/ops/launcher/gqa_attention_decode_bf16.cu",

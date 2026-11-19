@@ -4,6 +4,9 @@
 // context: input norm -> fused Q/K/gate/V projection -> q/k norm + RoPE ->
 // KV append -> attention + sigmoid output gate -> output residual -> MLP tail.
 
+#include "ignis_gqa_native.h"
+extern "C" int32_t ignis_gqa_native_q_fixed_splits(const ignis_trellis_weight *,
+    const void *,void *,const ignis_trellis_workspace *,void *);
 #include "lab_profile.h"
 #include "lab_trace.h"
 #include "lab_segment.h"
@@ -63,10 +66,25 @@ ninfer::Tensor weight_tensor(const ninfer::Weight &weight, ninfer::DType dtype,
 void input_projection(ignis_model &model, const GqaLayerWeights &weights, const ninfer::Tensor &normalized,
                       ninfer::Tensor &query, ninfer::Tensor &gate, ninfer::Tensor &key, ninfer::Tensor &value,
                       std::int32_t heads, std::int32_t head_dim, ninfer::DeviceArena &arena, LinearPolicyMode mode,
-                      cudaStream_t stream) {
+                      cudaStream_t stream, bool native_q_s3 = false) {
   if (model.is_trellis_body) {
     const GqaTrellisWeights &t = weights.trellis;
+    if(native_q_s3 && !model.trellis_candidate){
+      // Match the default native Q partition in independent decomposed recording.
+      // Legacy candidate hooks retain their original entry and priority below.
+      IGNIS_PROFILE_OP("linear.q_proj", ([&](){
+        auto interleaved=arena.alloc(ninfer::DType::BF16,{2*heads*head_dim,8,1,1});
+        void *ticket=ignis::lab_before(model,t.q_proj,nullptr,normalized.data,8,
+            interleaved.data,2*heads*head_dim,IGNIS_TRELLIS_STORE,stream);
+        if(ignis_gqa_native_q_fixed_splits(&t.q_proj,normalized.data,interleaved.data,
+            &model.trellis_workspace,stream))throw std::runtime_error(ignis_trellis_last_error());
+        ignis::lab_after(model,ticket,interleaved.data,stream);
+        const auto rc=ignis::trellis_body::split_query_gate(interleaved.data,heads,head_dim,8,query.data,gate.data,stream);
+        if(rc!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(rc));
+      })());
+    }else{
     IGNIS_PROFILE_OP("linear.q_proj", ignis::trellis_body::query_gate(model, t.q_proj, normalized, heads, head_dim, arena, query, gate, stream));
+    }
     IGNIS_PROFILE_OP("linear.k_proj", ignis::trellis_body::linear(model, t.k_proj, normalized, key.data, static_cast<uint32_t>(key.ne[0]),
                                 IGNIS_TRELLIS_STORE, stream));
     IGNIS_PROFILE_OP("linear.v_proj", ignis::trellis_body::linear(model, t.v_proj, normalized, value.data, static_cast<uint32_t>(value.ne[0]),
@@ -432,7 +450,9 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
     // its inner projection and attention hooks continue to observe real work.
     if(model->is_trellis_body && model->hidden==5120 && lane_tokens==8 && batch==1 &&
        pool->kv_format==IGNIS_KV_FORMAT_HQ_E8_2B &&
-       ignis::lab_segment_should_run(*model,IGNIS_SEGMENT_GQA,layer,lane_tokens,batch)){
+       (ignis::lab_segment_should_run(*model,IGNIS_SEGMENT_GQA,layer,lane_tokens,batch) ||
+        (!model->lab_trace && !model->trellis_candidate && kQHeads==24 &&
+         ignis_gqa_native_workspace(model->max_context_tokens)))){
       const auto profile=ignis::segment_gqa_profile(*model,*pool);
       const auto cache=ignis_kv_batch_layer_view(pool,static_cast<std::int32_t>(gqa_layer));
       const ninfer::Tensor input(in_residual,ninfer::DType::BF16,{hidden,columns});
@@ -462,7 +482,11 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
         recording_segment=true;
         segment_ticket=ignis::lab_segment_before(*model,layer,profile,bindings,stream);
       }else{
-        ignis::lab_segment_execute(*model,layer,profile,bindings,stream);
+        if(!model->trellis_candidate){
+          const auto bytes=ignis_gqa_native_segment_workspace(&profile);
+          const auto storage=model->decode_graph_scratch->alloc_bytes(bytes);
+          ignis::segment_gqa_native_invoke(*model,layer,profile,bindings,storage.data,storage.bytes,stream);
+        }else ignis::lab_segment_execute(*model,layer,profile,bindings,stream);
         ninfer::Tensor post=model->decode_graph_scratch->alloc(ninfer::DType::BF16,{hidden,columns});
         ninfer::Tensor fused=model->decode_graph_scratch->alloc(ninfer::DType::BF16,{ffn,columns});
         const auto post_norm=weight_tensor(weights.post_attention_norm,ninfer::DType::BF16,{hidden});
@@ -496,7 +520,10 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
                          normalized, stream));
 
     input_projection(*model, weights, normalized, query, gate, key, value, kQHeads, kHeadDim,
-                     *model->decode_graph_scratch, mode, stream);
+                     *model->decode_graph_scratch, mode, stream,
+                     model->is_trellis_body && model->hidden==5120 && lane_tokens==8 && batch==1 &&
+                     pool->kv_format==IGNIS_KV_FORMAT_HQ_E8_2B && !model->trellis_candidate &&
+                     kQHeads==24 && ignis_gqa_native_workspace(model->max_context_tokens));
 
     // Graph-safe positions (ADR 0019): the round's staged absolute
     // positions, read from device memory at replay -- `fill_i32_positions`'s
@@ -581,8 +608,12 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
     // format and the query has to be asked the same way (GitHub #123). At
     // the verify width the resolver's own chunking decides the route -- one
     // hq width-8 tile, or BF16's two passes of six -- not this layer.
-    const std::size_t attention_workspace_bytes = ninfer::ops::gqa_attention_workspace_capacity_bytes(
-        kQHeads, batch_cache.dtype, envelope, batch, lane_tokens, lane_tokens);
+    const std::size_t native_attention_bytes = model->is_trellis_body && hidden==5120 &&
+        kQHeads==24 && batch==1 && lane_tokens==8 && batch_cache.dtype==ninfer::DType::U8
+        ? ignis_gqa_native_workspace(envelope.max_visible_keys) : 0;
+    const std::size_t attention_workspace_bytes = std::max<std::size_t>(native_attention_bytes,
+        ninfer::ops::gqa_attention_workspace_capacity_bytes(
+            kQHeads, batch_cache.dtype, envelope, batch, lane_tokens, lane_tokens));
     const ninfer::DeviceSpan attention_workspace_storage =
         model->decode_graph_scratch->alloc_bytes(std::max<std::size_t>(attention_workspace_bytes, 1));
     // Graph-safe (ADR 0019): the predicate is the pool's KV format, fixed for

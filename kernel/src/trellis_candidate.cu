@@ -1,4 +1,5 @@
 // Model-local code replacement for the offline experiment engine.
+#include "ignis_gqa_native.h"
 #include "trellis_candidate.h"
 #include "gqa_candidate.h"
 #include "lab_segment.h"
@@ -157,6 +158,13 @@ bool gqa_candidate_applies(const ignis_model &m,const ninfer::Tensor &q,const ni
   return m.trellis_candidate && m.trellis_candidate->gqa && q.ne[0]==256 && q.ne[1]==24 &&
       q.ne[2]==8 && q.ne[3]==1 && cache.dtype==ninfer::DType::U8;
 }
+bool gqa_native_attention_applies(const ignis_model &m,const ninfer::Tensor &q,
+    const ninfer::PagedKVBatchLayerView &cache){
+  return m.is_trellis_body && m.hidden==5120 && q.dtype==ninfer::DType::BF16 &&
+      q.ne[0]==256 && q.ne[1]==24 && q.ne[2]==8 && q.ne[3]==1 && q.is_contiguous() &&
+      cache.dtype==ninfer::DType::U8 && cache.head_dim==256 && cache.num_kv_heads==4 &&
+      cache.quant_group==32 && ignis_gqa_native_workspace(m.max_context_tokens);
+}
 uint64_t gqa_candidate_workspace_bytes(const ignis_model &m,uint32_t max_keys){
   if(!m.trellis_candidate || !m.trellis_candidate->gqa)return 0;
   const auto bytes=m.trellis_candidate->gqa->workspace_bytes(max_keys);
@@ -168,13 +176,20 @@ void gqa_attention_dispatch(const ignis_model &m,const ninfer::Tensor &q,const n
     const ninfer::Tensor &rows,const ninfer::Tensor &gate,float scale,
     ninfer::PagedKVBatchLayerView cache,ninfer::ops::GqaExecutionEnvelope envelope,ninfer::DeviceArena &arena,
     ninfer::Tensor &out,cudaStream_t stream,void *replay_workspace,uint64_t replay_bytes){
-  if(!gqa_candidate_applies(m,q,cache)){
+  const bool extension=gqa_candidate_applies(m,q,cache);
+  const bool native=!extension && gqa_native_attention_applies(m,q,cache);
+  if(!extension && !native){
     ninfer::ops::gqa_attention(q,k,v,positions,valid,rows,gate,scale,cache,envelope,arena,out,stream);return;
   }
-  auto &candidate=*m.trellis_candidate;const auto *api=candidate.gqa;
-  const auto bytes=gqa_candidate_workspace_bytes(m,envelope.max_visible_keys);
-  void *workspace=replay_workspace?replay_workspace:candidate.gqa_workspace->p;
-  const uint64_t capacity=replay_workspace?replay_bytes:candidate.gqa_workspace->bytes;
+  const auto *api=extension?m.trellis_candidate->gqa:nullptr;
+  const auto bytes=extension?gqa_candidate_workspace_bytes(m,envelope.max_visible_keys)
+      :ignis_gqa_native_workspace(envelope.max_visible_keys);
+  void *workspace=replay_workspace;
+  uint64_t capacity=replay_bytes;
+  if(!workspace){
+    if(extension){workspace=m.trellis_candidate->gqa_workspace->p;capacity=m.trellis_candidate->gqa_workspace->bytes;}
+    else {const auto storage=arena.alloc_bytes(bytes);workspace=storage.data;capacity=storage.bytes;}
+  }
   if(bytes>capacity)throw std::runtime_error("GQA candidate query exceeds host-owned workspace");
   ignis_gqa_candidate_call call{IGNIS_GQA_CANDIDATE_ABI,sizeof(ignis_gqa_candidate_call),envelope.max_visible_keys,
       static_cast<uint32_t>(cache.block_tables.ne[0]),static_cast<uint32_t>(cache.k_pages.ne[3]),
@@ -183,6 +198,9 @@ void gqa_attention_dispatch(const ignis_model &m,const ninfer::Tensor &q,const n
       static_cast<const int32_t *>(rows.data),static_cast<const int32_t *>(cache.block_tables.data),
       cache.k_pages.data,cache.v_pages.data,cache.k_scale_pages.data,cache.v_scale_pages.data,
       cache.residual_k.data,cache.residual_v.data,static_cast<uint32_t *>(cache.ring_valid.data),out.data};
-  if(api->run(&call,workspace,capacity,stream))throw std::runtime_error(std::string("GQA candidate: ")+api->last_error());
+  const int32_t rc=extension?api->run(&call,workspace,capacity,stream)
+      :ignis_gqa_native_run(&call,workspace,capacity,stream);
+  if(rc)throw std::runtime_error(std::string(extension?"GQA candidate: ":"GQA native: ")+
+      (extension?api->last_error():ignis_gqa_native_error()));
 }
 }

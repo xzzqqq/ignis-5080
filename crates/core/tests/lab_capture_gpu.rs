@@ -36,13 +36,44 @@ fn verify_tensor_export(result:&Value,gqa:bool){
     let candidate=std::fs::read(root.join("candidate.bin")).unwrap();
     let bytes=|name:&str|{
         let t=tensors.iter().find(|t|t["name"]==name && t["purpose"]=="candidate_intermediate").unwrap();
-        let start=t["offset"].as_u64().unwrap() as usize;let count=t["bytes"].as_u64().unwrap() as usize;
-        let value=&candidate[start..start+count];assert_eq!(t["sha256"],format!("{:x}",Sha256::digest(value)));value
+        let start=usize::try_from(t["offset"].as_u64().unwrap()).unwrap();
+        let count=usize::try_from(t["bytes"].as_u64().unwrap()).unwrap();
+        let end=start.checked_add(count).expect("tap byte range overflow");assert!(end<=candidate.len());
+        let value=&candidate[start..end];assert_eq!(t["sha256"],format!("{:x}",Sha256::digest(value)));value
     };
+    for tensor in tensors.iter().filter(|t|t["purpose"]=="candidate_intermediate") {
+        bytes(tensor["name"].as_str().unwrap());
+    }
     if gqa {
-        let packed=bytes("interleaved_query_gate");let q=bytes("query");let gate=bytes("gate");
-        for row in 0..24*8 {assert_eq!(&packed[row*1024..row*1024+512],&q[row*512..(row+1)*512]);
-            assert_eq!(&packed[row*1024+512..(row+1)*1024],&gate[row*512..(row+1)*512]);}
+        for tensor in tensors.iter().filter(|t|t["purpose"]=="candidate_intermediate") {
+            let shape:[u64;4]=match tensor["name"].as_str().unwrap() {
+                "normalized_input"=>[5120,8,1,1],
+                "query"|"gate"|"rotated_query"|"hq_transformed_query"=>[256,24,8,1],
+                "key"|"value"|"rotated_key"=>[256,4,8,1],
+                "attention"=>[6144,8,1,1],"interleaved_query_gate"=>[512,24,8,1],
+                name=>panic!("unexpected GQA retained tensor {name}"),
+            };
+            assert_eq!(tensor["dtype"],"bf16");assert_eq!(tensor["shape"],json!(shape));
+            assert_eq!(tensor["bytes"].as_u64(),Some(shape.iter().product::<u64>()*2));
+        }
+        let packed=bytes("interleaved_query_gate");assert_eq!(packed.len(),24*8*1024);
+        let mut names:Vec<&str>=tensors.iter().filter(|t|t["purpose"]=="candidate_intermediate")
+            .map(|t|t["name"].as_str().unwrap()).collect();names.sort_unstable();
+        if names.contains(&"hq_transformed_query") {
+            let mut expected=vec!["normalized_input","key","value","hq_transformed_query",
+                "rotated_key","attention","interleaved_query_gate"];expected.sort_unstable();
+            assert_eq!(names,expected,"HQ taps must not expose unwritten split query/gate slots");
+            let hq=tensors.iter().find(|t|t["name"]=="hq_transformed_query").unwrap();
+            assert_eq!(hq["shape"],json!([256,24,8,1]));
+            assert_eq!(bytes("hq_transformed_query").len(),256*24*8*2);
+        } else {
+            let mut expected=vec!["normalized_input","query","gate","key","value","rotated_query",
+                "rotated_key","attention","interleaved_query_gate"];expected.sort_unstable();
+            assert_eq!(names,expected);
+            let q=bytes("query");let gate=bytes("gate");
+            for row in 0..24*8 {assert_eq!(&packed[row*1024..row*1024+512],&q[row*512..(row+1)*512]);
+                assert_eq!(&packed[row*1024+512..(row+1)*1024],&gate[row*512..(row+1)*512]);}
+        }
     }
 }
 

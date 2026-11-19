@@ -77,6 +77,7 @@ __host__ __device__ inline uint64_t align256(uint64_t v) { return (v + 255) / 25
 // call then found nonzero and reduced its splits early -- a load's calls of several shapes share
 // one workspace (GitHub #339). Bounds a call's out at IGNIS_TRELLIS_MAX_OUT.
 constexpr uint32_t kArrivalBlocks = IGNIS_TRELLIS_MAX_OUT / 128;
+constexpr uint64_t kCounterBytes = (256 + 4ull * kArrivalBlocks + 255) & ~255ull;
 
 // The decode route's split of the inputs: as many work units (output blocks x splits) as the
 // kernel has resident CTAs on the card (or on the SMs the debug cap admits), so each CTA runs one
@@ -105,7 +106,7 @@ inline Layout layout(uint32_t in, uint32_t out, uint32_t weights, uint32_t token
   const bool decode = tokens <= static_cast<uint32_t>(kDecodeMaxTokens);
   const uint64_t xr_weights = decode ? weights : 1;
   l.arrivals = 256;
-  l.xr = align256(l.arrivals + 4ull * kArrivalBlocks);
+  l.xr = kCounterBytes;
   l.inv = align256(l.xr + 2ull * xr_weights * tokens * in);
   l.partials = align256(l.inv + 4ull * xr_weights * nb * tokens);
   l.bytes = l.partials;
@@ -126,7 +127,9 @@ struct Weight {
   int stride;  // tiles per stored row
 };
 
-enum Epilogue : int { kStore = 0, kAdd = 1, kSwiGlu = 2, kSwiGluUp = 3 };
+// kPairStore is private to the fixed GQA K/V pair; public entry points still
+// admit only their original epilogues. Its output is planar [2][tokens][ldy].
+enum Epilogue : int { kStore = 0, kAdd = 1, kSwiGlu = 2, kSwiGluUp = 3, kPairStore = 4 };
 
 struct RotateParams {
   const __nv_bfloat16 *x;

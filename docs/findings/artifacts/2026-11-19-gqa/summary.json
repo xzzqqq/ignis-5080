@@ -1,0 +1,40 @@
+{
+  "operation": "b70872ee36f6457fb7e8313a34260fe1",
+  "scope": "complete native B GQA block including timed TL counter-prefix clear vs initial math control on identical freshly captured B inputs",
+  "records": 222,
+  "pairs": 1,
+  "speedup_initial_over_final_B": 1.3895993838412979,
+  "median_initial_us": 331.87200129032135,
+  "median_final_B_us": 238.81599307060242,
+  "min_speedup": 1.0906557344017378,
+  "max_speedup": 1.4935362377403352,
+  "B_wins": 222,
+  "B_record_output_exact": true,
+  "B_record_state_exact": true,
+  "initial_state_exact": true,
+  "capture_trajectory_match": true,
+  "capture_differences": [],
+  "visible_window_range": [
+    19962,
+    21049
+  ],
+  "distance_note": "initial vs B arm distance is not truth error",
+  "baseline_definition": "Frozen round-start dirty algorithm, already including prior U2 and owned D256 work; not clean main. Published PR contains those prerequisites.",
+  "actual_window_validation": {
+    "records": 222,
+    "payload_bytes_read": 7992,
+    "valid_tokens": 8,
+    "range": [
+      19962,
+      21049
+    ],
+    "record_metadata_sha256": "e7dc0e953504ed371d359092ec17d2dbd176117e76bf40ca5f2dcdfb8015a981"
+  },
+  "published_copy_normalization": {
+    "svg": "line-end whitespace removed",
+    "csv": "CRLF normalized to LF",
+    "original_scratch_artifacts": "unchanged",
+    "numeric_values": "unchanged"
+  },
+  "runtime_sources_sha256": "df10c9f1f90bcc1576321fc635a9412bda0f12c62554080c725aad56db83db49"
+}

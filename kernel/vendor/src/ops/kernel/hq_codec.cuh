@@ -386,7 +386,8 @@ __device__ __forceinline__ void hq_encode_row_warp(const __nv_bfloat16* row,
                                                    float* u_scaled, std::uint32_t* syms,
                                                    std::uint8_t* codes_out,
                                                    std::uint8_t* meta_out,
-                                                   std::uint64_t dither_seed) {
+                                                   std::uint64_t dither_seed,
+                                                   __nv_bfloat16* residual_out = nullptr) {
     const int lane = static_cast<int>(threadIdx.x & 31u);
     float reg[8];
     float sumsq = 0.0f;
@@ -406,6 +407,14 @@ __device__ __forceinline__ void hq_encode_row_warp(const __nv_bfloat16* row,
     const float norm = sqrtf(fmaxf(sumsq, 1e-30f));
     const float scale = kHqAlpha * sqrtf(static_cast<float>(kHqHeadDim)) / norm;
     hq_fwht256_sign(reg, signs, sign_base, lane);
+    // Decode append may reuse this unquantized rotation for its exact side row.
+    // Other callers retain the original encoder by the default null output.
+    if (residual_out != nullptr) {
+#pragma unroll
+        for (int s = 0; s < 8; ++s) {
+            residual_out[s * 32 + lane] = __float2bfloat16(reg[s]);
+        }
+    }
 #pragma unroll
     for (int s = 0; s < 8; ++s) {
         u_scaled[s * 32 + lane] = reg[s] * scale;
@@ -1100,7 +1109,7 @@ __device__ __forceinline__ void hq_decode_row_group_fast(const std::uint8_t* cod
     // Steady state: both chains step each iteration and only the store is
     // conditional, so the two chains issue interleaved instead of as branches.
     const int steps = max(e0 - i0, e1 - i1);
-#pragma unroll 1
+#pragma unroll 2
     for (int step = 0; step < steps; ++step) {
         const int p0 = hq_clz_nonzero(v0);
         const int p1 = hq_clz_nonzero(v1);
@@ -1172,5 +1181,140 @@ __device__ __forceinline__ void hq_decode_row_group_fast(const std::uint8_t* cod
         *reinterpret_cast<uint4*>(out + wb) = packed;
     }
 }
+
+// Private 4-lane k0 throughput shape. The caller makes a WHOLE-WARP
+// decision: any active general-k row sends that warp through two phases of
+// the unchanged 8-lane helper instead. No 8-lane collective is called here.
+__device__ __forceinline__ void hq_decode_row_group4_fast(const std::uint8_t* codes,
+    std::uint32_t mw0, std::uint32_t mw1, __nv_bfloat16* out, int lane,
+    int xor_chunk, std::uint64_t dither_seed, bool active) {
+    const int warp_lane = static_cast<int>(threadIdx.x & 31u);
+    const int gbase = warp_lane & ~3;
+    constexpr unsigned kWarp = 0xffffffffu;
+    const unsigned used_bits = ((mw0 >> 24) & 0xffu) | ((mw1 & 3u) << 8);
+    const std::uint32_t k = (mw0 >> 16) & 15u;
+    const bool fast = active && used_bits != 0 && k == 0;
+    auto* symbols = reinterpret_cast<std::uint16_t*>(out);
+    if (active && (used_bits == 0 || k > kHqMaxRiceK)) {
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            *reinterpret_cast<uint4*>(out + hq_swz_element((lane + 4 * i) * 8, xor_chunk)) =
+                make_uint4(0u,0u,0u,0u);
+        }
+    }
+    uint4 x = make_uint4(0u,0u,0u,0u);
+    if (fast) { x = *reinterpret_cast<const uint4*>(codes + 16 * lane); }
+    const int counts[4] = {__popc(x.x),__popc(x.y),__popc(x.z),__popc(x.w)};
+    const int c = counts[0]+counts[1]+counts[2]+counts[3];
+    int inc = c;
+    int run = x.w ? __ffs(x.w)-1 : x.z ? 31+__ffs(x.z) :
+        x.y ? 63+__ffs(x.y) : x.x ? 95+__ffs(x.x) : 128;
+    int az = (x.x|x.y|x.z|x.w) == 0u;
+#pragma unroll
+    for (int delta = 1; delta < 4; delta <<= 1) {
+        const int left = __shfl_up_sync(kWarp,inc,delta,4);
+        const int lrun = __shfl_up_sync(kWarp,run,delta,4);
+        const int laz = __shfl_up_sync(kWarp,az,delta,4);
+        if (lane >= delta) { inc += left; }
+        if (lane >= delta && az != 0) { run += lrun;az &= laz; }
+    }
+    const int idx_total = __shfl_sync(kWarp,inc,gbase+3);
+    int carry = __shfl_up_sync(kWarp,run,1,4);
+    if (lane == 0) { carry = 0; }
+    const int base = inc-c, swz = xor_chunk << 3;
+    std::uint32_t values[4] = {x.x,x.y,x.z,x.w};
+    int leading[4] = {carry,0,0,0};
+#pragma unroll
+    for (int j = 1; j < 4; ++j) {
+        leading[j] = values[j-1] ? __ffs(values[j-1])-1 : leading[j-1]+32;
+    }
+    int indices[4] = {base,base+counts[0],base+counts[0]+counts[1],base+counts[0]+counts[1]+counts[2]};
+    int limits[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        limits[j] = min(indices[j]+counts[j],kHqHeadDim);
+        if (indices[j] < limits[j]) {
+            const int p = hq_clz_nonzero(values[j]);
+            int z = leading[j]+p;
+            if (z >= static_cast<int>(kHqUnaryGuard)) { z = 0; }
+            symbols[indices[j]^swz] = static_cast<std::uint16_t>(z);
+            values[j] = __funnelshift_lc(0u,values[j],p+1);
+            ++indices[j];
+        }
+    }
+    const int steps = max(max(limits[0]-indices[0],limits[1]-indices[1]),
+        max(limits[2]-indices[2],limits[3]-indices[3]));
+#pragma unroll 2
+    for (int step = 0; step < steps; ++step) {
+        int positions[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) { positions[j] = hq_clz_nonzero(values[j]); }
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            if (indices[j] < limits[j]) { symbols[indices[j]^swz] = static_cast<std::uint16_t>(positions[j]); }
+            values[j] = __funnelshift_lc(0u,values[j],positions[j]+1);
+            ++indices[j];
+        }
+    }
+    if (fast && idx_total < kHqHeadDim && lane == 0) {
+#pragma unroll 1
+        for (int t = idx_total; t < kHqHeadDim; ++t) { symbols[hq_swz_element(t,xor_chunk)] = 0; }
+    }
+    __syncwarp(kWarp);
+    if (!fast) { return; }
+
+    const std::uint32_t escalation = (mw0 >> 20) & 0x3u;
+    __half h;
+    *reinterpret_cast<std::uint16_t*>(&h) = static_cast<std::uint16_t>(mw0 & 0xFFFFu);
+    const float norm = __half2float(h);
+    const float inv_scale =
+        static_cast<float>(1u << escalation) /
+        (kHqAlpha * sqrtf(static_cast<float>(kHqHeadDim)));
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const int word     = lane + 4 * i;
+        const int wb       = hq_swz_element(word * 8, xor_chunk);
+        const uint4 staged = *reinterpret_cast<const uint4*>(symbols + wb);
+        const std::uint32_t pairs[4] = {staged.x, staged.y, staged.z, staged.w};
+        // Two coordinates per staged word, one per 16-bit half: a k = 0
+        // symbol is below kHqUnaryGuard, so every y fits a signed half.
+        const std::uint32_t coset  = (pairs[3] >> 16) & 1u;  // z7 & 1
+        const std::uint32_t coset2 = coset * 0x00010001u;
+        std::uint32_t y2[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            y2[j] = pairs[j] ^ ((pairs[j] & 0x00010001u) * 0xFFFFu) ^ coset2;
+        }
+        const std::uint32_t x      = y2[0] ^ y2[1] ^ y2[2] ^ (y2[3] & 0xFFFFu);  // y0..y6
+        const std::uint32_t parity = ((x >> 1) ^ (x >> 17)) & 1u;
+        const std::uint32_t u      = pairs[3] >> 17;          // z7 >> 1
+        const std::uint32_t t2     = u ^ (0u - (u & 1u));      // 2*unzigzag(z7 >> 1)
+        int y[8];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            y[2 * j]     = static_cast<std::int16_t>(y2[j] & 0xFFFFu);
+            y[2 * j + 1] = static_cast<std::int16_t>(y2[j] >> 16);
+        }
+        y[7] = static_cast<int>(((t2 ^ parity) << 1) ^ coset);
+        // (2^23 + b) * c - (2^23 * c + 0.5) is b * c - 0.5 exactly, and
+        // 2^23 * c + 0.5 is itself exact.
+        const std::uint64_t wseed = hq_dither_word_seed(dither_seed, word);
+        const std::uint32_t wlo   = static_cast<std::uint32_t>(wseed);
+        const std::uint32_t whi   = static_cast<std::uint32_t>(wseed >> 32);
+        constexpr float kInv255   = 1.0f / 255.0f;
+        constexpr float kFold     = 8388608.0f * kInv255 + 0.5f;
+        uint4 packed;
+        auto* values = reinterpret_cast<__nv_bfloat16*>(&packed);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const float magic = __uint_as_float(
+                __byte_perm(j < 4 ? wlo : whi, 0x4B000000u, 0x7540u | static_cast<unsigned>(j & 3)));
+            const float dither = __fmaf_rn(magic, kInv255, -kFold);
+            values[j] = __float2bfloat16((static_cast<float>(y[j]) + dither) * norm * inv_scale);
+        }
+        *reinterpret_cast<uint4*>(out + wb) = packed;
+    }
+}
+
 
 } // namespace ninfer::ops

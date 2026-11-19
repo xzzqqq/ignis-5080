@@ -1,6 +1,8 @@
 // Host binding for the finite attention sublayer. No intermediate tensor is
 // part of its replay schema; a candidate may replace the complete chain.
+#include "ignis_gqa_native.h"
 #include "lab_segment.h"
+#include "lab_profile.h"
 #include "ignis_gqa_segment.h"
 #include "ignis_seq_internal.h"
 #include "model_internal.h"
@@ -10,41 +12,8 @@
 #include <stdexcept>
 
 namespace ignis {
-// The app baseline keeps the resident attention route. The DSO's default
-// instead composes its independently editable attention candidate, including
-// the pre-existing candidate-only scheduling policy.
-uint64_t segment_gqa_builtin_attention_workspace(uint32_t max_keys){
-  return ninfer::ops::gqa_attention_workspace_capacity_bytes(24,ninfer::DType::U8,
-      {.min_visible_keys=1,.max_visible_keys=max_keys},1,8,8);
-}
-void segment_gqa_builtin_attention(const ignis_gqa_segment_call &c,const void *q,const void *k,
-    const void *v,const void *gate,void *output,void *workspace,uint64_t bytes,cudaStream_t stream){
-  const int32_t slots=static_cast<int32_t>(c.profile.slots);
-  const int32_t physical=static_cast<int32_t>(c.physical_pages);
-  ninfer::PagedKVBatchLayerView cache;
-  cache.dtype=ninfer::DType::U8;cache.quant_group=32;cache.head_dim=256;cache.num_kv_heads=4;
-  cache.k_pages=ninfer::Tensor(c.k_pages,ninfer::DType::U8,{64,64,4,physical});
-  cache.v_pages=ninfer::Tensor(c.v_pages,ninfer::DType::U8,{64,64,4,physical});
-  cache.k_scale_pages=ninfer::Tensor(c.k_meta,ninfer::DType::U8,{8,64,4,physical});
-  cache.v_scale_pages=ninfer::Tensor(c.v_meta,ninfer::DType::U8,{8,64,4,physical});
-  cache.residual_k=ninfer::Tensor(c.residual_k,ninfer::DType::BF16,{256,4,544,slots});
-  cache.residual_v=ninfer::Tensor(c.residual_v,ninfer::DType::BF16,{256,4,544,slots});
-  cache.ring_valid=ninfer::Tensor(c.ring,ninfer::DType::I32,{16,slots});
-  cache.block_tables=ninfer::Tensor(const_cast<int32_t *>(c.block_tables),ninfer::DType::I32,
-                                  {static_cast<int32_t>(c.logical_pages),slots});
-  const ninfer::Tensor query(const_cast<void *>(q),ninfer::DType::BF16,{256,24,8,1});
-  const ninfer::Tensor key(const_cast<void *>(k),ninfer::DType::BF16,{256,4,8,1});
-  const ninfer::Tensor value(const_cast<void *>(v),ninfer::DType::BF16,{256,4,8,1});
-  const ninfer::Tensor output_gate(const_cast<void *>(gate),ninfer::DType::BF16,{256,24,8,1});
-  const ninfer::Tensor positions(const_cast<int32_t *>(c.positions),ninfer::DType::I32,{8,1});
-  const ninfer::Tensor valid=c.valid_columns
-      ? ninfer::Tensor(const_cast<int32_t *>(c.valid_columns),ninfer::DType::I32,{1}) : ninfer::Tensor{};
-  const ninfer::Tensor rows(const_cast<int32_t *>(c.table_rows),ninfer::DType::I32,{1});
-  ninfer::Tensor out(output,ninfer::DType::BF16,{256,24,8,1});
-  ninfer::DeviceArena arena(ninfer::DeviceSpan{workspace,static_cast<size_t>(bytes)});
-  ninfer::ops::gqa_attention(query,key,value,positions,valid,rows,output_gate,0.0625f,cache,
-      {.min_visible_keys=1,.max_visible_keys=c.profile.max_keys},arena,out,stream);
-}
+// Both native execution and builtin replay use the same bounded token mixer.
+// Corpus recording remains the decomposed verify chain in gqa_layer.cu.
 ignis_segment_profile segment_gqa_profile(const ignis_model &m,const ignis_seq_pool &p){
   return {IGNIS_SEGMENT_GQA,8,1,static_cast<uint32_t>(m.hidden),0,m.max_context_tokens,
       static_cast<uint32_t>(p.kv_pool.table_row_count()),0,m.rms_norm_eps};
@@ -75,9 +44,9 @@ const ninfer::Tensor &require(const std::vector<SegmentBinding> &bindings,size_t
   return b.tensor;
 }
 }
-void segment_gqa_invoke(const ignis_model &m,uint32_t layer,const ignis_segment_profile &p,
+static void gqa_segment_invoke(const ignis_model &m,uint32_t layer,const ignis_segment_profile &p,
     const std::vector<SegmentBinding> &b,const ignis_segment_candidate_api *api,
-    void *workspace,uint64_t bytes,cudaStream_t stream){
+    void *workspace,uint64_t bytes,cudaStream_t stream,bool native){
   if(layer>=m.layers.size() || m.layers[layer].kind!=IGNIS_LAYER_GQA || !m.is_trellis_body ||
       !segment_gqa_workspace(p) || p.hidden!=m.hidden || p.max_keys!=m.max_context_tokens ||
       p.rms_eps!=m.rms_norm_eps || b.size()!=14)
@@ -113,8 +82,21 @@ void segment_gqa_invoke(const ignis_model &m,uint32_t layer,const ignis_segment_
   if(api){
     if(!api->run_gqa || api->run_gqa(&c,workspace,bytes,stream))
       throw std::runtime_error(std::string("GQA segment candidate: ")+api->last_error());
-  }else if(ignis_lab_gqa_segment_run(&c,workspace,bytes,stream)){
-    throw std::runtime_error(std::string("GQA segment builtin: ")+ignis_lab_gqa_segment_error());
+  }else {
+    const int32_t rc=native?ignis_gqa_native_segment_run(&c,workspace,bytes,stream)
+        :ignis_lab_gqa_segment_run(&c,workspace,bytes,stream);
+    if(rc)throw std::runtime_error(std::string("GQA segment builtin: ")+
+        (native?ignis_gqa_native_segment_error():ignis_lab_gqa_segment_error()));
   }
+}
+void segment_gqa_invoke(const ignis_model &m,uint32_t layer,const ignis_segment_profile &p,
+    const std::vector<SegmentBinding> &b,const ignis_segment_candidate_api *api,
+    void *workspace,uint64_t bytes,cudaStream_t stream){
+  gqa_segment_invoke(m,layer,p,b,api,workspace,bytes,stream,false);
+}
+void segment_gqa_native_invoke(const ignis_model &m,uint32_t layer,const ignis_segment_profile &p,
+    const std::vector<SegmentBinding> &b,void *workspace,uint64_t bytes,cudaStream_t stream){
+  LabProfileRange range("op","gqa.native_block");
+  gqa_segment_invoke(m,layer,p,b,nullptr,workspace,bytes,stream,true);
 }
 }

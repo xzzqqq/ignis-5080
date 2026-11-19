@@ -20,6 +20,7 @@
 #include "model_internal.h"
 #include "moe_fixture.h"
 #include "trellis_body.h"
+#include "ignis_gqa_native.h"
 
 #include "core/arena.h"
 #include "core/tensor.h"
@@ -238,18 +239,101 @@ void head_and_epilogues_are_the_op_at_the_bodies_widths() {
   check(refused, "the head refuses logits narrower than its vocab");
 }
 
+// Exercise the complete native chain, whose Q / paired-KV / output projection
+// shapes reuse the same transient TL counters. Attention-only/reset-only tests
+// cannot detect this workspace-lifetime regression.
+void native_gqa_reuses_poisoned_workspace() {
+  constexpr uint32_t hidden=5120, query=6144, kv=1024, tokens=8;
+  Trellis q_proj(701,hidden,2*query,6), k_proj(702,hidden,kv,6),
+      v_proj(703,hidden,kv,6), output_proj(704,query,hidden,6);
+  DeviceBytes input(hidden*tokens*2), input_norm(hidden*2),
+      query_norm(256*2), key_norm(256*2), output(hidden*tokens*2),
+      positions(tokens*4), rope_positions(tokens*4), valid(4), rows(4), tables(4),
+      kc(64*64*4), vc(64*64*4), km(8*64*4), vm(8*64*4),
+      kr(256*4*544*2), vr(256*4*544*2), ring(16*4);
+  upload(input,activations(705,hidden*tokens));
+  // RMS/rope norms use unit-offset semantics: BF16 zero means scale one.
+  MOE_CUDA(cudaMemset(input_norm.p,0,input_norm.bytes));
+  MOE_CUDA(cudaMemset(query_norm.p,0,query_norm.bytes));
+  MOE_CUDA(cudaMemset(key_norm.p,0,key_norm.bytes));
+  upload(positions,std::vector<int32_t>{0,1,2,3,4,5,6,7});
+  upload(rope_positions,std::vector<int32_t>{0,1,2,3,4,5,6,7});
+  upload(rows,std::vector<int32_t>{0});upload(tables,std::vector<int32_t>{0});
+  ignis_gqa_segment_call c{};
+  c.profile={IGNIS_SEGMENT_GQA,tokens,1,hidden,0,64,1,0,1e-6f};
+  c.input=input.p;c.input_norm=input_norm.p;c.query_norm=query_norm.p;c.key_norm=key_norm.p;
+  c.q_proj=q_proj.w;c.k_proj=k_proj.w;c.v_proj=v_proj.w;c.output_proj=output_proj.w;
+  for(int i=0;i<128;++i)c.rope_inv_frequency[i]=std::pow(10000.0,-double(i)/128.0);
+  c.rope_attention_factor=1.0f;c.positions=positions.as<int32_t>();
+  c.rope_positions=rope_positions.as<int32_t>();c.valid_columns=valid.as<int32_t>();
+  c.table_rows=rows.as<int32_t>();c.block_tables=tables.as<int32_t>();
+  c.logical_pages=1;c.physical_pages=1;c.k_pages=kc.p;c.v_pages=vc.p;
+  c.k_meta=km.p;c.v_meta=vm.p;c.residual_k=kr.p;c.residual_v=vr.p;
+  c.ring=ring.as<uint32_t>();c.output=output.p;
+  const auto rc=[&](int32_t status,const char *where,bool builtin=false){
+    if(status){std::fprintf(stderr,"FATAL: %s: %s\n",where,builtin?
+        ignis_lab_gqa_segment_error():ignis_gqa_native_segment_error());std::exit(EXIT_FAILURE);}
+  };
+  rc(ignis_gqa_native_segment_prepare(),"native prepare");
+  rc(ignis_lab_gqa_segment_prepare(),"builtin prepare",true);
+  const uint64_t bytes=ignis_gqa_native_segment_workspace(&c.profile);
+  check(bytes>0,"native full-chain workspace is supported");
+  check(bytes==ignis_lab_gqa_segment_workspace(&c.profile),"builtin queries native workspace");
+  if(!bytes)return;
+  DeviceBytes workspace(bytes);
+  const std::vector<DeviceBytes*> state{&kc,&vc,&km,&vm,&kr,&vr,&ring};
+  const auto reset_state=[&](){
+    for(auto *p:state)MOE_CUDA(cudaMemset(p->p,0,p->bytes));
+    MOE_CUDA(cudaMemset(output.p,0xFF,output.bytes));
+  };
+  const auto snapshot=[&](){
+    std::vector<uint8_t> all;
+    for(auto *p:state){const auto v=download<uint8_t>(p->p,p->bytes);all.insert(all.end(),v.begin(),v.end());}
+    return all;
+  };
+  for(int n:{8,7,0}) {
+    // Prefix masks retain strictly increasing positions on valid columns.
+    auto pos=std::vector<int32_t>(tokens,n? n-1:0);
+    for(int i=0;i<n;++i)pos[i]=i;
+    upload(positions,pos);upload(rope_positions,pos);upload(valid,std::vector<int32_t>{n});
+    reset_state();MOE_CUDA(cudaMemset(workspace.p,0,workspace.bytes));
+    rc(ignis_gqa_native_segment_run(&c,workspace.p,bytes,nullptr),"zero workspace run");
+    MOE_CUDA(cudaDeviceSynchronize());
+    const auto expected=download<uint16_t>(output.p,hidden*tokens);
+    const auto expected_state=snapshot();
+    for(auto v:expected)check(std::isfinite(bf16_to_f32(v)),"native full-chain baseline finite");
+    for(int poison:{0x7F,0xFF})for(bool builtin:{false,true}) {
+      reset_state();MOE_CUDA(cudaMemset(workspace.p,poison,workspace.bytes));
+      const int32_t status=builtin?ignis_lab_gqa_segment_run(&c,workspace.p,bytes,nullptr):
+          ignis_gqa_native_segment_run(&c,workspace.p,bytes,nullptr);
+      rc(status,"poisoned workspace run",builtin);MOE_CUDA(cudaDeviceSynchronize());
+      const std::string label=std::string(builtin?"builtin":"native")+" poisoned workspace valid="+std::to_string(n);
+      check(download<uint16_t>(output.p,hidden*tokens)==expected,label+" exact output");
+      check(snapshot()==expected_state,label+" exact complete physical state");
+    }
+  }
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  const bool native_only = argc == 2 && std::strcmp(argv[1], "--native-gqa-only") == 0;
+  if (argc != 1 && !native_only) {
+    std::fprintf(stderr, "usage: %s [--native-gqa-only]\n", argv[0]);
+    return 2;
+  }
   int device_count = 0;
   if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
     std::fprintf(stderr, "FAIL: no CUDA device\n");
     return 1;
   }
   TL_RC(ignis_trellis_prepare());
-  split_lands_every_half_in_its_head();
-  query_gate_is_the_op_then_the_split();
-  head_and_epilogues_are_the_op_at_the_bodies_widths();
+  native_gqa_reuses_poisoned_workspace();
+  if (!native_only) {
+    split_lands_every_half_in_its_head();
+    query_gate_is_the_op_then_the_split();
+    head_and_epilogues_are_the_op_at_the_bodies_widths();
+  }
   if (g_failed != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failed);
     return 1;

@@ -39,6 +39,8 @@ uint64_t segment_mlp_workspace(const ignis_segment_profile &);
 void segment_##name##_invoke(const ignis_model &,uint32_t layer,const ignis_segment_profile &, \
     const std::vector<SegmentBinding> &,const ignis_segment_candidate_api *,void *workspace,uint64_t bytes,cudaStream_t)
 IGNIS_SEGMENT_INVOKE(gqa);
+void segment_gqa_native_invoke(const ignis_model &,uint32_t,const ignis_segment_profile &,
+    const std::vector<SegmentBinding> &,void *,uint64_t,cudaStream_t);
 IGNIS_SEGMENT_INVOKE(gdn);
 IGNIS_SEGMENT_INVOKE(mlp);
 #undef IGNIS_SEGMENT_INVOKE

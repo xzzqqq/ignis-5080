@@ -20,6 +20,7 @@
 // Style follows the ticket-04 leaf (device.cu): explicit pointers + sizes,
 // int32 return codes (0 = ok, -1 = error), no C++ types across the boundary.
 
+#include "ignis_gqa_native.h"
 #include "ignis_model.h"
 #include "ignis_fp8_linear.h"
 #include "ignis_image_gemm.h"
@@ -584,10 +585,26 @@ std::size_t gqa_layer_scratch_bytes(const ignis_topology &topology, const GqaLay
 
   const ninfer::ops::GqaExecutionEnvelope envelope{
       /*min_visible_keys=*/1, /*max_visible_keys=*/max_context_tokens};
-  bytes += round_up_arena_align(ignis_gqa_attention_capacity_bytes(
-      cache_dtype, envelope, /*batch_size=*/batch, /*min_width=*/1, /*max_width=*/T));
+  const auto original_attention_bytes=ignis_gqa_attention_capacity_bytes(
+      cache_dtype, envelope, /*batch_size=*/batch, /*min_width=*/1, /*max_width=*/T);
+  const auto native_attention_bytes=trellis && hidden==5120 && q_width==6144 &&
+      kv_width==1024 && T>=8 && cache_dtype==ninfer::DType::U8
+      ?ignis_gqa_native_workspace(max_context_tokens):0;
+  bytes += round_up_arena_align(std::max<std::size_t>(original_attention_bytes,native_attention_bytes));
   if (trellis) {
-    return bytes + bf16_bytes(2 * static_cast<int64_t>(q_width) * columns);  // interleaved q | gate
+    bytes += bf16_bytes(2 * static_cast<int64_t>(q_width) * columns);  // interleaved q | gate
+    if(hidden==5120 && q_width==6144 && kv_width==1024 && T>=8 &&
+        cache_dtype==ninfer::DType::U8 && ignis_gqa_native_workspace(max_context_tokens)){
+      // C1 uses the native token mixer even when the reservation also covers
+      // wider lane groups. Its complete private workspace is transient here.
+      const ignis_segment_profile profile{IGNIS_SEGMENT_GQA,8,1,5120,0,
+          max_context_tokens,1,0,1.0e-6f};
+      const auto native=ignis_gqa_native_segment_workspace(&profile);
+      if(!native)throw std::runtime_error("native GQA workspace query failed");
+      bytes=std::max<std::size_t>(bytes,round_up_arena_align(native)+
+          bf16_bytes(int64_t(hidden)*8)+bf16_bytes(int64_t(ffn)*8));
+    }
+    return bytes;
   }
   bytes += round_up_arena_align(ninfer::ops::attn_input_proj_workspace_capacity_bytes(
       w.query_key_gate_value.qtype, w.query_key_gate_value.n, w.query_key_gate_value.k,
@@ -1618,6 +1635,10 @@ LoadSizes plan_load_sizes(const ignis_model &model, const ignis_topology &topolo
                           const LoadOptions &options) {
   const Geometry g = Geometry::from(topology);
   LoadSizes sizes;
+  if(model.is_trellis_body && topology.hidden==5120 && topology.num_q_heads==24 &&
+      options.cache_dtype==ninfer::DType::U8 && ignis_gqa_native_workspace(max_context_tokens) &&
+      ignis_gqa_native_segment_prepare())
+    throw std::runtime_error(std::string("preparing native GQA: ")+ignis_gqa_native_segment_error());
   // GitHub #336: every round line below is the load's lanes wide.
   const uint32_t lanes = options.decode_lanes;
   sizes.lanes = lanes;

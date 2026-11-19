@@ -15,6 +15,7 @@
 
 #include "core/pdl.cuh"
 #include "ops/common/warp.cuh"
+#include "ops/kernel/hq_codec.cuh"
 
 namespace ninfer::ops {
 
@@ -247,13 +248,14 @@ inline __global__ void rope_generic_kernel(const std::int32_t* positions, std::i
 // the staged rounded row, so the fused outputs are bit-identical to rmsnorm -> rope. Mode is
 // Text1D for positions [T] and TextMrope for positions [T,3] (axis = pair % 3), exactly as
 // ops::rope dispatches them.
-template <RopeKernelMode Mode, int QHeads, int KHeads, int Block>
+template <RopeKernelMode Mode, int QHeads, int KHeads, int Block, bool HqQueryTransform = false, int QRowStride = 1>
 __launch_bounds__(Block) __global__ void rope_norm_fused_kernel(
     const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat162* q_weight,
     const __nv_bfloat162* k_weight, float eps, const std::int32_t* positions,
     RopeFrequencies frequencies, __nv_bfloat16* q_out, __nv_bfloat16* k_out,
     std::int32_t tokens) {
     static_assert(Block % kWarpSize == 0);
+    static_assert(QRowStride == 1 || QRowStride == 2);
     constexpr int kHeadDim = 256;
     constexpr int kHalf    = 32;
     constexpr int kPairs   = kHeadDim / 2;
@@ -263,7 +265,14 @@ __launch_bounds__(Block) __global__ void rope_norm_fused_kernel(
     const int lane            = static_cast<int>(threadIdx.x) & (kWarpSize - 1);
     const int warp            = static_cast<int>(threadIdx.x) / kWarpSize;
     constexpr int kWarps      = Block / kWarpSize;
-    __shared__ __nv_bfloat162 stage[kWarps][kHalf];
+    // The normal path needs only the 64 rotated dimensions. The private HQ
+    // path stages the complete BF16 norm/RoPE output before the FWHT reorder.
+    __shared__ __nv_bfloat162 stage[kWarps][HqQueryTransform ? kPairs : kHalf];
+    __shared__ std::int8_t hq_signs[HqQueryTransform ? kHeadDim : 1];
+    if constexpr (HqQueryTransform) {
+        hq_engine_signs_fill(hq_signs);
+        __syncthreads();
+    }
 
     const int rows = (QHeads + KHeads) * tokens;
     for (int row = blockIdx.x * kWarps + warp; row < rows; row += gridDim.x * kWarps) {
@@ -273,7 +282,7 @@ __launch_bounds__(Block) __global__ void rope_norm_fused_kernel(
         const int token = flat / heads;
         const int head  = flat - token * heads;
         const auto* x   = reinterpret_cast<const __nv_bfloat162*>(is_q ? q : k) +
-                        static_cast<std::int64_t>(flat) * kPairs;
+                        static_cast<std::int64_t>(flat) * kPairs * (is_q ? QRowStride : 1);
         const auto* w   = is_q ? q_weight : k_weight;
         auto* out       = reinterpret_cast<__nv_bfloat162*>(is_q ? q_out : k_out) +
                   static_cast<std::int64_t>(flat) * kPairs;
@@ -314,10 +323,34 @@ __launch_bounds__(Block) __global__ void rope_norm_fused_kernel(
         }
         __syncwarp();
 
-        out[lane]                 = stage[warp][lane];
-        out[lane + kWarpSize]     = normed[1];
-        out[lane + 2 * kWarpSize] = normed[2];
-        out[lane + 3 * kWarpSize] = normed[3];
+        if constexpr (HqQueryTransform) {
+            if (is_q) {
+                stage[warp][lane + kWarpSize] = normed[1];
+                stage[warp][lane + 2 * kWarpSize] = normed[2];
+                stage[warp][lane + 3 * kWarpSize] = normed[3];
+                __syncwarp();
+                // This is exactly the BF16 row the unfused RoPE kernel would
+                // store. Reload in the HQ helper's (slot*32+lane) layout.
+                const auto* row_bf16 = reinterpret_cast<const __nv_bfloat16*>(stage[warp]);
+                float reg[8];
+#pragma unroll
+                for (int j = 0; j < 8; ++j) { reg[j] = __bfloat162float(row_bf16[j * 32 + lane]); }
+                hq_fwht256_sign(reg, hq_signs, 0, lane);
+                auto* out_bf16 = reinterpret_cast<__nv_bfloat16*>(out);
+#pragma unroll
+                for (int j = 0; j < 8; ++j) { out_bf16[j * 32 + lane] = __float2bfloat16(reg[j]); }
+            } else {
+                out[lane] = stage[warp][lane];
+                out[lane + kWarpSize] = normed[1];
+                out[lane + 2 * kWarpSize] = normed[2];
+                out[lane + 3 * kWarpSize] = normed[3];
+            }
+        } else {
+            out[lane] = stage[warp][lane];
+            out[lane + kWarpSize] = normed[1];
+            out[lane + 2 * kWarpSize] = normed[2];
+            out[lane + 3 * kWarpSize] = normed[3];
+        }
     }
     pdl::publish();
 }

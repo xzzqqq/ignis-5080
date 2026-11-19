@@ -5,6 +5,7 @@
 
 #include "ops/common/math.h"
 #include "ops/kernel/gqa_attention_decode.cuh"
+#include "ignis_gqa_hq_reduce.cuh"
 #include "core/device.h" // CUDA_CHECK
 #include "core/pdl.cuh"
 
@@ -176,6 +177,28 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
     const dim3 reduce_grid(Geometry::QHeads, div_up(kGqaHeadDim, kDChunk),
                            invocation.width * invocation.batch_size);
     const auto launch_reduce = [&]<bool Int8, bool MultiBatch, bool Masked, bool Offset>() {
+        // Only the HQ27 route owns this fixed 256-thread specialization.
+        // Other geometry/dtypes retain the original generic reducer.
+        if constexpr (Geometry::QHeads == 24 && Geometry::KVHeads == 4 && !Int8) {
+            if (cache.dtype == DType::U8) {
+                CUDA_CHECK(pdl::launch_dependent(
+                    {dim3(Geometry::QHeads, 1, invocation.width * invocation.batch_size),
+                     dim3(kIgnisGqaHqReduceThreads), 0, stream},
+                    ignis_gqa_hq_reduce_kernel<Geometry, kIgnisGqaHqReduceDChunk, Int8,
+                                              MultiBatch, Masked, Offset>,
+                    static_cast<const __nv_bfloat16*>(partial_acc.data),
+                        static_cast<const float*>(partial_m.data),
+                        static_cast<const float*>(partial_l.data),
+                        static_cast<const std::int32_t*>(pos.data),
+                        invocation.valid_columns == nullptr
+                            ? nullptr
+                            : static_cast<const std::int32_t*>(invocation.valid_columns->data),
+                        static_cast<const __nv_bfloat16*>(gate.data),
+                        invocation.width, invocation.full_width, invocation.column_begin,
+                        invocation.batch_size, splits, static_cast<__nv_bfloat16*>(out.data)));
+                return;
+            }
+        }
         CUDA_CHECK(pdl::launch_dependent(
             {reduce_grid, dim3(kReduceBlock), 0, stream},
             gqa_attention_small_t_reduce_output_kernel<Geometry, kDChunk, Int8, MultiBatch, Masked,

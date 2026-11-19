@@ -16,6 +16,8 @@ HOT = {'kernel/src/' + x for x in ('trellis_linear.cu', 'trellis_linear_decode.c
 # runtime and unrelated vendor headers still require a new pinned baseline.
 HOT |= {'kernel/'+name for name in (
     'src/lab_gqa_candidate.cu', 'src/lab_gqa_candidate_policy.cuh', 'src/gqa_segment_workspace.cuh',
+    'src/gqa_hq_decode_impl.cuh', 'src/gqa_hq_decode_policy.cuh',
+    'src/gqa_token_mixer_impl.cuh',
     'src/lab_mlp_segment.cu', 'src/lab_mlp_segment_policy.cuh', 'src/lab_gqa_segment.cu', 'src/lab_gdn_segment.cu',
     'include/ignis_gqa_hq_reduce.cuh',
     'vendor/src/ops/kernel/gqa_attention_decode.cuh',
