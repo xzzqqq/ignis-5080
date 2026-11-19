@@ -144,11 +144,21 @@ Internal intermediates are available only when the loaded native implementation
 provides diagnostic taps. The export manifest reports their availability and a
 reason when unsupported. Tap tensors describe the actual candidate execution;
 captured boundary inputs do not substitute for unavailable internal tensors.
-The default GQA block candidate exposes `normalized_input`, separate `query`,
+The GQA provider shares its workspace layout with the producing implementation.
+The split-Q/gate GQA block candidate exposes `normalized_input`, separate `query`,
 `gate`, `key`, `value`, `rotated_query`, `rotated_key`, `attention` and
 `interleaved_query_gate` taps. Raw Q/K and post-normalization/RoPE Q/K are retained
 separately. Tensor shapes follow native `ne[0]`-contiguous order; query/gate and
 rotated query use `[256,24,8,1]`, key/value and rotated key use `[256,4,8,1]`.
+The optimized Gate2/HQ implementation instead exposes seven retained tensors:
+`normalized_input`, `key`, `value`, `hq_transformed_query`, `rotated_key`,
+`attention` and `interleaved_query_gate`. Its separate query/gate allocations are
+unused and must not be exported. The combined projection has shape
+`[512,24,8,1]`, with each 512-element row containing 256 query then 256 gate
+values. `hq_transformed_query` has shape `[256,24,8,1]` and includes the HQ FWHT
+after BF16 normalization and RoPE; it cannot be compared as a plain
+`rotated_query`. The implementation selects its retention contract next to its
+launch chain, including when the Lab builtin wrapper forwards to the native chain.
 An internal buffer may be reused between stages, so its named stage and layout
 matter when comparing tensors. Export is a diagnostic replay with extra copies;
 its execution is not a latency measurement.
