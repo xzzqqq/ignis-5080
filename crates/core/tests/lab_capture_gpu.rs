@@ -10,6 +10,7 @@ use ignis_core::model_load::{load_qwen38_27b_with_decode_lanes,Model};
 use ignis_core::seq::{SeqPool,SeqPoolBudget};
 use ignis_core::step::{capture_decode_graphs,prefill_program_sampled,decode_program_verify_runs,SamplingParams,VerifyLane};
 use serde_json::{json,Value};
+use sha2::{Digest,Sha256};
 
 fn observe(model:&Model,pool:&SeqPool)->(Vec<u32>,Vec<i32>) {
     let mut seq=pool.alloc(128).unwrap();let mut logits=vec![0f32;248320];
@@ -22,6 +23,29 @@ fn observe(model:&Model,pool:&SeqPool)->(Vec<u32>,Vec<i32>) {
     (logits.into_iter().map(f32::to_bits).collect(),run.tokens)
 }
 
+fn verify_tensor_export(result:&Value,gqa:bool){
+    let manifest:Value=serde_json::from_slice(&std::fs::read(result["export"]["manifest"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(manifest["intermediate_taps"]["available"],true);
+    let root=Path::new(result["export"]["path"].as_str().unwrap());
+    let tensors=manifest["tensors"].as_array().unwrap();
+    for name in ["normalized_input",if gqa {"interleaved_query_gate"} else {"swiglu"}]{
+        assert!(tensors.iter().any(|t|t["name"]==name && t["purpose"]=="candidate_intermediate"),"missing {name}");
+    }
+    assert!(tensors.iter().any(|t|t["purpose"]=="model_weight_encoded"));
+    assert!(tensors.iter().filter(|t|t["purpose"]=="model_weight_scale").all(|t|t["dtype"]=="f16"));
+    let candidate=std::fs::read(root.join("candidate.bin")).unwrap();
+    let bytes=|name:&str|{
+        let t=tensors.iter().find(|t|t["name"]==name && t["purpose"]=="candidate_intermediate").unwrap();
+        let start=t["offset"].as_u64().unwrap() as usize;let count=t["bytes"].as_u64().unwrap() as usize;
+        let value=&candidate[start..start+count];assert_eq!(t["sha256"],format!("{:x}",Sha256::digest(value)));value
+    };
+    if gqa {
+        let packed=bytes("interleaved_query_gate");let q=bytes("query");let gate=bytes("gate");
+        for row in 0..24*8 {assert_eq!(&packed[row*1024..row*1024+512],&q[row*512..(row+1)*512]);
+            assert_eq!(&packed[row*1024+512..(row+1)*1024],&gate[row*512..(row+1)*512]);}
+    }
+}
+
 #[test]
 #[ignore = "exclusive RTX 5080; IGNIS_MODEL_ARTIFACT and IGNIS_TRELLIS_FAULT_DIR required"]
 fn recorded_calls_replay_with_padding_add_and_replaced_code() {
@@ -32,7 +56,7 @@ fn recorded_calls_replay_with_padding_add_and_replaced_code() {
     let reader=Reader::open(Path::new(&artifact_path)).unwrap();
     let (plan,handles)=bind_model_scope_27b(&reader,Some(DraftModule::Dflash2)).unwrap();
     let mut device=CudaDevice::create(0).unwrap();
-    let artifact=materialize(&reader,&plan,&mut device,None).unwrap();
+    let mut artifact=materialize(&reader,&plan,&mut device,None).unwrap();
     let spec=Speculation::new(SpeculativeBackend::Dflash2,7).unwrap();
     let mut model=load_qwen38_27b_with_decode_lanes(&reader,&artifact,&handles,128,128,KvFormat::Bf16,
         Some(spec),None,RopeScaling::NONE,PrefillAttention::default(),2).unwrap();
@@ -57,6 +81,19 @@ fn recorded_calls_replay_with_padding_add_and_replaced_code() {
     }
     assert!(records.iter().any(|r|r["phase"]==0 && r["tokens"]==4));
     assert!(records.iter().any(|r|r["phase"]==2 && r["tokens"]==8));
+    // Exercise native bounded legacy graph copies after skipping all earlier
+    // eager prefill records, preserving the complete request trajectory.
+    let target=records.iter().find(|r|r["phase"]==2 && r["tokens"]==8).unwrap();
+    let small=dir.join("selected-legacy");std::fs::create_dir(&small).unwrap();
+    lab_trace::start_selected(&mut model,&mut pool,&small,1<<30,target["bytes"].as_u64().unwrap(),selection,&[],
+        target["source_record"].as_u64().unwrap(),1).unwrap();
+    assert_eq!(observe(&model,&pool),expected,"bounded legacy recording changed full request");
+    lab_trace::stop(&mut model,&mut pool).unwrap();
+    let rows:Vec<Value>=std::fs::read_to_string(small.join("records.jsonl")).unwrap().lines().map(|l|serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(rows.len(),1);assert_eq!(rows[0]["source_record"],target["source_record"]);
+    let original=std::fs::read(dir.join("data.bin")).unwrap();
+    let start=target["offset"].as_u64().unwrap() as usize;let size=target["bytes"].as_u64().unwrap() as usize;
+    assert_eq!(std::fs::read(small.join("data.bin")).unwrap(),original[start..start+size]);
     for r in &records {
         let result=lab_trace::replay_with_check(&mut model,&dir.join("data.bin"),r,2,3,lab_trace::ReplayCheck::EveryExecution).unwrap();
         assert_eq!(result["passed"],true,"record {}: {result}",r["id"]);
@@ -72,6 +109,17 @@ fn recorded_calls_replay_with_padding_add_and_replaced_code() {
     let nonzero=records.iter().find(|r|r["weight"]["name"]=="layer.0.gate").unwrap();
     assert_eq!(lab_trace::replay(&mut model,&dir.join("data.bin"),nonzero,1,1).unwrap()["passed"],false,
         "local replay bypassed the candidate");
+    let actual=lab_trace::replay_with_export(&mut model,&dir.join("data.bin"),nonzero,0,1,
+        lab_trace::ReplayCheck::Exploration,Some(&dir.join("zero-candidate-export"))).unwrap();
+    let manifest:Value=serde_json::from_slice(&std::fs::read(actual["export"]["manifest"].as_str().unwrap()).unwrap()).unwrap();
+    let tensor=manifest["tensors"].as_array().unwrap().iter().find(|t|t["purpose"]=="candidate_output").unwrap();
+    let payload=std::fs::read(Path::new(actual["export"]["path"].as_str().unwrap()).join("candidate.bin")).unwrap();
+    let offset=tensor["offset"].as_u64().unwrap() as usize;let size=tensor["bytes"].as_u64().unwrap() as usize;
+    assert!(payload[offset..offset+size].iter().all(|&b|b==0),"linear export did not contain actual zero-candidate output");
+    let reference=manifest["tensors"].as_array().unwrap().iter().find(|t|t["purpose"]=="recorded_reference").unwrap();
+    let payload=std::fs::read(Path::new(actual["export"]["path"].as_str().unwrap()).join("capture.bin")).unwrap();
+    let offset=reference["offset"].as_u64().unwrap() as usize;
+    assert!(payload[offset..offset+size].iter().any(|&b|b!=0),"test reference was already zero");
     unsafe{kernel_lab::reload(&mut model,&mut pool,None)}.unwrap();
     assert_eq!(observe(&model,&pool),expected);
     assert_eq!(lab_trace::replay(&mut model,&dir.join("data.bin"),nonzero,1,1).unwrap()["passed"],true);
@@ -138,6 +186,7 @@ fn recorded_calls_replay_with_padding_add_and_replaced_code() {
     assert!(filtered_records.iter().all(|r|r["tokens"]==4));
     assert!(filtered_records.iter().any(|r|r["weight"]["name"]=="layer.0.gate"));
     std::fs::remove_dir_all(&dir).unwrap();
+    drop(pool);drop(model);artifact.release_arena(&mut device).unwrap();
 }
 
 /// Capture C1 verify calls while the resident pool and captured engine support
@@ -151,7 +200,7 @@ fn hq_attention_recording_restores_pages_residual_ring_and_masks() {
     let reader=Reader::open(Path::new(&artifact_path)).unwrap();
     let (plan,handles)=bind_model_scope_27b(&reader,Some(DraftModule::Dflash2)).unwrap();
     let mut device=CudaDevice::create(0).unwrap();
-    let artifact=materialize(&reader,&plan,&mut device,None).unwrap();
+    let mut artifact=materialize(&reader,&plan,&mut device,None).unwrap();
     let spec=Speculation::new(SpeculativeBackend::Dflash2,7).unwrap();
     let mut model=load_qwen38_27b_with_decode_lanes(&reader,&artifact,&handles,128,1024,KvFormat::HqE8_2b,
         Some(spec),None,RopeScaling::NONE,PrefillAttention::default(),2).unwrap();
@@ -241,6 +290,7 @@ fn hq_attention_recording_restores_pages_residual_ring_and_masks() {
     assert!(lab_trace::replay(&mut model,&modified,&probe,0,1).unwrap_err().contains("truncated"));
     assert_eq!(observe_hq(&model,&pool),expected,"isolated replay modified resident sequence state");
     std::fs::remove_dir_all(&dir).unwrap();
+    drop(pool);drop(model);artifact.release_arena(&mut device).unwrap();
 }
 
 #[test]
@@ -254,7 +304,7 @@ fn finite_segments_capture_replay_and_preserve_gdn_commit_liveouts() {
     std::fs::create_dir(&dir).unwrap();
     let reader=Reader::open(Path::new(&path)).unwrap();
     let (plan,handles)=bind_model_scope_27b(&reader,Some(DraftModule::Dflash2)).unwrap();
-    let mut device=CudaDevice::create(0).unwrap();let artifact=materialize(&reader,&plan,&mut device,None).unwrap();
+    let mut device=CudaDevice::create(0).unwrap();let mut artifact=materialize(&reader,&plan,&mut device,None).unwrap();
     let spec=Speculation::new(SpeculativeBackend::Dflash2,7).unwrap();
     let mut model=load_qwen38_27b_with_decode_lanes(&reader,&artifact,&handles,128,1024,kv,
         Some(spec),None,RopeScaling::NONE,PrefillAttention::default(),2).unwrap();
@@ -287,7 +337,35 @@ fn finite_segments_capture_replay_and_preserve_gdn_commit_liveouts() {
         assert_eq!(result["executions_checked"],5);
         assert!(!result["outputs"].as_array().unwrap().is_empty());
     }
+    // Execution ordinals must survive the map's different flush order: GDN
+    // executes before its MLP, but segment kind sorting flushes the MLP first.
+    assert_eq!(records.iter().find(|r|r["profile"]["kind"]==3).unwrap()["source_record"],0);
+    assert_eq!(records.iter().find(|r|r["profile"]["kind"]==1).unwrap()["source_record"],1);
+    let selected=records.iter().find(|r|r["profile"]["kind"]==if hq {2}else{1}).unwrap();
+    let small=dir.join("small");std::fs::create_dir(&small).unwrap();
+    lab_trace::start_selected(&mut model,&mut pool,&small,1<<30,selected["bytes"].as_u64().unwrap(),
+        if hq {"layer.0.mlp_block,layer.3.gqa_block,layer.0.gdn_block"} else {"layer.0.mlp_block,layer.0.gdn_block"},&[8],
+        selected["source_record"].as_u64().unwrap(),1).unwrap();
+    assert_eq!(run(&model,&pool),expected,"bounded capture changed full request math/state");
+    lab_trace::stop(&mut model,&mut pool).unwrap();
+    let rows:Vec<Value>=std::fs::read_to_string(small.join("records.jsonl")).unwrap().lines().map(|l|serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(rows.len(),1);assert_eq!(rows[0]["source_record"],selected["source_record"]);assert_eq!(rows[0]["id"],selected["source_record"]);
+    let all=std::fs::read(dir.join("data.bin")).unwrap();let start=selected["offset"].as_u64().unwrap() as usize;let size=selected["bytes"].as_u64().unwrap() as usize;
+    assert_eq!(std::fs::read(small.join("data.bin")).unwrap(),all[start..start+size]);
+    let exported=lab_trace::replay_with_export(&mut model,&small.join("data.bin"),&rows[0],0,1,lab_trace::ReplayCheck::Exploration,Some(&small.join("builtin-export"))).unwrap();
+    verify_tensor_export(&exported,hq);
     let gdn=records.iter().find(|r|r["profile"]["kind"]==3).unwrap();
+    let gdn_export=lab_trace::replay_with_export(&mut model,&dir.join("data.bin"),gdn,0,1,
+        lab_trace::ReplayCheck::Exploration,Some(&small.join("gdn-export"))).unwrap();
+    let manifest:Value=serde_json::from_slice(&std::fs::read(gdn_export["export"]["manifest"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(manifest["intermediate_taps"]["available"],true);
+    for geometry in manifest["weights"].as_array().unwrap().iter().filter(|w|w["logical_layout"]=="row_major"){
+        let tensor=manifest["tensors"].as_array().unwrap().iter().find(|t|t["name"]==geometry["weight_geometry"]).unwrap();
+        let mut ne=geometry["logical_shape"].as_array().unwrap().iter().rev().cloned().collect::<Vec<_>>();
+        while ne.len()<4 {ne.push(json!(1));}assert_eq!(tensor["shape"],json!(ne),"dense export changed logical/storage axis convention");
+    }
+    let ab=manifest["tensors"].as_array().unwrap().iter().find(|t|t["name"]=="layer.0.a_b_projection").unwrap();
+    assert_eq!(ab["shape"],json!([5120,96,1,1]));
     for name in ["conv_record","key_record","value_record","gate_record"]{
         let binding=gdn["bindings"].as_array().unwrap().iter().find(|b|b["name"]==name).unwrap();
         assert_eq!(binding["flags"],6,"commit liveout lost mutable preimage/numerical role");
@@ -299,8 +377,35 @@ fn finite_segments_capture_replay_and_preserve_gdn_commit_liveouts() {
             assert_eq!(result["passed"],true,"default segment candidate: {result}");
             assert_eq!(result["candidate_applied"],true);
         }
+        let exported=lab_trace::replay_with_export(&mut model,&small.join("data.bin"),&rows[0],0,1,lab_trace::ReplayCheck::Exploration,Some(&small.join("candidate-export"))).unwrap();
+        assert_eq!(exported["candidate_applied"],true);verify_tensor_export(&exported,hq);
         assert_eq!(run(&model,&pool),expected,"default segments changed forward");
         unsafe{kernel_lab::reload(&mut model,&mut pool,None)}.unwrap();
+    }
+    if hq {
+        if let Ok(path)=std::env::var("IGNIS_SEGMENT_TAP_FAULT_CANDIDATE"){
+            unsafe{kernel_lab::reload(&mut model,&mut pool,Some(Path::new(&path)))}.unwrap();
+            let fault=lab_trace::replay_with_export(&mut model,&small.join("data.bin"),&rows[0],0,1,lab_trace::ReplayCheck::Exploration,Some(&small.join("tap-fault-export"))).unwrap();
+            assert_eq!(fault["candidate_applied"],true);verify_tensor_export(&fault,true);
+            let raw=|result:&Value|{
+                let manifest:Value=serde_json::from_slice(&std::fs::read(result["export"]["manifest"].as_str().unwrap()).unwrap()).unwrap();
+                let tensor=manifest["tensors"].as_array().unwrap().iter().find(|t|t["name"]=="interleaved_query_gate").unwrap();
+                let bytes=std::fs::read(Path::new(result["export"]["path"].as_str().unwrap()).join("candidate.bin")).unwrap();
+                let offset=tensor["offset"].as_u64().unwrap() as usize;u16::from_le_bytes(bytes[offset..offset+2].try_into().unwrap())
+            };
+            assert_eq!(raw(&fault),raw(&exported)^1,"tap export reconstructed builtin/stale reference instead of actual changed candidate Q");
+            unsafe{kernel_lab::reload(&mut model,&mut pool,None)}.unwrap();
+        }
+        if let Ok(path)=std::env::var("IGNIS_SEGMENT_OPAQUE_CANDIDATE"){
+            unsafe{kernel_lab::reload(&mut model,&mut pool,Some(Path::new(&path)))}.unwrap();
+            let opaque=lab_trace::replay_with_export(&mut model,&small.join("data.bin"),&rows[0],0,1,lab_trace::ReplayCheck::Exploration,Some(&small.join("opaque-export"))).unwrap();
+            assert_eq!(opaque["candidate_applied"],true);
+            let manifest:Value=serde_json::from_slice(&std::fs::read(opaque["export"]["manifest"].as_str().unwrap()).unwrap()).unwrap();
+            assert_eq!(manifest["intermediate_taps"]["available"],false);
+            assert!(!manifest["tensors"].as_array().unwrap().iter().any(|t|t["purpose"]=="candidate_intermediate"));
+            assert!(manifest["tensors"].as_array().unwrap().iter().any(|t|t["purpose"]=="candidate_output"));
+            unsafe{kernel_lab::reload(&mut model,&mut pool,None)}.unwrap();
+        }
     }
     assert_eq!(run(&model,&pool),expected,"isolated segment replay changed resident state");
     if hq {
@@ -336,4 +441,5 @@ fn finite_segments_capture_replay_and_preserve_gdn_commit_liveouts() {
     let mut invalid=gdn.clone();invalid["profile"]["tokens"]=json!(7);
     assert!(lab_trace::replay(&mut model,&dir.join("data.bin"),&invalid,0,1).is_err());
     std::fs::remove_dir_all(dir).unwrap();
+    drop(pool);drop(model);artifact.release_arena(&mut device).unwrap();
 }

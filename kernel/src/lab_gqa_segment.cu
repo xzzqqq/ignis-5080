@@ -1,6 +1,7 @@
 // Default finite GQA segment. Compiled into both the host baseline and each
 // immutable candidate DSO; all launches and intermediate layouts belong here.
 #include "ignis_gqa_segment.h"
+#include "gqa_segment_workspace.cuh"
 #include "core/pdl.cuh"
 #include "ops/kernel/rmsnorm.cuh"
 #include "ops/kernel/rope.cuh"
@@ -28,7 +29,11 @@ void segment_gqa_builtin_attention(const ignis_gqa_segment_call &,const void *,c
 
 namespace {
 thread_local std::string segment_error;
-constexpr uint32_t kHidden=5120,kTokens=8,kQuery=6144,kKv=1024;
+namespace gqa_workspace=ignis_gqa_segment_workspace;
+constexpr uint32_t kHidden=gqa_workspace::hidden,kTokens=gqa_workspace::tokens,
+    kQuery=gqa_workspace::query,kKv=gqa_workspace::kv;
+constexpr gqa_workspace::Layout tensor_layout{};
+constexpr auto retained_tensors=gqa_workspace::Retained::SplitRope;
 uint64_t aligned(uint64_t n){return (n+255)&~uint64_t(255);}
 bool supported(const ignis_segment_profile *p){
   return p && p->kind==IGNIS_SEGMENT_GQA && p->tokens==kTokens && p->batch==1 &&
@@ -41,7 +46,6 @@ uint64_t linear_bytes(){
       ignis_trellis_workspace_bytes(kHidden,kKv,1,kTokens),
       ignis_trellis_workspace_bytes(kQuery,kHidden,1,kTokens)});
 }
-uint64_t tensor_bytes(uint32_t width){return aligned(uint64_t(width)*kTokens*2);}
 uint64_t attention_bytes(uint32_t max_keys){
 #ifdef IGNIS_SEGMENT_BUILTIN
   return ignis::segment_gqa_builtin_attention_workspace(max_keys);
@@ -50,8 +54,7 @@ uint64_t attention_bytes(uint32_t max_keys){
 #endif
 }
 uint64_t intermediate_bytes(){
-  // normalized, Q, gate, K, V, rotated Q/K, attention, interleaved Q/gate.
-  return tensor_bytes(kHidden)+6*tensor_bytes(kQuery)+3*tensor_bytes(kKv);
+  return tensor_layout.bytes;
 }
 void check(cudaError_t rc){if(rc!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(rc));}
 void check_linear(int32_t rc){if(rc)throw std::runtime_error(ignis_trellis_last_error());}
@@ -95,10 +98,11 @@ extern "C" int32_t ignis_lab_gqa_segment_run(const ignis_gqa_segment_call *c,
     validate_weight(c->q_proj,kHidden,2*kQuery);validate_weight(c->k_proj,kHidden,kKv);
     validate_weight(c->v_proj,kHidden,kKv);validate_weight(c->output_proj,kQuery,kHidden);
     const auto stream=static_cast<cudaStream_t>(raw_stream);
-    auto *cursor=static_cast<char *>(workspace);
-    auto take=[&](uint32_t width){auto *p=cursor;cursor+=tensor_bytes(width);return p;};
-    void *normalized=take(kHidden),*q=take(kQuery),*gate=take(kQuery),*k=take(kKv),*v=take(kKv);
-    void *rq=take(kQuery),*rk=take(kKv),*attention=take(kQuery),*interleaved=take(2*kQuery);
+    auto at=[&](uint64_t offset){return tensor_layout.at(workspace,offset);};
+    void *normalized=at(tensor_layout.normalized),*q=at(tensor_layout.q),*gate=at(tensor_layout.gate);
+    void *k=at(tensor_layout.k),*v=at(tensor_layout.v),*rq=at(tensor_layout.rq),*rk=at(tensor_layout.rk);
+    void *attention=at(tensor_layout.attention),*interleaved=at(tensor_layout.interleaved);
+    auto *cursor=static_cast<char *>(workspace)+tensor_layout.bytes;
     const ignis_trellis_workspace trellis{cursor,linear_bytes()};cursor+=aligned(trellis.bytes);
     const auto attention_capacity=attention_bytes(c->profile.max_keys);
     check(ninfer::pdl::launch_dependent({dim3(kTokens),dim3(512),0,stream},
@@ -138,4 +142,12 @@ extern "C" int32_t ignis_lab_gqa_segment_run(const ignis_gqa_segment_call *c,
         IGNIS_TRELLIS_ADD,&trellis,stream));
     check(cudaGetLastError());return 0;
   }catch(const std::exception &e){segment_error=e.what();return -1;}
+}
+
+// Optional retained-workspace diagnostics; independent from the candidate ABI.
+extern "C" IGNIS_LAB_DIAGNOSTIC_EXPORT int32_t ignis_lab_gqa_segment_tensors_v1(const ignis_segment_profile *p,
+    const void *workspace,uint64_t bytes,ignis_lab_segment_tensor *out,uint32_t capacity){
+  const auto required=ignis_lab_gqa_segment_workspace(p);
+  if(!required || bytes<required)return -1;
+  return gqa_workspace::tensors(tensor_layout,retained_tensors,workspace,bytes,out,capacity);
 }

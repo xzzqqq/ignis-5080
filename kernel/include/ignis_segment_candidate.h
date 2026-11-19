@@ -31,6 +31,27 @@ struct ignis_segment_candidate_api {
   const char *(*last_error)(void);
 };
 const struct ignis_segment_candidate_api *ignis_segment_candidate_v1(void);
+/* Optional offline replay diagnostics. Called AFTER a completed run, outside
+ * timing and graph capture. Describe retained contiguous workspace tensors of
+ * THIS implementation; never run a different chain to reconstruct them. A
+ * fused implementation may omit these symbols or return zero. Names are fixed
+ * ASCII identifiers. dtype: BF16=0,U8=1,I32=2,FP32=3; ne[0] is contiguous.
+ * Providers must track their implementation's workspace layout and lifetimes.
+ * Legacy candidate ABI/layout is unchanged. No pointers are persisted on disk.
+ */
+struct ignis_lab_segment_tensor {
+  const char *name; const void *data; uint64_t bytes; uint32_t dtype; int32_t ne[4];
+};
+typedef int32_t (*ignis_lab_segment_tensors_fn)(const struct ignis_segment_profile *,
+    const void *,uint64_t,struct ignis_lab_segment_tensor *,uint32_t);
+#if defined(__GNUC__)
+#define IGNIS_LAB_DIAGNOSTIC_EXPORT __attribute__((visibility("default")))
+#else
+#define IGNIS_LAB_DIAGNOSTIC_EXPORT
+#endif
+IGNIS_LAB_DIAGNOSTIC_EXPORT int32_t ignis_lab_mlp_segment_tensors_v1(const struct ignis_segment_profile *,const void *,uint64_t,struct ignis_lab_segment_tensor *,uint32_t);
+IGNIS_LAB_DIAGNOSTIC_EXPORT int32_t ignis_lab_gqa_segment_tensors_v1(const struct ignis_segment_profile *,const void *,uint64_t,struct ignis_lab_segment_tensor *,uint32_t);
+IGNIS_LAB_DIAGNOSTIC_EXPORT int32_t ignis_lab_gdn_segment_tensors_v1(const struct ignis_segment_profile *,const void *,uint64_t,struct ignis_lab_segment_tensor *,uint32_t);
 #ifdef __cplusplus
 }
 #endif

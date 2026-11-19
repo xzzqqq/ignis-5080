@@ -40,7 +40,12 @@ Create an ignored local file, for example `.scratch/lab-settings.json`:
 ```
 
 Paths refer to the remote host. `data_dir` holds pinned baselines, source copies,
-candidates, recordings and results. `build_root` holds the Cargo/CMake cache.
+recordings and results. `build_root` holds Cargo/CMake and candidate build
+caches plus compiler temporary files; it defaults to `data_dir/build`. Choose a
+persistent disk, preferably SSD. Setup resolves the actual paths and rejects
+Linux tmpfs/ramfs build directories, temporary directories and native build
+symlink targets. Candidate libraries now live under `build_root/candidates`;
+existing named candidates retain their immutable recorded paths.
 The context must fit each prepared prompt and its output budget. `benchmark`
 fixes the request used by recording and quick forward. The default is
 `astropy__astropy-12907`; alternatives are `django__django-10097` and
@@ -51,7 +56,7 @@ for functional checks; these runs cannot establish full-workload performance.
 
 Setup fixes model, runtime settings and request, without requiring one permanent
 operator scope. Use repeatable `--operator` and `--tokens-per-call` selectors on
-replay, compare and profile. Token count means rows in an individual operator
+replay, compare, profile and export. Token count means rows in an individual operator
 call, rather than the request's output budget. Selectors and actual coverage are
 persisted with each result. Omitted selectors select all supported operators and
 all token shapes; choose an explicit scope for quick feedback.
@@ -75,6 +80,88 @@ are rebound in the resident model by stable identity; GPU pointers are never
 persisted. Graph capture copies tensors at actual execution, then removes
 recording nodes and rebuilds clean graphs. Incompatible, corrupted or partial
 recordings are not reused.
+
+## Sample records and export tensors
+
+`--record-start N --record-limit M` requests an explicit record window. Start is
+zero based; limit zero means all remaining calls. Both values must fit an
+unsigned 64-bit integer. On a new capture, the window
+counts actual device execution calls after operator/token filtering. Selection
+happens before bulk device-to-host copies and before writing a record. The fixed
+request still executes; the limit bounds recording work rather than generation.
+The limit caps transferred/written record payload, not all pinned staging RAM.
+Reusable graph buffers are still allocated for discovered matching graph slots.
+Narrow operator/token selectors when pinned storage is constrained; native
+pinned-memory and disk budgets remain enforced.
+
+A limited capture has its own immutable scope/cache key, including both window
+values. It is complete for that window and never covers an unbounded scope.
+A compatible full recording can also supply a sample without recording again.
+Use `--corpus /absolute/remote/shard` to pin an existing corpus explicitly. Its
+model/settings/baseline identity and completion marker must match the resident
+session. In an existing corpus, start/limit slice the operator/token-matching
+records ordered by `source_record` (actual execution ordinal), falling back to
+`id` for legacy records; IDs remain unchanged. File/manifest order can differ
+from execution order. To repeat exactly a sample, reuse its shard and matching
+execution-order window.
+A missing or incompatible explicit corpus fails instead of triggering capture.
+
+Replay/compare/profile/export results include `coverage.mode` (`sample` or
+`full`), selected IDs, original source ordinals, capture scope and record counts.
+Here `full` refers to the requested operator/token scope, not model acceptance.
+Compare resolves the selection once and uses those same IDs for baseline,
+candidate, diagnostic and timing legs. Every explicitly sampled call is timed, including legacy operators with the same
+shape. Stateful GQA and block calls also keep each execution as a representative
+in full scopes, including distinct windows and masks.
+
+New records store a SHA-256 for each contiguous `data.bin` slice. Publication
+computes the complete-file and record hashes in one bounded streaming pass.
+Sample reuse always verifies the small `records.jsonl` file against the corpus
+manifest, then verifies just selected slices; unchanged resident-session proofs
+are reused. This verifies the selected inputs/reference/state, not unselected
+data bytes. Coverage reports `integrity=selected_ranges` for that path. Full-scope
+commands retain complete-file verification, and legacy corpora without record
+hashes fall back to complete-file verification even for a sample. File signature
+changes invalidate resident verification caches.
+
+```sh
+python3 scripts/lab.py replay --candidate builtin --operator layer.3.gqa_block --tokens-per-call 8 --record-limit 1
+python3 scripts/lab.py compare --baseline before --candidate current --corpus /disk/lab/corpus/shard --record-start 4 --record-limit 1
+python3 scripts/lab.py export --candidate current --corpus /disk/lab/corpus/shard --record-start 4 --record-limit 1
+```
+
+`export` requires `--record-limit 1` and exactly one resulting record. It reloads
+the requested candidate and replays that record with immutable inputs before
+writing the candidate's actual outputs and post-state. The native manifest links
+binary tensors by file/byte range, dtype, shape, purpose and SHA-256. It includes
+recorded inputs, frozen reference outputs/state, actual candidate outputs/state,
+and the exact encoded model weights/scales used by replay. The outer manifest
+adds the corpus identity and manifest hash, original record, candidate library
+identity and source hashes. The command prints the remote artifact directory and
+manifest paths; the files remain on the remote host with other Lab results.
+
+Internal intermediates are available only when the loaded native implementation
+provides diagnostic taps. The export manifest reports their availability and a
+reason when unsupported. Tap tensors describe the actual candidate execution;
+captured boundary inputs do not substitute for unavailable internal tensors.
+The GQA provider shares its workspace layout with the producing implementation.
+The split-Q/gate GQA block candidate exposes `normalized_input`, separate `query`,
+`gate`, `key`, `value`, `rotated_query`, `rotated_key`, `attention` and
+`interleaved_query_gate` taps. Raw Q/K and post-normalization/RoPE Q/K are retained
+separately. Tensor shapes follow native `ne[0]`-contiguous order; query/gate and
+rotated query use `[256,24,8,1]`, key/value and rotated key use `[256,4,8,1]`.
+The optimized Gate2/HQ implementation instead exposes seven retained tensors:
+`normalized_input`, `key`, `value`, `hq_transformed_query`, `rotated_key`,
+`attention` and `interleaved_query_gate`. Its separate query/gate allocations are
+unused and must not be exported. The combined projection has shape
+`[512,24,8,1]`, with each 512-element row containing 256 query then 256 gate
+values. `hq_transformed_query` has shape `[256,24,8,1]` and includes the HQ FWHT
+after BF16 normalization and RoPE; it cannot be compared as a plain
+`rotated_query`. The implementation selects its retention contract next to its
+launch chain, including when the Lab builtin wrapper forwards to the native chain.
+An internal buffer may be reused between stages, so its named stage and layout
+matter when comparing tensors. Export is a diagnostic replay with extra copies;
+its execution is not a latency measurement.
 
 ## Replay and candidates
 

@@ -1,7 +1,8 @@
 //! Experimental persistent Trellis samples. No GPU addresses cross the file boundary.
 #![cfg(feature = "cuda")]
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use serde_json::{json, Value};
 use crate::model_load::{Model, ffi::IgnisModel};
@@ -44,8 +45,8 @@ struct SegmentProfile {kind:u32,tokens:u32,batch:u32,hidden:u32,intermediate:u32
 struct SegmentView {name:*const c_char,flags:u32,dtype:u32,present:u32,shape:[i32;4]}
 
 unsafe extern "C" {
-    fn ignis_lab_capture_start_filtered(m:*mut IgnisModel,p:*mut IgnisSeqPool,dir:*const c_char,pin:u64,disk:u64,
-        names:*const c_char,token_filter:*const u32,token_filter_count:u32)->i32;
+    fn ignis_lab_capture_start_selected(m:*mut IgnisModel,p:*mut IgnisSeqPool,dir:*const c_char,pin:u64,disk:u64,
+        names:*const c_char,token_filter:*const u32,token_filter_count:u32,record_start:u64,record_limit:u64)->i32;
     fn ignis_lab_capture_stop(m:*mut IgnisModel,p:*mut IgnisSeqPool)->i32;
     fn ignis_lab_trace_context(m:*mut IgnisModel,request:u32,phase:u32,position:u64)->i32;
     fn ignis_lab_trace_flush(m:*mut IgnisModel)->i32;
@@ -57,6 +58,7 @@ unsafe extern "C" {
     fn ignis_lab_capture_minimum_filtered(m:*mut IgnisModel,names:*const c_char,tokens:u64,requests:u64,
         token_filter:*const u32,token_filter_count:u32,bytes:*mut u64)->i32;
     fn ignis_lab_trace_error()->*const c_char;
+    fn ignis_lab_export_directory(directory:*const c_char)->i32;
     fn ignis_lab_gqa_implementation(m:*mut IgnisModel)->*const c_char;
     fn ignis_lab_gqa_candidate_applied(m:*mut IgnisModel)->i32;
     fn ignis_lab_segment_implementation(m:*mut IgnisModel)->*const c_char;
@@ -79,10 +81,15 @@ pub fn start(model:&mut Model,pool:&mut SeqPool,path:&Path,pin:u64,disk:u64,name
     start_filtered(model,pool,path,pin,disk,names,&[])
 }
 pub fn start_filtered(model:&mut Model,pool:&mut SeqPool,path:&Path,pin:u64,disk:u64,names:&str,token_filter:&[u32])->Result<(),String>{
+    start_selected(model,pool,path,pin,disk,names,token_filter,0,0)
+}
+/// Select source execution ordinals after operator/token filtering, before D2H.
+/// Zero limit means all matching records from start; defaults preserve full capture.
+pub fn start_selected(model:&mut Model,pool:&mut SeqPool,path:&Path,pin:u64,disk:u64,names:&str,token_filter:&[u32],record_start:u64,record_limit:u64)->Result<(),String>{
     let count=u32::try_from(token_filter.len()).map_err(|e|e.to_string())?;
     let dir=CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e|e.to_string())?;
     let names=CString::new(names).map_err(|e|e.to_string())?;
-    checked(unsafe{ignis_lab_capture_start_filtered(model.handle(),pool.handle(),dir.as_ptr(),pin,disk,names.as_ptr(),token_filter.as_ptr(),count)})
+    checked(unsafe{ignis_lab_capture_start_selected(model.handle(),pool.handle(),dir.as_ptr(),pin,disk,names.as_ptr(),token_filter.as_ptr(),count,record_start,record_limit)})
 }
 pub fn stop(model:&mut Model,pool:&mut SeqPool)->Result<(),String>{
     checked(unsafe{ignis_lab_capture_stop(model.handle(),pool.handle())})
@@ -267,6 +274,95 @@ fn replay_gqa(model:&mut Model,data:&Path,record:&Value,warmup:u32,samples:u32,c
         "implementation":gqa_status(model)["implementation"],"candidate_applied":gqa_status(model)["extension_loaded"]}))
 }
 
+// Export describes the exact selected corpus inputs plus actual current replay
+// outputs. Every binary range is independently hashable without reading a corpus.
+fn tensor_bytes(t:&Value)->Result<u64,String>{
+    let width:u64=match number(t,"dtype")? {0=>2,1=>1,2|3=>4,_=>return Err("unsupported export dtype".into())};
+    t["shape"].as_array().ok_or("missing tensor shape")?.iter().try_fold(width,|n,v|
+        n.checked_mul(v.as_u64().ok_or("invalid tensor extent")?).ok_or_else(||"tensor size overflow".into()))
+}
+fn capture_tensors(record:&Value)->Result<Vec<Value>,String>{
+    let mut tensors=Vec::new();
+    let mut add=|name:&str,purpose:&str,dtype:&str,shape:Value,offset:u64,bytes:u64|{
+        if bytes>0 {tensors.push(json!({"name":name,"purpose":purpose,"dtype":dtype,"shape":shape,
+            "file":"capture.bin","offset":offset,"bytes":bytes}));}
+    };
+    let dtype=|t:&Value|match t["dtype"].as_u64(){Some(0)=>"bf16",Some(1)=>"u8",Some(2)=>"i32",_=>"f32"};
+    if record["kind"]=="segment" {
+        let mut pre=0;let mut post=number(record,"pre_bytes")?;
+        for t in record["bindings"].as_array().ok_or("missing segment bindings")? {
+            let bytes=if t["present"]==true {tensor_bytes(t)?} else {0};
+            let name=t["name"].as_str().ok_or("missing tensor name")?;let flags=number(t,"flags")?;
+            if flags&3!=0 {add(name,"recorded_input",dtype(t),t["shape"].clone(),pre,bytes);pre+=bytes;}
+            if flags&6!=0 {add(name,"recorded_reference",dtype(t),t["shape"].clone(),post,bytes);post+=bytes;}
+        }
+    } else if record["kind"]=="gqa_attention" {
+        let names=["query","key","value","gate","positions","valid_columns","table_rows","block_tables",
+            "k_pages","v_pages","k_meta","v_meta","residual_k","residual_v","ring"];
+        let mut offset=0;let mut state=number(record,"pre_bytes")?+number(record,"output_bytes")?;
+        for (i,t) in record["tensors"].as_array().ok_or("missing GQA tensors")?.iter().enumerate(){
+            let bytes=tensor_bytes(t)?;add(names[i],"recorded_input",dtype(t),t["shape"].clone(),offset,bytes);offset+=bytes;
+            if i==0 {add("output","recorded_reference",dtype(t),t["shape"].clone(),number(record,"pre_bytes")?,bytes);}
+            if i>=8 {add(names[i],"recorded_reference",dtype(t),t["shape"].clone(),state,bytes);state+=bytes;}
+        }
+    } else {
+        let nx=number(record,"x_bytes")?;let ny=number(record,"y_bytes")?;
+        add("input","recorded_input","bf16",json!([record["weight"]["in"],record["tokens"]]),0,nx);
+        add("initial","recorded_input","bf16",json!([record["weight"]["out"],record["tokens"]]),nx,ny);
+        add("output","recorded_reference","bf16",json!([record["weight"]["out"],record["tokens"]]),nx+ny,ny);
+    }
+    Ok(tensors)
+}
+fn range_sha256(path:&Path,offset:u64,bytes:u64)->Result<String,String>{
+    let mut file=std::fs::File::open(path).map_err(|e|e.to_string())?;
+    if offset.checked_add(bytes).ok_or("export range overflow")?>file.metadata().map_err(|e|e.to_string())?.len(){return Err("truncated exported tensor".into());}
+    file.seek(SeekFrom::Start(offset)).map_err(|e|e.to_string())?;
+    let mut remaining=bytes;let mut hash=Sha256::new();let mut buf=vec![0u8;1<<20];
+    while remaining>0 {let n=usize::try_from(remaining.min(buf.len() as u64)).unwrap();
+        file.read_exact(&mut buf[..n]).map_err(|e|e.to_string())?;hash.update(&buf[..n]);remaining-=n as u64;}
+    Ok(format!("{:x}",hash.finalize()))
+}
+struct ExportGuard;
+impl Drop for ExportGuard {fn drop(&mut self){unsafe{ignis_lab_export_directory(std::ptr::null())};}}
+/// Export actual retained candidate tensors outside operator timing. The active
+/// candidate supplies its own optional intermediate provider; no builtin fallback.
+pub fn replay_with_export(model:&mut Model,data:&Path,record:&Value,warmup:u32,samples:u32,check:ReplayCheck,path:Option<&Path>)->Result<Value,String>{
+    let Some(path)=path else {return replay_with_check(model,data,record,warmup,samples,check);};
+    std::fs::create_dir_all(path).map_err(|e|e.to_string())?;
+    let path=std::fs::canonicalize(path).map_err(|e|e.to_string())?;
+    let directory=CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e|e.to_string())?;
+    checked(unsafe{ignis_lab_export_directory(directory.as_ptr())})?;
+    let guard=ExportGuard;
+    let mut result=replay_with_check(model,data,record,warmup,samples,check)?;
+    checked(unsafe{ignis_lab_export_directory(std::ptr::null())})?;drop(guard);
+    let bytes=number(record,"bytes")?;let mut source=std::fs::File::open(data).map_err(|e|e.to_string())?;
+    source.seek(SeekFrom::Start(number(record,"offset")?)).map_err(|e|e.to_string())?;
+    let mut capture=std::fs::File::create(path.join("capture.bin")).map_err(|e|e.to_string())?;
+    if std::io::copy(&mut source.take(bytes),&mut capture).map_err(|e|e.to_string())?!=bytes {return Err("truncated capture export".into());}
+    capture.flush().map_err(|e|e.to_string())?;
+    let mut tensors=capture_tensors(record)?;let mut geometries=Vec::new();
+    let mut taps=json!({"available":false,"reason":"selected operator has no internal diagnostic provider"});
+    for line in std::fs::read_to_string(path.join("tensors.jsonl")).map_err(|e|e.to_string())?.lines(){
+        let row:Value=serde_json::from_str(line).map_err(|e|e.to_string())?;
+        if row.get("file").is_some(){tensors.push(row);}else if row.get("intermediate_taps").is_some(){taps=row["intermediate_taps"].clone();}else{geometries.push(row);}
+    }
+    for tensor in &mut tensors {
+        let file=tensor["file"].as_str().ok_or("missing export file")?;
+        if !matches!(file,"capture.bin"|"candidate.bin"){return Err("invalid export tensor file".into());}
+        tensor["sha256"]=json!(range_sha256(&path.join(file),number(tensor,"offset")?,number(tensor,"bytes")?)?);
+    }
+    let mut files=Vec::new();for name in ["capture.bin","candidate.bin"]{
+        let file=path.join(name);let bytes=std::fs::metadata(&file).map_err(|e|e.to_string())?.len();
+        files.push(json!({"file":name,"bytes":bytes,"sha256":range_sha256(&file,0,bytes)?}));
+    }
+    let manifest=path.join("manifest.json");
+    let value=json!({"version":1,"record":record,"tensors":tensors,"files":files,"weights":geometries,
+        "intermediate_taps":taps,"tensor_layout":"ne[0] contiguous; little-endian exact stored representation",
+        "candidate_execution":"actual final replay launch on restored selected inputs; export outside timing"});
+    std::fs::write(&manifest,serde_json::to_vec_pretty(&value).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    result["export"]=json!({"path":path,"manifest":manifest});Ok(result)
+}
+
 /// Availability metadata; actual application is reported by each replay row.
 pub fn segment_status(model:&Model)->Value {
     let implementation=unsafe{CStr::from_ptr(ignis_lab_segment_implementation(model.handle()))}.to_string_lossy().into_owned();
@@ -331,6 +427,30 @@ mod tests {
         assert!(gqa_view(&damaged).is_err());
         damaged=valid;damaged["tensors"].as_array_mut().unwrap().pop();
         assert!(gqa_view(&damaged).is_err());
+    }
+    #[test]
+    fn exported_capture_ranges_keep_inputs_and_references_separate() {
+        let record=gqa_record();let tensors=capture_tensors(&{let mut r=record.clone();r["kind"]=json!("gqa_attention");r}).unwrap();
+        let q=&tensors[0];assert_eq!(q["name"],"query");assert_eq!(q["purpose"],"recorded_input");assert_eq!(q["offset"],0);
+        let output=tensors.iter().find(|t|t["name"]=="output").unwrap();
+        assert_eq!(output["purpose"],"recorded_reference");assert_eq!(output["offset"],record["pre_bytes"]);
+        let last=tensors.last().unwrap();assert_eq!(number(last,"offset").unwrap()+number(last,"bytes").unwrap(),number(&record,"bytes").unwrap());
+        for t in tensors {assert!(number(&t,"offset").unwrap()+number(&t,"bytes").unwrap()<=number(&record,"bytes").unwrap());}
+        let segment=json!({"kind":"segment","pre_bytes":12,"bindings":[
+            {"name":"input","flags":1,"dtype":0,"shape":[2,1,1,1],"present":true},
+            {"name":"state","flags":2,"dtype":2,"shape":[2,1,1,1],"present":true},
+            {"name":"output","flags":4,"dtype":0,"shape":[2,1,1,1],"present":true}]});
+        let tensors=capture_tensors(&segment).unwrap();assert_eq!(tensors.len(),4);
+        assert_eq!(tensors[1]["offset"],4);assert_eq!(tensors[2]["offset"],12);assert_eq!(tensors[3]["offset"],20);
+    }
+    #[test]
+    fn export_hashes_only_requested_range_and_rejects_truncation() {
+        let path=std::env::temp_dir().join(format!("ignis-lab-export-hash-{}",std::process::id()));
+        std::fs::write(&path,b"prefix-selected-suffix").unwrap();
+        assert_eq!(range_sha256(&path,7,8).unwrap(),format!("{:x}",Sha256::digest(b"selected")));
+        assert!(range_sha256(&path,20,8).is_err());assert!(range_sha256(&path,u64::MAX,8).is_err());
+        std::fs::remove_file(path).unwrap();
+        assert!(tensor_bytes(&json!({"dtype":0,"shape":[u64::MAX,2]})).is_err());
     }
     #[test]
     fn diagnostics_distinguish_zero_reference_and_missing_finite_pairs() {

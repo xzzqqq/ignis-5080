@@ -152,3 +152,16 @@ extern "C" int32_t ignis_lab_gdn_segment_run(const ignis_gdn_segment_call *c,voi
     ck(cudaGetLastError());return 0;
   }catch(const std::exception &e){error=e.what();return -1;}
 }
+
+extern "C" IGNIS_LAB_DIAGNOSTIC_EXPORT int32_t ignis_lab_gdn_segment_tensors_v1(const ignis_segment_profile *p,
+    const void *workspace,uint64_t bytes,ignis_lab_segment_tensor *out,uint32_t capacity){
+  if(!p || !workspace || !ignis_lab_gdn_segment_workspace(p) || bytes<ignis_lab_gdn_segment_workspace(p) || !out || capacity<9)return -1;
+  Buffers b(const_cast<void *>(workspace));
+  const char *names[]={"normalized_input","query","key","value","z","g","beta","recurrent","gated"};
+  const n::Tensor values[]={b.h,b.q,b.k,b.v,b.z,b.g,b.beta,b.recurrent,b.gated};
+  for(uint32_t i=0;i<9;++i){const auto &t=values[i];
+    const uint64_t size=uint64_t(t.ne[0])*t.ne[1]*t.ne[2]*t.ne[3]*(t.dtype==n::DType::BF16?2:4);
+    out[i]={names[i],t.data,size,t.dtype==n::DType::BF16?0u:3u,{t.ne[0],t.ne[1],t.ne[2],t.ne[3]}};
+  }
+  return 9;
+}

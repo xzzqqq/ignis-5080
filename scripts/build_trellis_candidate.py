@@ -76,8 +76,8 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def dependencies(source, name, nvcc, flags):
-    raw = subprocess.check_output([nvcc, *flags, '-M', str(source/'kernel/src'/name)], text=True)
+def dependencies(source, name, nvcc, flags, env=None):
+    raw = subprocess.check_output([nvcc, *flags, '-M', str(source/'kernel/src'/name)], text=True, env=env)
     names = shlex.split(raw.replace('\\\n', ' ').split(':', 1)[1])
     return {str(Path(n).resolve()): digest(Path(n)) for n in names}
 
@@ -90,7 +90,7 @@ def include_flags(source):
     return ['-I'+str(source/p) for p in ('kernel/include','kernel/src','kernel/vendor/include','kernel/vendor/src')]
 
 
-def freeze_inputs(source, nvcc):
+def freeze_inputs(source, nvcc, env=None):
     """Exact local transitive compiler dependencies, discovered before freezing.
 
     External toolkit/system dependencies remain tracked by the object builder.
@@ -101,25 +101,26 @@ def freeze_inputs(source, nvcc):
            ('ignis_trellis_candidate.h','ignis_trellis_linear.h','ignis_gqa_candidate.h','ignis_segment_candidate.h','ignis_mlp_segment.h','ignis_gqa_segment.h','ignis_gdn_segment.h')}
     for name in SOURCES:
         files.add(source/'kernel/src'/name)
-        for dependency in dependencies(source,name,nvcc,compile_flags()+include_flags(source)):
+        for dependency in dependencies(source,name,nvcc,compile_flags()+include_flags(source),env):
             path=Path(dependency).resolve()
             if path.is_relative_to(source):files.add(path)
     return files
 
 
-def build(source, output, nvcc):
+def build(source, output, nvcc, env=None):
     began = time.monotonic()
     source = source.resolve()
     flags = compile_flags()
     includes = include_flags(source)
-    toolchain = dict(nvcc=subprocess.check_output([nvcc, '--version'], text=True),
-                     host=subprocess.check_output(['g++', '--version'], text=True),
-                     environment={k:os.environ.get(k) for k in ('NVCC_PREPEND_FLAGS','NVCC_APPEND_FLAGS','NVCC_CCBIN','CPATH','CPLUS_INCLUDE_PATH')})
+    environment = os.environ if env is None else env
+    toolchain = dict(nvcc=subprocess.check_output([nvcc, '--version'], text=True, env=env),
+                     host=subprocess.check_output(['g++', '--version'], text=True, env=env),
+                     environment={k:environment.get(k) for k in ('NVCC_PREPEND_FLAGS','NVCC_APPEND_FLAGS','NVCC_CCBIN','CPATH','CPLUS_INCLUDE_PATH')})
     output.mkdir(parents=True, exist_ok=True)
     objects = []; timings = []; identities = []
     for name in SOURCES:
         start = time.monotonic()
-        deps = dependencies(source, name, nvcc, flags+includes)
+        deps = dependencies(source, name, nvcc, flags+includes, env)
         # Frozen source directories differ per operation; relative dependency names do not.
         normalized = {str(Path(n).relative_to(source)) if Path(n).is_relative_to(source) else n: sha
                       for n, sha in deps.items()}
@@ -137,7 +138,7 @@ def build(source, output, nvcc):
                 tmp = Path(scratch)
                 with (tmp/'build.log').open('w') as log:
                     result = subprocess.run([nvcc, *flags, *includes, '-c', str(source/'kernel/src'/name),
-                                             '-o', str(tmp/'code.o')], stdout=log, stderr=subprocess.STDOUT)
+                                             '-o', str(tmp/'code.o')], stdout=log, stderr=subprocess.STDOUT, env=env)
                 if result.returncode: raise RuntimeError((tmp/'build.log').read_text())
                 if any(digest(Path(n)) != sha for n,sha in deps.items()):
                     raise ValueError('candidate source changed during compilation')
@@ -163,7 +164,7 @@ def build(source, output, nvcc):
             tmp=Path(scratch);(tmp/'adapter.cpp').write_text(ADAPTER % (key,key,key))
             with (tmp/'build.log').open('w') as log:
                 result=subprocess.run([nvcc,*flags,*includes,'--shared','--cudart=shared','-Xlinker=-Bsymbolic',
-                    *map(str,objects),str(tmp/'adapter.cpp'),'-o',str(tmp/'candidate.so')],stdout=log,stderr=subprocess.STDOUT)
+                    *map(str,objects),str(tmp/'adapter.cpp'),'-o',str(tmp/'candidate.so')],stdout=log,stderr=subprocess.STDOUT,env=env)
             if result.returncode:raise RuntimeError((tmp/'build.log').read_text())
             (tmp/'manifest.json').write_text(json.dumps(dict(identity=key,inputs=inputs,
                 library_sha256=digest(tmp/'candidate.so'))))

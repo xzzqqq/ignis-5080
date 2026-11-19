@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cmath>
 #include <fstream>
+#include <dlfcn.h>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -92,7 +93,114 @@ ignis_trellis_weight resolve(const ignis_model &m,const ignis_lab_weight_view &v
   w.out=v.out;w.tile_stride=v.tile_stride;
   return w;
 }
-struct Call {
+// Select on the GPU before any tensor payload crosses PCIe. Graphs remain
+// reusable across the complete request; skipped calls execute only tiny guards.
+// Export is an explicit offline diagnostic attached to one selected replay.
+// It never substitutes recorded baseline bytes for current candidate results.
+struct TensorExport {
+  std::ofstream data,metadata;
+  uint64_t offset=0;
+  explicit TensorExport(const char *directory){
+    data.open(std::string(directory)+"/candidate.bin",std::ios::binary|std::ios::trunc);
+    metadata.open(std::string(directory)+"/tensors.jsonl",std::ios::trunc);
+    if(!data || !metadata)throw std::runtime_error("cannot create tensor export");
+  }
+  void tensor(const std::string &name,const std::string &purpose,const void *source,
+      uint64_t bytes,const char *dtype,const std::vector<int64_t> &shape,bool device=true){
+    if(!source || !bytes)return;
+    // Bounded scratch avoids allocating another full physical state image.
+    std::vector<char> chunk(std::min<uint64_t>(bytes,8ull<<20));
+    for(uint64_t i=0;i<bytes;i+=chunk.size()){
+      auto n=std::min<uint64_t>(chunk.size(),bytes-i);
+      if(device)ck(cudaMemcpy(chunk.data(),static_cast<const char *>(source)+i,n,cudaMemcpyDeviceToHost));
+      else std::memcpy(chunk.data(),static_cast<const char *>(source)+i,n);
+      data.write(chunk.data(),n);
+    }
+    metadata<<"{\"name\":\""<<name<<"\",\"purpose\":\""<<purpose<<"\",\"dtype\":\""<<dtype
+      <<"\",\"shape\":[";
+    for(size_t i=0;i<shape.size();++i){if(i)metadata<<",";metadata<<shape[i];}
+    metadata<<"],\"file\":\"candidate.bin\",\"offset\":"<<offset<<",\"bytes\":"<<bytes<<"}\n";
+    offset+=bytes;if(!data || !metadata)throw std::runtime_error("tensor export write failed");
+  }
+  void tensor(const std::string &name,const std::string &purpose,const ninfer::Tensor &t){
+    const auto *dtype=t.dtype==ninfer::DType::BF16?"bf16":t.dtype==ninfer::DType::U8?"u8":t.dtype==ninfer::DType::I32?"i32":"f32";
+    tensor(name,purpose,t.data,t.data?t.bytes():0,dtype,{t.ne[0],t.ne[1],t.ne[2],t.ne[3]});
+  }
+  void weight(const std::string &name,const ignis_trellis_weight &w){
+    tensor(name+".trellis","model_weight_encoded",w.trellis,uint64_t(w.in)*w.out*w.k2/16,"u8",{int64_t(w.in)*w.out*w.k2/16});
+    tensor(name+".suh","model_weight_scale",w.suh,uint64_t(w.in)*2,"f16",{w.in});
+    tensor(name+".svh","model_weight_scale",w.svh,uint64_t(w.out)*2,"f16",{w.out});
+    metadata<<"{\"weight_geometry\":\""<<name<<"\",\"in\":"<<w.in<<",\"out\":"<<w.out<<",\"k2\":"<<w.k2
+      <<",\"tile_stride\":"<<w.tile_stride<<",\"effective_tile_stride\":"<<(w.tile_stride?w.tile_stride:w.out/16)
+      <<",\"encoding\":\"trellis-mul1\",\"scale_dtype\":\"f16\",\"hadamard_block\":128}\n";
+  }
+  void weight(const std::string &name,const ninfer::Weight &w){
+    if(!w.payload || !w.payload_bytes)return;
+    const char *dtype=w.qtype==ninfer::QType::BF16_CTRL?"bf16":w.qtype==ninfer::QType::FP32_CTRL?"f32":w.qtype==ninfer::QType::I32_CTRL?"i32":"u8";
+    std::vector<int64_t> shape;
+    if(std::strcmp(dtype,"u8")==0)shape={int64_t(w.payload_bytes)};
+    else {
+      // Artifact weights use row-major logical axes; tensor exports use the
+      // activation convention ne[0]-contiguous. Preserve both explicitly.
+      if(!w.ndim || w.ndim>4)throw std::runtime_error("invalid dense weight rank");
+      for(uint32_t i=w.ndim;i>0;--i)shape.push_back(w.shape[i-1]);
+      while(shape.size()<4)shape.push_back(1);
+    }
+    tensor(name,"model_weight",w.payload,w.payload_bytes,dtype,shape);
+    metadata<<"{\"weight_geometry\":\""<<name<<"\",\"logical_layout\":\"row_major\",\"logical_shape\":[";
+    for(uint32_t i=0;i<w.ndim;++i){if(i)metadata<<",";metadata<<w.shape[i];}
+    metadata<<"],\"qtype\":"<<uint32_t(w.qtype)<<"}\n";
+  }
+};
+thread_local std::unique_ptr<TensorExport> tensor_export;
+void export_layer_weights(const ignis_model &m,uint32_t layer,uint32_t kind){
+  if(!tensor_export)return;
+  const auto prefix="layer."+std::to_string(layer)+".";
+  for(const auto &[name,w]:weights(m))if(name.starts_with(prefix)){
+    const auto suffix=name.substr(prefix.size());
+    const bool mlp=suffix=="gate" || suffix=="up" || suffix=="down";
+    if((kind==IGNIS_SEGMENT_MLP)==mlp)tensor_export->weight(name,w);
+  }
+  tensor_export->tensor("rms_epsilon","model_parameter",&m.rms_norm_eps,4,"f32",{1},false);
+  const auto &l=m.layers.at(layer);
+  if(kind==IGNIS_SEGMENT_MLP){
+    tensor_export->weight(prefix+"post_attention_norm",l.kind==IGNIS_LAYER_GQA?l.gqa.post_attention_norm:l.gdn.post_attention_norm);return;
+  }
+  if(l.kind==IGNIS_LAYER_GQA){const auto &w=l.gqa;
+    tensor_export->tensor("rope_inv_frequency","model_parameter",m.text_rope.inv_frequency,128*4,"f32",{128},false);
+    tensor_export->tensor("rope_attention_factor","model_parameter",&m.text_rope.attention_factor,4,"f32",{1},false);
+    tensor_export->weight(prefix+"input_norm",w.input_norm);tensor_export->weight(prefix+"query_norm",w.query_norm);
+    tensor_export->weight(prefix+"key_norm",w.key_norm);
+  }else{const auto &w=l.gdn;
+    tensor_export->weight(prefix+"input_norm",w.input_norm);tensor_export->weight(prefix+"a_log",w.a_log);
+    tensor_export->weight(prefix+"dt_bias",w.dt_bias);tensor_export->weight(prefix+"convolution",w.convolution);
+    tensor_export->weight(prefix+"a_b_projection",w.a_b_projection);tensor_export->weight(prefix+"norm",w.norm);
+  }
+}
+struct CaptureControl {
+  std::unique_ptr<Device> gate;
+  void *mapped=nullptr;
+  void allocate(void **host,uint64_t bytes){
+    ck(cudaHostAlloc(host,bytes+24,cudaHostAllocMapped));
+    ck(cudaHostGetDevicePointer(&mapped,*host,0));std::memset(*host,0,bytes+24);
+    gate=std::make_unique<Device>(16);ck(cudaMemset(gate->p,0,16));
+  }
+};
+__global__ void lab_select_record(unsigned long long *counter,unsigned long long *gate,
+    unsigned long long start,unsigned long long limit){
+  if(threadIdx.x==0){const auto ordinal=atomicAdd(counter,1ull);gate[0]=ordinal;
+    gate[1]=ordinal>=start && (!limit || ordinal-start<limit);}
+}
+__global__ void lab_selected_copy(char *dst,const char *src,uint64_t width,uint64_t rows,
+    uint64_t pitch,const unsigned long long *gate){
+  if(!gate[1])return;
+  for(uint64_t i=uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;i<width*rows;i+=uint64_t(gridDim.x)*blockDim.x)
+    dst[i]=src[(i/width)*pitch+i%width];
+}
+__global__ void lab_selected_finish(uint32_t *seen,uint64_t *source,const unsigned long long *gate){
+  if(threadIdx.x==0 && gate[1]){*source=gate[0];++*seen;__threadfence_system();}
+}
+struct Call : CaptureControl {
   View w,up;
   bool swiglu=false;
   uint32_t tokens=0,ldy=0,epilogue=0;
@@ -104,44 +212,41 @@ struct Call {
   char *output() const {return initial()+ny;}
   uint32_t *seen() const {return reinterpret_cast<uint32_t *>(output()+ny);}
   uint64_t bytes() const {return nx+2*ny;}
-  void allocate(){ck(cudaHostAlloc(&host,bytes()+4,cudaHostAllocDefault));std::memset(host,0,bytes()+4);}
+  uint64_t source()const{return *reinterpret_cast<const uint64_t *>(x()+((bytes()+7)&~7ull)+8);}
+  void allocate(){CaptureControl::allocate(&host,bytes());}
 };
 // Full physical planes are deliberate: preserving physical page ids and slot
 // selectors avoids rebasing errors and includes untouched bytes in diagnostics.
-struct GqaCall {
+struct GqaCall : CaptureControl {
   std::string name;
   uint32_t layer=0,max_keys=0;
   std::vector<ninfer::Tensor> tensors;
   std::vector<uint64_t> offsets;
   uint64_t pre=0,state=0,output=0;
   void *host=nullptr;
-  std::unique_ptr<Device> launches;
   ~GqaCall(){if(host)cudaFreeHost(host);}
   uint64_t bytes()const{return pre+output+state;}
   char *base()const{return static_cast<char *>(host);}
   uint32_t *seen()const{return reinterpret_cast<uint32_t *>(base()+bytes());}
-  void allocate(){
-    ck(cudaHostAlloc(&host,bytes()+4,cudaHostAllocDefault));std::memset(host,0,bytes()+4);
-    launches=std::make_unique<Device>(4);ck(cudaMemset(launches->p,0,4));
-  }
+  uint64_t source()const{return *reinterpret_cast<const uint64_t *>(base()+((bytes()+7)&~7ull)+8);}
+  void allocate(){CaptureControl::allocate(&host,bytes());}
   void add(const ninfer::Tensor &x){
     if(x.data && !x.is_contiguous())throw std::runtime_error("GQA capture requires contiguous tensors");
     offsets.push_back(pre);tensors.push_back(x);
     if(x.data)pre+=x.bytes();
   }
 };
-__global__ void lab_count_launch(uint32_t *p){if(threadIdx.x==0)atomicAdd(p,1u);}
-struct SegmentCall {
+struct SegmentCall : CaptureControl {
   uint32_t layer=0;ignis_segment_profile profile{};
   std::string name;std::vector<ignis::SegmentBinding> bindings;
   std::vector<uint64_t> pre_offsets,post_offsets;
-  uint64_t pre=0,post=0;void *host=nullptr;std::unique_ptr<Device> launches;
+  uint64_t pre=0,post=0;void *host=nullptr;
   ~SegmentCall(){if(host)cudaFreeHost(host);}
   uint64_t bytes()const{return pre+post;}
   char *base()const{return static_cast<char *>(host);}
   uint32_t *seen()const{return reinterpret_cast<uint32_t *>(base()+bytes());}
-  void allocate(){ck(cudaHostAlloc(&host,bytes()+4,cudaHostAllocDefault));std::memset(host,0,bytes()+4);
-    launches=std::make_unique<Device>(4);ck(cudaMemset(launches->p,0,4));}
+  uint64_t source()const{return *reinterpret_cast<const uint64_t *>(base()+((bytes()+7)&~7ull)+8);}
+  void allocate(){CaptureControl::allocate(&host,bytes());}
   void layout(){
     for(const auto &b:bindings){
       if(b.tensor.data && !b.tensor.is_contiguous())throw std::runtime_error("segment boundary must be contiguous");
@@ -180,8 +285,26 @@ struct LabTrace {
   uint32_t ordinal=0,request=0,phase=0;
   uint64_t position=0,offset=0,count=0,pinned=0,pin_limit=0,disk_limit=0;
   std::ofstream data,meta;
-  Device one{4};
-  LabTrace(const ignis_model &m,const char *directory,uint64_t pin,uint64_t disk,const char *names,const uint32_t *token_filter,uint32_t token_filter_count):named(weights(m)),pin_limit(pin),disk_limit(disk) {
+  Device record_counter{8};
+  uint64_t record_start=0,record_limit=0;
+  bool selective()const{return record_start || record_limit;}
+  template<class C> void begin(C &c,cudaStream_t stream){
+    lab_select_record<<<1,1,0,stream>>>(static_cast<unsigned long long *>(record_counter.p),
+      static_cast<unsigned long long *>(c.gate->p),record_start,record_limit);ck(cudaGetLastError());
+  }
+  template<class C> void copy(C &c,void *dst,const void *src,uint64_t width,uint64_t rows,uint64_t pitch,cudaStream_t stream){
+    if(!selective()){ck(cudaMemcpy2DAsync(dst,width,src,pitch,width,rows,cudaMemcpyDeviceToHost,stream));return;}
+    auto *target=static_cast<char *>(c.mapped)+(static_cast<char *>(dst)-static_cast<char *>(c.host));
+    lab_selected_copy<<<128,256,0,stream>>>(target,static_cast<const char *>(src),width,rows,pitch,
+      static_cast<const unsigned long long *>(c.gate->p));ck(cudaGetLastError());
+  }
+  template<class C> void finish(C &c,cudaStream_t stream){
+    auto *base=static_cast<char *>(c.mapped)+c.bytes();
+    lab_selected_finish<<<1,1,0,stream>>>(reinterpret_cast<uint32_t *>(base),reinterpret_cast<uint64_t *>(static_cast<char *>(c.mapped)+((c.bytes()+7)&~7ull)+8),
+      static_cast<const unsigned long long *>(c.gate->p));ck(cudaGetLastError());
+  }
+  LabTrace(const ignis_model &m,const char *directory,uint64_t pin,uint64_t disk,const char *names,const uint32_t *token_filter,uint32_t token_filter_count,uint64_t start,uint64_t limit):named(weights(m)),pin_limit(pin),disk_limit(disk),record_start(start),record_limit(limit) {
+    ck(cudaMemset(record_counter.p,0,8));
     for(uint32_t i=0;i<token_filter_count;++i)token_selection.insert(token_filter[i]);
     std::istringstream list(names ? names : "");std::string name;
     while(std::getline(list,name,',')) {
@@ -203,14 +326,14 @@ struct LabTrace {
     data.open(std::string(directory)+"/data.bin",std::ios::binary|std::ios::trunc);
     meta.open(std::string(directory)+"/records.jsonl",std::ios::trunc);
     if(!data || !meta) throw std::runtime_error("cannot create capture files");
-    uint32_t value=1;ck(cudaMemcpy(one.p,&value,4,cudaMemcpyHostToDevice));
   }
   void write(SegmentCall &c){
+    const auto source_record=c.source();
     if(*c.seen()!=1)throw std::runtime_error("segment graph executed multiple times between flushes; corpus incomplete");
     if(c.bytes()>disk_limit-offset)throw std::runtime_error("segment capture byte budget exhausted; corpus incomplete");
     data.write(c.base(),c.bytes());
     const auto &p=c.profile;
-    meta<<"{\"kind\":\"segment\",\"version\":1,\"reference\":\"original_layer_chain\",\"id\":"<<count++<<",\"request\":"<<request
+    meta<<"{\"kind\":\"segment\",\"version\":1,\"reference\":\"original_layer_chain\",\"id\":"<<source_record<<",\"source_record\":"<<source_record<<",\"request\":"<<request
       <<",\"phase\":"<<phase<<",\"position\":"<<position<<",\"weight\":{\"name\":\""<<c.name<<"\"},\"up\":null"
       <<",\"layer\":"<<c.layer<<",\"tokens\":"<<p.tokens<<",\"offset\":"<<offset<<",\"bytes\":"<<c.bytes()
       <<",\"pre_bytes\":"<<c.pre<<",\"post_bytes\":"<<c.post<<",\"profile\":{\"kind\":"<<p.kind
@@ -222,14 +345,15 @@ struct LabTrace {
       for(int j=0;j<4;++j){if(j)meta<<",";meta<<b.tensor.ne[j];}meta<<"]}";
     }
     meta<<"]}\n";if(!data || !meta)throw std::runtime_error("segment capture disk write failed");
-    offset+=c.bytes();*c.seen()=0;ck(cudaMemset(c.launches->p,0,4));
+    offset+=c.bytes();++count;*c.seen()=0;
   }
   void write(GqaCall &c) {
+    const auto source_record=c.source();
     if(*c.seen()!=1)throw std::runtime_error("GQA graph executed multiple times between capture flushes; corpus incomplete");
     if(c.bytes()>disk_limit-offset)throw std::runtime_error("capture byte budget exhausted; corpus incomplete");
     data.write(c.base(),c.bytes());
-    meta<<"{\"kind\":\"gqa_attention\",\"version\":1,\"id\":"<<count++
-        <<",\"request\":"<<request<<",\"phase\":"<<phase<<",\"position\":"<<position
+    meta<<"{\"kind\":\"gqa_attention\",\"version\":1,\"id\":"<<source_record
+        <<",\"source_record\":"<<source_record<<",\"request\":"<<request<<",\"phase\":"<<phase<<",\"position\":"<<position
         <<",\"weight\":{\"name\":\""<<c.name<<"\"},\"up\":null,\"tokens\":8,\"layer\":"<<c.layer
         <<",\"max_keys\":"<<c.max_keys<<",\"scale\":0.0625,\"offset\":"<<offset
         <<",\"bytes\":"<<c.bytes()<<",\"pre_bytes\":"<<c.pre<<",\"output_bytes\":"<<c.output
@@ -242,18 +366,20 @@ struct LabTrace {
     }
     meta<<"]}\n";
     if(!data || !meta)throw std::runtime_error("capture disk write failed");
-    offset+=c.bytes();*c.seen()=0;ck(cudaMemset(c.launches->p,0,4));
+    offset+=c.bytes();++count;*c.seen()=0;
   }
   void write(Call &c) {
+    const auto source_record=c.source();
+    if(*c.seen()!=1)throw std::runtime_error("operator graph executed multiple times between flushes; corpus incomplete");
     if(c.bytes()>disk_limit-offset) throw std::runtime_error("capture byte budget exhausted; corpus incomplete");
     data.write(c.x(),c.bytes());
-    meta<<"{\"id\":"<<count++<<",\"request\":"<<request<<",\"phase\":"<<phase
+    meta<<"{\"id\":"<<source_record<<",\"source_record\":"<<source_record<<",\"request\":"<<request<<",\"phase\":"<<phase
         <<",\"position\":"<<position<<",\"weight\":"<<c.w.json()<<",\"up\":"
         <<(c.swiglu?c.up.json():"null")<<",\"tokens\":"<<c.tokens<<",\"ldy\":"<<c.ldy
         <<",\"epilogue\":"<<c.epilogue<<",\"offset\":"<<offset<<",\"x_bytes\":"<<c.nx
         <<",\"y_bytes\":"<<c.ny<<",\"bytes\":"<<c.bytes()<<"}\n";
     if(!data || !meta) throw std::runtime_error("capture disk write failed");
-    offset+=c.bytes();*c.seen()=0;
+    offset+=c.bytes();++count;*c.seen()=0;
   }
 };
 bool lab_segment_should_run(const ignis_model &m,uint32_t kind,uint32_t layer,uint32_t tokens,uint32_t batch){
@@ -286,11 +412,12 @@ void *lab_segment_before(const ignis_model &m,uint32_t layer,const ignis_segment
       }
     }else if(t.mode==LabTrace::Record){
       t.segment_eager=make();c=t.segment_eager.get();
-      if(c->bytes()+4>t.pin_limit-t.pinned)throw std::runtime_error("segment pinned-memory budget exhausted");c->allocate();
+      if(c->bytes()+24>t.pin_limit-t.pinned)throw std::runtime_error("segment pinned-memory budget exhausted");c->allocate();
     }
+    if(c)t.begin(*c,stream);
     if(c)for(size_t i=0;i<bindings.size();++i){const auto &b=bindings[i];
       if(b.tensor.data && (b.flags&(SEGMENT_INPUT|SEGMENT_MUTABLE)))
-        ck(cudaMemcpyAsync(c->base()+c->pre_offsets[i],b.tensor.data,b.tensor.bytes(),cudaMemcpyDeviceToHost,stream));}
+        t.copy(*c,c->base()+c->pre_offsets[i],b.tensor.data,b.tensor.bytes(),1,b.tensor.bytes(),stream);}
   }
   return c;
 }
@@ -300,11 +427,10 @@ void lab_segment_after(const ignis_model &m,void *ticket,cudaStream_t stream){
   const auto &bindings=c->bindings;
   for(size_t i=0;i<bindings.size();++i){const auto &b=bindings[i];
     if(b.tensor.data && (b.flags&(SEGMENT_MUTABLE|SEGMENT_OUTPUT)))
-      ck(cudaMemcpyAsync(c->base()+c->pre+c->post_offsets[i],b.tensor.data,b.tensor.bytes(),cudaMemcpyDeviceToHost,stream));
+      t.copy(*c,c->base()+c->pre+c->post_offsets[i],b.tensor.data,b.tensor.bytes(),1,b.tensor.bytes(),stream);
   }
-  lab_count_launch<<<1,1,0,stream>>>(static_cast<uint32_t *>(c->launches->p));ck(cudaGetLastError());
-  ck(cudaMemcpyAsync(c->seen(),c->launches->p,4,cudaMemcpyDeviceToHost,stream));
-  if(t.segment_eager.get()==c){ck(cudaStreamSynchronize(stream));t.write(*c);t.segment_eager.reset();}
+  t.finish(*c,stream);
+  if(t.segment_eager.get()==c){ck(cudaStreamSynchronize(stream));if(*c->seen())t.write(*c);t.segment_eager.reset();}
 }
 void lab_segment_execute(const ignis_model &m,uint32_t layer,const ignis_segment_profile &p,
     const std::vector<SegmentBinding> &bindings,cudaStream_t stream){
@@ -354,22 +480,22 @@ void *lab_gqa_before(const ignis_model &m,uint32_t layer,const ninfer::Tensor &q
   }else{
     if(t.mode!=LabTrace::Record)return nullptr;
     t.gqa_eager=make();c=t.gqa_eager.get();
-    if(c->bytes()+4>t.pin_limit-t.pinned)throw std::runtime_error("GQA capture pinned-memory budget exhausted");
+    if(c->bytes()+24>t.pin_limit-t.pinned)throw std::runtime_error("GQA capture pinned-memory budget exhausted");
     c->allocate();
   }
+  t.begin(*c,stream);
   for(size_t i=0;i<c->tensors.size();++i){const auto &x=c->tensors[i];
-    if(x.data)ck(cudaMemcpyAsync(c->base()+c->offsets[i],x.data,x.bytes(),cudaMemcpyDeviceToHost,stream));}
+    if(x.data)t.copy(*c,c->base()+c->offsets[i],x.data,x.bytes(),1,x.bytes(),stream);}
   return c;
 }
 void lab_gqa_after(const ignis_model &m,void *ticket,const ninfer::Tensor &out,cudaStream_t stream){
   if(!ticket)return;auto &t=*m.lab_trace;auto &c=*static_cast<GqaCall *>(ticket);
-  ck(cudaMemcpyAsync(c.base()+c.pre,out.data,c.output,cudaMemcpyDeviceToHost,stream));
+  t.copy(c,c.base()+c.pre,out.data,c.output,1,c.output,stream);
   uint64_t offset=c.pre+c.output;
   for(size_t i=8;i<c.tensors.size();++i){const auto &x=c.tensors[i];
-    if(x.data){ck(cudaMemcpyAsync(c.base()+offset,x.data,x.bytes(),cudaMemcpyDeviceToHost,stream));offset+=x.bytes();}}
-  lab_count_launch<<<1,1,0,stream>>>(static_cast<uint32_t *>(c.launches->p));ck(cudaGetLastError());
-  ck(cudaMemcpyAsync(c.seen(),c.launches->p,4,cudaMemcpyDeviceToHost,stream));
-  if(t.gqa_eager.get()==&c){ck(cudaStreamSynchronize(stream));t.write(c);t.gqa_eager.reset();}
+    if(x.data){t.copy(c,c.base()+offset,x.data,x.bytes(),1,x.bytes(),stream);offset+=x.bytes();}}
+  t.finish(c,stream);
+  if(t.gqa_eager.get()==&c){ck(cudaStreamSynchronize(stream));if(*c.seen())t.write(c);t.gqa_eager.reset();}
 }
 
 void lab_prefill_position(ignis_model *m,uint64_t p) {if(m->lab_trace)m->lab_trace->position=p;}
@@ -403,21 +529,28 @@ void *lab_before(const ignis_model &m,const ignis_trellis_weight &w,const ignis_
   } else {
     if(t.mode!=LabTrace::Record)return nullptr;
     t.eager=make();c=t.eager.get();
-    if(c->bytes()+4>t.pin_limit-t.pinned)throw std::runtime_error("capture pinned-memory budget exhausted");
+    if(c->bytes()+24>t.pin_limit-t.pinned)throw std::runtime_error("capture pinned-memory budget exhausted");
     c->allocate();
   }
-  ck(cudaMemcpyAsync(c->x(),x,c->nx,cudaMemcpyDeviceToHost,stream));
+  t.begin(*c,stream);
+  t.copy(*c,c->x(),x,c->nx,1,c->nx,stream);
   if(epilogue==IGNIS_TRELLIS_ADD && !up)
-    ck(cudaMemcpy2DAsync(c->initial(),w.out*2,y,ldy*2,w.out*2,tokens,cudaMemcpyDeviceToHost,stream));
+    t.copy(*c,c->initial(),y,w.out*2,tokens,ldy*2,stream);
   return c;
 }
 void lab_after(const ignis_model &m,void *ticket,const void *y,cudaStream_t stream) {
   if(!ticket)return;
   auto &t=*m.lab_trace;auto &c=*static_cast<Call *>(ticket);
-  ck(cudaMemcpy2DAsync(c.output(),c.w.w.out*2,y,c.ldy*2,c.w.w.out*2,c.tokens,cudaMemcpyDeviceToHost,stream));
-  ck(cudaMemcpyAsync(c.seen(),t.one.p,4,cudaMemcpyDeviceToHost,stream));
-  if(t.eager.get()==&c) {ck(cudaStreamSynchronize(stream));t.write(c);t.eager.reset();}
+  t.copy(c,c.output(),y,c.w.w.out*2,c.tokens,c.ldy*2,stream);
+  t.finish(c,stream);
+  if(t.eager.get()==&c) {ck(cudaStreamSynchronize(stream));if(*c.seen())t.write(c);t.eager.reset();}
 }
+}
+extern "C" int32_t ignis_lab_export_directory(const char *directory){
+  try{if(tensor_export){tensor_export->data.flush();tensor_export->metadata.flush();
+      if(!tensor_export->data || !tensor_export->metadata)throw std::runtime_error("tensor export flush failed");}
+    tensor_export.reset();if(directory)tensor_export=std::make_unique<TensorExport>(directory);return 0;}
+  catch(const std::exception &e){error=e.what();return -1;}
 }
 extern "C" const char *ignis_lab_trace_error(){return error.c_str();}
 extern "C" const char *ignis_lab_gqa_implementation(ignis_model *m){
@@ -437,25 +570,29 @@ extern "C" int32_t ignis_lab_capture_start(ignis_model *m,ignis_seq_pool *p,cons
 }
 extern "C" int32_t ignis_lab_capture_start_filtered(ignis_model *m,ignis_seq_pool *p,const char *dir,uint64_t pin,uint64_t disk,
     const char *names,const uint32_t *token_filter,uint32_t token_filter_count) {
+  return ignis_lab_capture_start_selected(m,p,dir,pin,disk,names,token_filter,token_filter_count,0,0);
+}
+extern "C" int32_t ignis_lab_capture_start_selected(ignis_model *m,ignis_seq_pool *p,const char *dir,uint64_t pin,uint64_t disk,
+    const char *names,const uint32_t *token_filter,uint32_t token_filter_count,uint64_t record_start,uint64_t record_limit) {
   try {
     if(!m || !p || !dir || !pin || !disk || m->lab_trace)throw std::runtime_error("invalid capture start");
     if(token_filter_count>8192 || (token_filter_count && !token_filter))throw std::runtime_error("invalid capture token filter");
     for(uint32_t i=0;i<token_filter_count;++i)
       if(!token_filter[i] || token_filter[i]>8192)throw std::runtime_error("invalid capture token filter");
-    m->lab_trace=std::make_shared<ignis::LabTrace>(*m,dir,pin,disk,names,token_filter,token_filter_count);
+    m->lab_trace=std::make_shared<ignis::LabTrace>(*m,dir,pin,disk,names,token_filter,token_filter_count,record_start,record_limit);
     if(ignis_model_reload_trellis(m,p,nullptr)!=0)throw std::runtime_error(ignis_trellis_reload_error());
     auto &t=*m->lab_trace;
     for(auto &[id,c]:t.calls) {
-      if(c->bytes()+4>pin-t.pinned)throw std::runtime_error("capture graph exceeds pinned-memory budget");
-      c->allocate();t.pinned+=c->bytes()+4;
+      if(c->bytes()+24>pin-t.pinned)throw std::runtime_error("capture graph exceeds pinned-memory budget");
+      c->allocate();t.pinned+=c->bytes()+24;
     }
     for(auto &[id,c]:t.gqa_calls) {
-      if(c->bytes()+4>pin-t.pinned)throw std::runtime_error("GQA capture graph exceeds pinned-memory budget");
-      c->allocate();t.pinned+=c->bytes()+4;
+      if(c->bytes()+24>pin-t.pinned)throw std::runtime_error("GQA capture graph exceeds pinned-memory budget");
+      c->allocate();t.pinned+=c->bytes()+24;
     }
     for(auto &[id,c]:t.segments){
-      if(c->bytes()+4>pin-t.pinned)throw std::runtime_error("segment graph exceeds pinned-memory budget");
-      c->allocate();t.pinned+=c->bytes()+4;
+      if(c->bytes()+24>pin-t.pinned)throw std::runtime_error("segment graph exceeds pinned-memory budget");
+      c->allocate();t.pinned+=c->bytes()+24;
     }
     t.mode=ignis::LabTrace::Record;
     if(ignis_model_reload_trellis(m,p,nullptr)!=0)throw std::runtime_error(ignis_trellis_reload_error());
@@ -553,6 +690,12 @@ extern "C" int32_t ignis_lab_replay_diagnostics(ignis_model *m,const ignis_lab_w
       }
       *mismatches=d.mismatches;
       if(*mismatches && check!=IGNIS_LAB_CHECK_EXPLORATION)break;
+    }
+    if(tensor_export){
+      ck(cudaMemcpy2D(result.data(),w.out*2,dy.p,ldy*2,w.out*2,tokens,cudaMemcpyDeviceToHost));
+      tensor_export->tensor("output","candidate_output",result.data(),result.size()*2,"bf16",{w.out,tokens},false);
+      const auto all=weights(*m);tensor_export->weight(view->name,all.at(view->name));
+      if(upview && std::string(upview->name)!=view->name)tensor_export->weight(upview->name,all.at(upview->name));
     }
     if(diagnostics)*diagnostics=d;
     cudaEventDestroy(a);cudaEventDestroy(b);cudaGraphExecDestroy(exec);cudaGraphDestroy(graph);return 0;
@@ -725,6 +868,11 @@ extern "C" int32_t ignis_lab_gqa_replay(ignis_model *m,const ignis_lab_gqa_view 
       *state_bytes+=state;
       if((d.mismatches || *state_mismatches) && check!=IGNIS_LAB_CHECK_EXPLORATION)break;
     }
+    if(tensor_export){
+      tensor_export->tensor("output","candidate_output",out);
+      static constexpr const char *names[]={"k_pages","v_pages","k_meta","v_meta","residual_k","residual_v","ring"};
+      for(size_t i=8;i<tensors.size();++i)tensor_export->tensor(names[i-8],"candidate_state",tensors[i]);
+    }
     *diagnostics=d;
     cudaEventDestroy(a);cudaEventDestroy(b);cudaGraphExecDestroy(exec);cudaGraphDestroy(graph);return 0;
   }catch(const std::exception &e){
@@ -856,6 +1004,32 @@ extern "C" int32_t ignis_lab_segment_replay(ignis_model *m,uint32_t layer,const 
         }
       }
       if((d.mismatches || *state_mismatches) && check!=IGNIS_LAB_CHECK_EXPLORATION)break;
+    }
+    if(tensor_export){
+      for(const auto &binding:c.bindings)if(binding.flags&(ignis::SEGMENT_OUTPUT|ignis::SEGMENT_MUTABLE))
+        tensor_export->tensor(binding.name,(binding.flags&ignis::SEGMENT_OUTPUT)?"candidate_output":"candidate_state",binding.tensor);
+      export_layer_weights(*m,layer,p->kind);
+      ignis_lab_segment_tensor tensors[32]{};
+      ignis_lab_segment_tensors_fn get=nullptr;
+      if(m->trellis_candidate && m->trellis_candidate->segments){
+        const char *symbol=p->kind==1?"ignis_lab_mlp_segment_tensors_v1":p->kind==2?"ignis_lab_gqa_segment_tensors_v1":"ignis_lab_gdn_segment_tensors_v1";
+        get=reinterpret_cast<ignis_lab_segment_tensors_fn>(dlsym(m->trellis_candidate->library,symbol));
+      }else get=p->kind==1?ignis_lab_mlp_segment_tensors_v1:p->kind==2?ignis_lab_gqa_segment_tensors_v1:ignis_lab_gdn_segment_tensors_v1;
+      const int32_t n=get?get(p,workspace.p,workspace_bytes,tensors,32):0;
+      if(n<0 || n>32)throw std::runtime_error("invalid candidate diagnostic tensor inventory");
+      tensor_export->metadata<<"{\"intermediate_taps\":{\"available\":"<<(n?"true":"false")
+        <<",\"reason\":\""<<(n?"candidate-owned retained workspace":"active implementation has no retained diagnostic tensor provider")<<"\"}}\n";
+      for(int32_t i=0;i<n;++i){const auto &t=tensors[i];
+        if(!t.name || !t.data || t.dtype>3 || !t.bytes)throw std::runtime_error("invalid diagnostic tensor descriptor");
+        const auto begin=reinterpret_cast<uintptr_t>(workspace.p),address=reinterpret_cast<uintptr_t>(t.data);
+        if(address<begin || t.bytes>workspace_bytes || address-begin>workspace_bytes-t.bytes)
+          throw std::runtime_error("diagnostic tensor exceeds selected candidate workspace");
+        std::vector<int64_t> shape(t.ne,t.ne+4);uint64_t elements=1;
+        for(auto dim:shape){if(dim<=0 || uint64_t(dim)>(1ull<<30)/elements)throw std::runtime_error("invalid diagnostic tensor shape");elements*=dim;}
+        const uint32_t width=t.dtype==0?2:t.dtype==1?1:4;
+        if(elements*width!=t.bytes)throw std::runtime_error("diagnostic tensor byte count mismatch");
+        tensor_export->tensor(t.name,"candidate_intermediate",t.data,t.bytes,t.dtype==0?"bf16":t.dtype==1?"u8":t.dtype==2?"i32":"f32",shape);
+      }
     }
     *diagnostics=d;cudaEventDestroy(a);cudaEventDestroy(b);cudaGraphExecDestroy(exec);cudaGraphDestroy(graph);return 0;
   }catch(const std::exception &e){if(a)cudaEventDestroy(a);if(b)cudaEventDestroy(b);if(exec)cudaGraphExecDestroy(exec);if(graph)cudaGraphDestroy(graph);

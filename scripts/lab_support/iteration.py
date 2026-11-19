@@ -1,5 +1,6 @@
 """Resident exploration, immutable recordings and named candidate snapshots."""
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,8 +27,73 @@ def selected(record, operators, tokens):
 
 
 def covers(scope, operators, tokens):
+    if scope.get('record_start',0) or scope.get('record_limit',0):return False
     return all(not scope.get(k) or bool(want) and set(want)<=set(scope[k])
                for k,want in (('operators',operators),('tokens_per_call',tokens)))
+
+
+def record_window(payload):
+    values=tuple(payload.get(name,0) for name in ('record_start','record_limit'))
+    if any(type(value) is not int or not 0<=value<(1<<64) for value in values):
+        raise ValueError('record_start/record_limit must be unsigned 64-bit integers')
+    return values
+
+
+def record_ordinal(record):
+    for name in ('id','source_record'):
+        value=record.get(name) if name=='id' else record.get(name,record['id'])
+        if type(value) is not int or not 0<=value<(1<<64):
+            raise ValueError('invalid corpus record '+name+': expected unsigned 64-bit integer')
+    return record.get('source_record',record['id'])
+
+
+def shard_signature(directory):
+    return tuple((n,(directory/n).stat().st_size,(directory/n).stat().st_mtime_ns)
+                 for n in ('manifest.json','data.bin','records.jsonl'))
+
+
+def range_digest(path, offset, size):
+    if type(offset) is not int or type(size) is not int or offset<0 or size<0:
+        raise ValueError('invalid corpus record range')
+    value=hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        stream.seek(offset)
+        while size:
+            block=stream.read(min(size,1<<20))
+            if not block:raise ValueError('truncated corpus record')
+            value.update(block);size-=len(block)
+    return value.hexdigest()
+
+
+def publish_record_integrity(path, records):
+    """Hash the complete data stream and its contiguous record slices in one pass."""
+    if not all('offset' in r and 'bytes' in r for r in records):return digest(path)
+    whole=hashlib.sha256();offset=0
+    with Path(path).open('rb') as stream:
+        for record in sorted(records,key=lambda r:r['offset']):
+            size=record['bytes']
+            if type(record['offset']) is not int or record['offset']!=offset or type(size) is not int or size<0:
+                raise ValueError('capture record ranges must partition data.bin')
+            value=hashlib.sha256()
+            while size:
+                block=stream.read(min(size,1<<20))
+                if not block:raise ValueError('truncated capture record')
+                value.update(block);whole.update(block);size-=len(block);offset+=len(block)
+            record['data_sha256']=value.hexdigest()
+        if stream.read(1):raise ValueError('unreferenced capture bytes')
+    return whole.hexdigest()
+
+
+def coverage(groups):
+    shards=[dict(shard=g.get('shard',g.get('data')),records=len(g['records']),
+        available_records=g.get('manifest',{}).get('records'),
+        capture_scope=g.get('manifest',{}).get('scope',{}),integrity=g.get('integrity','full_shard'),
+        record_ids=[r['id'] for r in g['records']],
+        source_records=[r.get('source_record',r['id']) for r in g['records']]) for g in groups]
+    sampled=any(g.get('sampled',False) or g.get('manifest',{}).get('scope',{}).get('record_limit',0)
+                or g.get('manifest',{}).get('scope',{}).get('record_start',0) for g in groups)
+    return dict(mode='sample' if sampled else 'full',records=sum(len(g['records']) for g in groups),shards=shards,
+                interpretation='selected recorded operator calls; full refers to requested operator/token scope')
 
 
 def forward_difference(reference, value):
@@ -51,8 +117,11 @@ class Iteration:
             if hasattr(self,'stage_timings'):self.stage_timings.append(dict(stage=name,seconds=seconds))
             print(f'lab: {name} {seconds:.3f}s', file=sys.stderr, flush=True)
 
-    def capture(self, operators, tokens):
+    def capture(self, operators, tokens, record_start=0, record_limit=0):
+        record_window(dict(record_start=record_start,record_limit=record_limit))
         scope=dict(operators=operators,tokens_per_call=tokens)
+        window=dict(record_start=record_start,record_limit=record_limit) if record_start or record_limit else {}
+        scope.update(window)
         destination=self.corpus/key(scope)
         if destination.exists():
             return self.verify_shard(destination)
@@ -62,41 +131,99 @@ class Iteration:
         disk=int(self.config.get('capture_disk_bytes',512<<30))
         with self.stage('capture '+json.dumps(scope,sort_keys=True)):
             minimum=checked(self.engine.call(dict(op='capture_minimum',names=','.join(operators),
-                tokens=len(self.quick_case['tokens']),requests=1,tokens_per_call=tokens)))['prefill_bytes_lower_bound']
-            if minimum>min(disk,shutil.disk_usage(staging).free):
+                tokens=len(self.quick_case['tokens']),requests=1,tokens_per_call=tokens,**window)))['prefill_bytes_lower_bound']
+            if not window and minimum>min(disk,shutil.disk_usage(staging).free):
                 raise ValueError(f'capture needs at least {minimum} bytes; narrow --operator/--tokens-per-call or increase storage')
             clean=self.reference_forward()[self.quick_case['id']]
             checked(self.engine.call(dict(op='capture_start',path=str(staging),pin_bytes=pin,
-                disk_bytes=disk,names=','.join(operators),tokens_per_call=tokens)))
+                disk_bytes=disk,names=','.join(operators),tokens_per_call=tokens,**window)))
             try:
                 reference=checked(self.engine.call(dict(op='benchmark',case=self.quick_case)))
             finally:
                 checked(self.engine.call(dict(op='capture_stop')))
-            with (staging/'records.jsonl').open() as stream:
-                count=sum(1 for _ in stream)
+            records_path=staging/'records.jsonl'
+            records=[json.loads(line) for line in records_path.read_text().splitlines()]
+            data_sha256=publish_record_integrity(staging/'data.bin',records)
+            records_path.write_text(''.join(json.dumps(r)+'\n' for r in records))
+            count=len(records)
             manifest=dict(identity=self.corpus_identity,scope=scope,complete=True,records=count,
                 reference=reference,clean_reference=clean,recording_differences=forward_difference(clean,reference),
-                files={n:digest(staging/n) for n in ('data.bin','records.jsonl')})
+                files={'data.bin':data_sha256,'records.jsonl':digest(records_path)})
             atomic(staging/'manifest.json',manifest)
             staging.rename(destination)
+            if not hasattr(self,'verified_shards'):self.verified_shards={}
+            self.verified_shards[str(destination)]=(shard_signature(destination),manifest)
         return destination,manifest
 
     def verify_shard(self, directory):
         from .host import corpus_verify
         if not hasattr(self,'verified_shards'):self.verified_shards={}
-        signature=tuple((n,(directory/n).stat().st_size,(directory/n).stat().st_mtime_ns)
-                        for n in ('manifest.json','data.bin','records.jsonl'))
+        signature=shard_signature(directory)
         cached=self.verified_shards.get(str(directory))
         if cached and cached[0]==signature:return directory,cached[1]
         manifest=corpus_verify(directory,self.corpus_identity)
         self.verified_shards[str(directory)]=(signature,manifest)
         return directory,manifest
 
+    def verify_selected(self, directory, records):
+        """Trust the hashed metadata, then read only selected recorded byte ranges."""
+        manifest=read(directory/'manifest.json')
+        if not manifest or manifest.get('identity')!=self.corpus_identity or not manifest.get('complete'):
+            raise ValueError('incomplete/incompatible corpus: '+str(directory))
+        # Metadata is small and always hashed, including a freshly published capture.
+        if digest(directory/'records.jsonl')!=manifest['files']['records.jsonl']:
+            raise ValueError('corrupt corpus: records.jsonl')
+        signature=shard_signature(directory)
+        full=getattr(self,'verified_shards',{}).get(str(directory))
+        if full and full[0]==signature:return manifest
+        if not records or not all(r.get('data_sha256') and 'offset' in r and 'bytes' in r for r in records):
+            return self.verify_shard(directory)[1]
+        if not hasattr(self,'verified_records'):self.verified_records={}
+        selection=tuple(r['id'] for r in records)
+        if self.verified_records.get((str(directory),selection))==signature:return manifest
+        for record in records:
+            if range_digest(directory/'data.bin',record['offset'],record['bytes'])!=record['data_sha256']:
+                raise ValueError('corrupt corpus record: '+str(record['id']))
+        self.verified_records[(str(directory),selection)]=signature
+        return manifest
+
+    def select_window(self, payload, operators, tokens):
+        start,limit=record_window(payload)
+        explicit=payload.get('corpus')
+        exact=dict(operators=operators,tokens_per_call=tokens,record_start=start,record_limit=limit)
+        cached=[]
+        paths=[Path(explicit)/'manifest.json'] if explicit else sorted(self.corpus.glob('*/manifest.json'))
+        for path in paths:
+            manifest=read(path)
+            if not manifest or manifest.get('identity')!=self.corpus_identity or not manifest.get('complete'):
+                if explicit:raise ValueError('incomplete/incompatible corpus: '+str(path.parent))
+                continue
+            scope=manifest['scope']
+            if explicit or covers(scope,operators,tokens) or scope==exact:
+                cached.append((path.parent,manifest))
+        if not cached:
+            cached=[self.capture(operators,tokens,start,limit)]
+        path,manifest=cached[0]
+        rows=[json.loads(line) for line in (path/'records.jsonl').read_text().splitlines() if line.strip()]
+        rows.sort(key=record_ordinal)
+        matching=[r for r in rows if selected(r,operators,tokens)]
+        # A limited capture already applied its source traversal window on device.
+        applied=not explicit and manifest['scope']==exact
+        records=matching if applied else matching[start:start+limit if limit else None]
+        if not records:raise ValueError('requested scope selects no supported operator calls')
+        manifest=self.verify_selected(path,records)
+        return [dict(data=str(path/'data.bin'),shard=str(path),records=records,manifest=manifest,
+                     sampled=bool(start or limit or len(records)!=len(rows)),
+                     integrity='selected_ranges' if all(r.get('data_sha256') and 'offset' in r and 'bytes' in r for r in records) else 'full_shard')]
+
     def select_corpus(self, payload):
+        record_window(payload)
         operators=payload.get('operators',[]);tokens=payload.get('tokens_per_call',[])
         blocks=[name.endswith(('.mlp_block','.gqa_block','.gdn_block')) for name in operators]
         if any(blocks) and not all(blocks):
             raise ValueError('segment and legacy operator selectors cannot be mixed; issue separate commands')
+        if payload.get('corpus') or payload.get('record_start',0) or payload.get('record_limit',0):
+            return self.select_window(payload,operators,tokens)
         cached=[]
         for path in sorted(self.corpus.glob('*/manifest.json')):
             if not re.fullmatch(r'[0-9a-f]{64}',path.parent.name):continue
@@ -143,6 +270,9 @@ class Iteration:
     def representative_scope(self, groups):
         selected=[]
         for group in groups:
+            if group.get('sampled'):
+                selected.append(dict(group,records=list(group['records'])))
+                continue
             representatives={}
             for record in group['records']:
                 # GQA launch work and writes depend on device positions, masks,
@@ -159,7 +289,7 @@ class Iteration:
         with self.stage(label+' input diagnostics'):
             rows=self.replay_rows(groups,warmup=0,samples=1)
         atomic(directory/(label+'-correctness.json'),rows)
-        return dict(passed=True,records=len(rows),numerical_match=all(r.get('mismatches',0)==0 for r in rows),
+        return dict(passed=True,records=len(rows),coverage=coverage(groups),numerical_match=all(r.get('mismatches',0)==0 for r in rows),
             state_match=all(r.get('state_diagnostics',{}).get('exact_match',True) for r in rows),
             diagnostics=rows,capture_trajectory_match=all(not g.get('manifest',{}).get('recording_differences') for g in groups),
             capture_differences=[dict(shard=g['shard'],differences=g['manifest']['recording_differences'])
@@ -183,6 +313,39 @@ class Iteration:
             numerical_match=diagnostics['numerical_match'] and measured['numerical_match'],
             state_match=diagnostics['state_match'] and measured['state_match'],
             interpretation='representative operator calls; exploratory numerical diagnostics')
+
+    def export_record(self, directory, candidate):
+        if sum(len(g['records']) for g in self.selection)!=1:
+            raise ValueError('export requires exactly one selected record; use --record-limit 1')
+        group=next(g for g in self.selection if g['records'])
+        record=group['records'][0]
+        rows=checked(self.engine.call(dict(op='replay_batch',data=group['data'],records=[record],
+            warmup=0,samples=1,exploratory=True,export_path=str(directory/'tensors'))))
+        exported=rows[0].get('export')
+        if not exported:raise ValueError('engine did not export candidate tensors')
+        manifest_path=Path(exported['manifest'])
+        manifest=read(manifest_path)
+        if not isinstance(manifest,dict):raise ValueError('invalid tensor export manifest')
+        export_root=manifest_path.parent.resolve()
+        def hashes(value):
+            if isinstance(value,dict):
+                if 'file' in value and 'bytes' in value:
+                    path=(export_root/value['file']).resolve()
+                    if not path.is_relative_to(export_root):raise ValueError('tensor export path escapes artifact directory')
+                    actual=range_digest(path,value.get('offset',0),value['bytes'])
+                    if value.get('sha256') and value['sha256']!=actual:raise ValueError('corrupt exported tensor: '+value['file'])
+                    value['sha256']=actual
+                for child in value.values():hashes(child)
+            elif isinstance(value,list):
+                for child in value:hashes(child)
+        hashes(manifest)
+        manifest.update(candidate=candidate,source=getattr(self,'evaluation_source',{}),
+            corpus=dict(identity=self.corpus_identity,shard=group['shard'],record=record,
+                        manifest_sha256=digest(Path(group['shard'])/'manifest.json')),
+            coverage=coverage(self.selection))
+        atomic(manifest_path,manifest)
+        return dict(passed=True,path=exported['path'],manifest=str(manifest_path),record=record['id'],
+                    shard=group['shard'],coverage=coverage(self.selection),diagnostics=rows)
 
     def reference_forward(self, full=False):
         if not hasattr(self,'references'):self.references={}
@@ -230,13 +393,14 @@ class Iteration:
         actual=getattr(self,'evaluation_source',None) or source_identity(self.root)
         frozen=directory/'source';frozen.mkdir(parents=True)
         nvcc=str(Path(os.environ['CUDA_HOME'])/'bin/nvcc')
-        files=builder.freeze_inputs(self.root,nvcc)
+        env=dict(os.environ,TMPDIR=str(self.build_root/'tmp'))
+        files=builder.freeze_inputs(self.root,nvcc,env=env)
         for src in files:
             dst=frozen/src.relative_to(self.root);dst.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(src,dst)
             if digest(dst)!=actual[str(src.relative_to(self.root))]:raise ValueError('source changed while copying candidate')
         with self.stage('compile candidate'):
             try:
-                candidate=build_candidate(frozen,Path(self.config['data_dir'])/'candidates',nvcc)
+                candidate=build_candidate(frozen,self.build_root/'candidates',nvcc,env=env)
             except Exception as e:
                 raise ValueError('candidate build failed: '+str(e)) from e
         return dict(candidate,sha256=digest(candidate['path']),source={n:actual[n] for n in actual if n.startswith('kernel/')})
@@ -291,7 +455,8 @@ class Iteration:
                         baseline_output_tokens=before.get('output_tokens'),candidate_output_tokens=after.get('output_tokens'),
                         baseline_tokens_per_round=before['tokens_per_round'],candidate_tokens_per_round=after['tokens_per_round'],
                         differences=forward_difference(before,after)))
-        return dict(passed=True,baseline=baseline,candidate=candidate,order=order,checks=checks,legs=legs,performance=performance,forward=forward)
+        return dict(passed=True,baseline=baseline,candidate=candidate,order=order,checks=checks,legs=legs,performance=performance,forward=forward,
+                    **({} if forward else dict(coverage=coverage(self.selection))))
 
     def evaluate(self,payload,action):
         actual=source_identity(self.root)
@@ -302,7 +467,7 @@ class Iteration:
         d=self.directory/'results'/payload['operation'];d.mkdir(parents=True,exist_ok=False)
         report=dict(passed=False,operation=payload['operation'],action=action,engine_pid=getattr(self.engine,'engine_pid',self.engine.process.pid),
             source=actual,config_hash=self.state['config_hash'],finished=False,settings=self.state.get('settings'),
-            scope={k:payload.get(k,[]) for k in ('operators','tokens_per_call')},
+            scope={k:payload[k] for k in ('operators','tokens_per_call','record_start','record_limit','corpus') if k in payload},
             profiler_session=getattr(self.engine,'profiler_session',None),
             profiling_enabled=self.state.get('profiling_enabled',False))
         self.publish(status='busy',active=payload['operation'],result=str(d/'result.json'))
@@ -339,8 +504,9 @@ class Iteration:
                     elif action=='profile':
                         from .profiling import profile
                         report['profile']=profile(self,d,payload,candidate)
+                    elif action=='export':report['export']=self.export_record(d,candidate)
                     else:report['replay']=self.local(d,'candidate',warmup=payload.get('warmup'),samples=payload.get('samples'))
-                report['passed']=all(report[k].get('passed',True) for k in ('replay','forward','compare','profile') if k in report)
+                report['passed']=all(report[k].get('passed',True) for k in ('replay','forward','compare','profile','export') if k in report)
         except Exception as e:
             report['error']=str(e)
             if isinstance(e,(RuntimeError,TimeoutError)):fatal=e

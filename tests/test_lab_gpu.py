@@ -1,7 +1,8 @@
 """Opt-in end-to-end test of the Laptop entry point and real 5080 session.
 
 IGNIS_LAB_E2E_CONFIG=/absolute/lab-settings.json python3 -m unittest discover -s tests -p test_lab_gpu.py
-The test derives a configuration with four output tokens and one timing sample.
+Tests derive configurations with four output tokens and one timing sample;
+the sampling/export regression uses 24 tokens to retain multiple decode calls.
 Set IGNIS_LAB_E2E_PROFILE=1 as well to require a real Nsight report. These are
 functional regressions, never a production benchmark verdict.
 """
@@ -189,6 +190,96 @@ class LabGpuTests(unittest.TestCase):
         finally:
             source.write_text(original)
             self.command('stop')
+
+    def test_sampled_corpus_compare_and_candidate_tensor_export(self):
+        config,cfg=self.prepare('sample-export')
+        # Keep prepare's shared disk build_root so this uses the existing target cache.
+        cfg.update(diagnostic_output_tokens=24,warmup=1,samples=1)
+        cfg.setdefault('settings',{}).update(max_context=32768,lanes=1)
+        Path(config).write_text(json.dumps(cfg,indent=2))
+        def state():
+            return self.remote("import json;from pathlib import Path;from sys import path;path.insert(0,'scripts');from lab_support.common import status;print(json.dumps(status(Path.cwd())))")
+        previous=state()
+        self.assertTrue(not previous or previous['status']=='stopped',
+                        'sampling/export integration requires an exclusive GPU handoff')
+        try:
+            ready=self.command('setup','--config',config,'--new-baseline')
+            pid=ready['engine_pid']
+            decode=8 if ready['settings']['speculation']=='dflash2' else 1
+            scope=('--operator','layer.0.down','--tokens-per-call',str(decode))
+            timing=('--warmup','0','--samples','1')
+            bounded=self.command('replay','--candidate','builtin',*scope,*timing,
+                                 '--record-start','1','--record-limit','1')
+            sample=self.assert_replay(bounded,pid,1)
+            self.assertEqual(sample['coverage']['mode'],'sample')
+            self.assertEqual(sample['coverage']['records'],1)
+            bounded_shard=sample['coverage']['shards'][0]
+            self.assertEqual(bounded_shard['record_ids'],[1])
+            self.assertEqual(bounded_shard['source_records'],[1])
+            self.assertEqual(bounded_shard['capture_scope']['record_limit'],1)
+            full=self.command('replay','--candidate','builtin',*scope,*timing)
+            full_replay=self.assert_replay(full,pid,1)
+            self.assertEqual(full_replay['coverage']['mode'],'full')
+            self.assertGreaterEqual(full_replay['records'],2,'fixture requires multiple decode calls')
+            full_shard=full_replay['coverage']['shards'][0]['shard']
+            self.assertNotEqual(full_shard,bounded_shard['shard'],
+                                'a bounded corpus incorrectly satisfied the full request')
+            inventory=self.corpus_inventory(cfg['data_dir'])
+            window=('--corpus',full_shard,'--record-start','1','--record-limit','1')
+            reused=self.command('replay','--candidate','builtin',*window,*timing)
+            self.assert_replay(reused,pid,1)
+            selected=reused['replay']['coverage']['shards'][0]
+            self.assertEqual(selected['record_ids'],[1]);self.assertEqual(selected['source_records'],[1])
+            self.assertEqual(selected['integrity'],'selected_ranges')
+            compared=self.command('compare','--baseline','builtin','--candidate','current',
+                                  *window,'--warmup','0','--samples','2')
+            self.assertTrue(compared['passed']);self.assertEqual(compared['engine_pid'],pid)
+            comparison=compared['compare']
+            self.assertEqual(comparison['coverage']['mode'],'sample')
+            for label in ('baseline','candidate'):
+                self.assertEqual([r['record'] for r in comparison['checks'][label]['diagnostics']],[1])
+                for leg in comparison['legs'][label]:
+                    self.assertEqual([(r['shard'],r['record']) for r in leg['timings']],[(full_shard,1)])
+            exported=self.command('export','--candidate','current',*window)
+            self.assertTrue(exported['passed']);self.assertEqual(exported['engine_pid'],pid)
+            artifact=exported['export']
+            self.assertEqual(artifact['coverage']['mode'],'sample')
+            self.assertEqual(artifact['coverage']['shards'][0]['record_ids'],[1])
+            verify_export="""import hashlib,json,sys
+from pathlib import Path
+path=Path(sys.argv[1]);manifest=json.loads(path.read_text())
+for tensor in manifest['tensors']+manifest['files']:
+    value=hashlib.sha256();remaining=tensor['bytes']
+    with (path.parent/tensor['file']).open('rb') as stream:
+        stream.seek(tensor.get('offset',0))
+        while remaining:
+            block=stream.read(min(remaining,1<<20))
+            assert block,'truncated export'
+            value.update(block);remaining-=len(block)
+    assert value.hexdigest()==tensor['sha256'],'export hash mismatch'
+print(json.dumps(manifest))"""
+            manifest=self.remote(verify_export,artifact['manifest'])
+            self.assertEqual(manifest['candidate']['identity'],exported['candidate']['identity'])
+            self.assertEqual(manifest['candidate']['sha256'],exported['candidate']['sha256'])
+            self.assertEqual(manifest['corpus']['record']['id'],1)
+            self.assertEqual(manifest['corpus']['shard'],full_shard)
+            self.assertEqual(len(manifest['corpus']['manifest_sha256']),64)
+            self.assertTrue(manifest['source'])
+            purposes={t['purpose'] for t in manifest['tensors']}
+            self.assertTrue({'recorded_input','recorded_reference','candidate_output',
+                             'model_weight_encoded','model_weight_scale'}<=purposes,purposes)
+            actual=[t for t in manifest['tensors'] if t['purpose']=='candidate_output']
+            self.assertTrue(actual)
+            self.assertTrue(all(t['file']=='candidate.bin' and t['bytes']>0 and t['shape'] and t['dtype'] for t in actual))
+            self.assertIn('actual final replay launch',manifest['candidate_execution'])
+            self.assertEqual(self.corpus_inventory(cfg['data_dir']),inventory,
+                             'explicit corpus replay/compare/export recorded or changed immutable inputs')
+            self.assertEqual(self.command('setup')['engine_pid'],pid)
+        finally:
+            # A failed prerequisite or another session must never be stopped here.
+            current=state()
+            if current and Path(current.get('directory','/')).is_relative_to(Path(cfg['data_dir'])/'sessions'):
+                self.command('stop')
 
     @unittest.skipUnless(os.environ.get('IGNIS_LAB_E2E_PROFILE'),'opt-in real Nsight capture')
     def test_real_profile_preserves_resident_engine(self):

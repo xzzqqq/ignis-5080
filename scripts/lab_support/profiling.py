@@ -8,7 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .common import atomic, key
+from .common import atomic
 
 
 def checked(reply):
@@ -39,13 +39,10 @@ def profile(owner, directory, payload, candidate):
     if not nsys:
         raise ValueError('operator profiling requires Nsight Systems (nsys) in the remote PATH')
     groups = []
-    for group in owner.selection:
-        representatives = {}
-        for record in group['records']:
-            identity = key({field:record.get(field) for field in ('weight', 'up', 'tokens', 'ldy', 'epilogue')})
-            representatives.setdefault(identity, record)
-        if representatives:
-            groups.append(dict(data=group['data'], records=list(representatives.values())))
+    from .iteration import Iteration
+    for group in Iteration.representative_scope(owner,owner.selection):
+        if group['records']:
+            groups.append(dict(data=group['data'], records=group['records']))
     if not groups:
         raise ValueError('profile scope selects no recorded inputs')
     warmup = int(payload.get('warmup') if payload.get('warmup') is not None else owner.config.get('warmup', 1))
@@ -88,7 +85,8 @@ def profile(owner, directory, payload, candidate):
     summary = summarize(database)
     atomic(directory/'profile-timeline.json', summary)
     atomic(directory/'profile-replay.json', rows)
-    return dict(passed=True, candidate=candidate['identity'], profiler='nsys',
+    from .iteration import coverage
+    return dict(passed=True, candidate=candidate['identity'], profiler='nsys',coverage=coverage(owner.selection),
                 representatives=sum(len(group['records']) for group in groups),
                 warmup=warmup, samples=samples, profile_wall_s=time.monotonic()-began,
                 stop_status=stop_status, artifacts=dict(report=str(report), sqlite=str(database),

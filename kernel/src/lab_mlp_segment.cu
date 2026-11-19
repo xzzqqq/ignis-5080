@@ -63,3 +63,12 @@ extern "C" int32_t ignis_lab_mlp_segment_run(const ignis_mlp_segment_call *c,voi
     return 0;
   }catch(const std::exception &e){error=e.what();return -1;}
 }
+
+extern "C" IGNIS_LAB_DIAGNOSTIC_EXPORT int32_t ignis_lab_mlp_segment_tensors_v1(const ignis_segment_profile *p,
+    const void *workspace,uint64_t bytes,ignis_lab_segment_tensor *out,uint32_t capacity){
+  if(!p || !workspace || !ignis_lab_mlp_segment_workspace(p) || bytes<ignis_lab_mlp_segment_workspace(p) || !out || capacity<2)return -1;
+  auto *base=static_cast<const char *>(workspace);
+  out[0]={"normalized_input",base,2ull*p->hidden*p->tokens,0,{int32_t(p->hidden),int32_t(p->tokens),1,1}};
+  out[1]={"swiglu",base+align256(2ull*p->hidden*p->tokens),2ull*p->intermediate*p->tokens,0,{int32_t(p->intermediate),int32_t(p->tokens),1,1}};
+  return 2;
+}

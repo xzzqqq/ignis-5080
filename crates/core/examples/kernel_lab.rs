@@ -20,6 +20,9 @@ fn emit(v: Value) { println!("{v}"); io::stdout().flush().unwrap(); }
 fn integer(v: &Value, name: &str, default: u32) -> Result<u32> {
     match v.get(name) { None => Ok(default), Some(x) => Ok(u32::try_from(x.as_u64().ok_or("expected unsigned integer")?)?) }
 }
+fn unsigned(v:&Value,name:&str,default:u64)->Result<u64>{
+    v.get(name).map_or(Ok(default),|x|x.as_u64().ok_or_else(||format!("{name} must be an unsigned integer").into()))
+}
 fn token_filter(v: &Value) -> Result<Vec<u32>> {
     let Some(value)=v.get("tokens_per_call") else {return Ok(Vec::new());};
     let items=value.as_array().ok_or("tokens_per_call must be an array")?;
@@ -106,8 +109,9 @@ fn main() -> Result<()> {
                     v["requests"].as_u64().ok_or("missing requests")?,&token_filter(&v)?)?})),
                 "capture_start" => {
                     let path=Path::new(v["path"].as_str().ok_or("missing capture path")?);
-                    ignis_core::lab_trace::start_filtered(&mut model,&mut pool,path,
-                        v["pin_bytes"].as_u64().ok_or("missing pin budget")?,v["disk_bytes"].as_u64().ok_or("missing disk budget")?,v["names"].as_str().unwrap_or(""),&token_filter(&v)?)?;
+                    ignis_core::lab_trace::start_selected(&mut model,&mut pool,path,
+                        v["pin_bytes"].as_u64().ok_or("missing pin budget")?,v["disk_bytes"].as_u64().ok_or("missing disk budget")?,v["names"].as_str().unwrap_or(""),&token_filter(&v)?,
+                        unsigned(&v,"record_start",0)?,unsigned(&v,"record_limit",0)?)?;
                     recording = true;
                     Ok(json!({"recording":true}))
                 },
@@ -118,10 +122,11 @@ fn main() -> Result<()> {
                     let mut rows=Vec::new();
                     let exploratory=v["exploratory"].as_bool().unwrap_or(false);
                     for record in records {
-                        let row=ignis_core::lab_trace::replay_with_check(&mut model,data,record,
+                        let export_path=v["export_path"].as_str().map(|p|Path::new(p).join(format!("record-{}",record["id"].as_u64().unwrap_or(0))));
+                        let row=ignis_core::lab_trace::replay_with_export(&mut model,data,record,
                             integer(&v,"warmup",0)?,integer(&v,"samples",1)?,if exploratory {
                                 ignis_core::lab_trace::ReplayCheck::Exploration
-                            } else {ignis_core::lab_trace::ReplayCheck::FirstExecution})?;
+                            } else {ignis_core::lab_trace::ReplayCheck::FirstExecution},export_path.as_deref())?;
                         let passed=row["passed"]==true;
                         rows.push(row);
                         if !exploratory && !passed {break;}
@@ -135,8 +140,8 @@ fn main() -> Result<()> {
                         "exploration" => ignis_core::lab_trace::ReplayCheck::Exploration,
                         _ => return Err("check must be every, first or exploration".into()),
                     };
-                    Ok(ignis_core::lab_trace::replay_with_check(&mut model,Path::new(v["data"].as_str().ok_or("missing data path")?),
-                        &v["record"],integer(&v,"warmup",1)?,integer(&v,"samples",3)?,check)?)
+                    Ok(ignis_core::lab_trace::replay_with_export(&mut model,Path::new(v["data"].as_str().ok_or("missing data path")?),
+                        &v["record"],integer(&v,"warmup",1)?,integer(&v,"samples",3)?,check,v["export_path"].as_str().map(Path::new))?)
                 },
                 "benchmark" => {
                     let _sample=if v.get("profile_sample").is_some() {

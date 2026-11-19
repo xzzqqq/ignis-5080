@@ -26,6 +26,8 @@ int32_t ignis_lab_trace_flush(ignis_model *);
 int32_t ignis_lab_profiler_start();
 int32_t ignis_lab_profiler_stop();
 const char *ignis_lab_trace_error();
+// Thread-local export sink, explicit offline replay only; nullptr closes it.
+int32_t ignis_lab_export_directory(const char *directory);
 const char *ignis_lab_gqa_implementation(ignis_model *);
 int32_t ignis_lab_gqa_candidate_applied(ignis_model *);
 int32_t ignis_lab_capture_minimum(ignis_model *, const char *, uint64_t tokens, uint64_t requests, uint64_t *bytes);
@@ -52,6 +54,10 @@ int32_t ignis_lab_gqa_replay(ignis_model *, const ignis_lab_gqa_view *, const vo
 // Empty token filters preserve the original all-token capture behavior.
 int32_t ignis_lab_capture_start_filtered(ignis_model *, ignis_seq_pool *, const char *, uint64_t, uint64_t,
     const char *, const uint32_t *token_filter, uint32_t token_filter_count);
+// Source ordinals count matching executions before any tensor transfer. A zero
+// limit keeps all records from start onward; start=limit=0 retains legacy copies.
+int32_t ignis_lab_capture_start_selected(ignis_model *, ignis_seq_pool *, const char *, uint64_t, uint64_t,
+    const char *, const uint32_t *token_filter, uint32_t token_filter_count, uint64_t record_start, uint64_t record_limit);
 int32_t ignis_lab_capture_minimum_filtered(ignis_model *, const char *, uint64_t tokens, uint64_t requests,
     const uint32_t *token_filter, uint32_t token_filter_count, uint64_t *bytes);
 int32_t ignis_lab_replay_diagnostics(ignis_model *, const ignis_lab_weight_view *, const ignis_lab_weight_view *,

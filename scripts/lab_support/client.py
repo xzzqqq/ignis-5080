@@ -126,8 +126,17 @@ def forward_summary(value):
         reference_available=value.get('reference_available',True),cases=cases)
 
 
+def coverage_summary(value):
+    return dict(mode=value['mode'],records=value['records'],shards=len(value['shards']),
+        selection=[dict(shard=g['shard'],records=g['records'],available_records=g.get('available_records'),
+            record_ids=g.get('record_ids',[])[:20],record_ids_shown=min(len(g.get('record_ids',[])),20),
+            capture_scope=g.get('capture_scope'),integrity=g.get('integrity'),
+            source_records=g.get('source_records',[])[:20]) for g in value['shards'][:20]])
+
+
 def replay_summary(value):
     result={k:value[k] for k in ('passed','records','performance_records','warmup','samples','numerical_match','state_match','capture_trajectory_match') if k in value}
+    if 'coverage' in value:result['coverage']=coverage_summary(value['coverage'])
     result['numerical']=numerical_summary(value.get('diagnostics',[]))
     result['timing_numerical']=numerical_summary(value.get('timings',[]))
     result['timing']=timing_summary(value.get('timings',[]))
@@ -139,6 +148,7 @@ def replay_summary(value):
 
 def compare_summary(value):
     result={k:value[k] for k in ('passed','forward') if k in value}
+    if 'coverage' in value:result['coverage']=coverage_summary(value['coverage'])
     result.update(baseline=candidate_summary(value['baseline']),candidate=candidate_summary(value['candidate']),
                   pairs=len(value.get('order',[]))//2)
     if value.get('forward'):
@@ -212,8 +222,12 @@ def summary(value, local_result=None):
     for field in ('forward','before_forward','after_forward'):
         if field in value:result[field]=forward_summary(value[field])
     if 'compare' in value:result['compare']=compare_summary(value['compare'])
+    if 'export' in value:
+        result['export']={k:v for k,v in value['export'].items() if k in ('passed','path','manifest','record','shard')}
+        result['export']['coverage']=coverage_summary(value['export']['coverage'])
     if 'profile' in value:
         result['profile']={k:v for k,v in value['profile'].items() if k not in ('kernels','candidate','forward','attribution')}
+        if 'coverage' in result['profile']:result['profile']['coverage']=coverage_summary(result['profile']['coverage'])
         result['profile']['kernels']=value['profile'].get('kernels',[])[:20]
         result['profile']['kernels_shown']=len(result['profile']['kernels'])
         if 'forward' in value['profile']:
@@ -230,13 +244,16 @@ def summary(value, local_result=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description='Resident Kernel Lab: setup fixes the model/settings; replay explores numerical differences and timing; forward measures model execution; compare alternates paired measurements; candidates lists saved snapshots; profile reports operator or full-model CUDA execution; stop releases the GPU.')
-    p.add_argument('action', choices=['setup', 'replay', 'forward', 'compare', 'candidates', 'profile', 'stop'], help='replay is quick exploration, not strict numerical acceptance; forward needs no replay or capture')
+    p.add_argument('action', choices=['setup', 'replay', 'forward', 'compare', 'candidates', 'profile', 'export', 'stop'], help='replay is quick exploration, not strict numerical acceptance; forward needs no replay or capture')
     p.add_argument('--config', type=Path, help='Fixed artifact/settings/resources JSON, setup only (required on first setup)')
     p.add_argument('--new-baseline', action='store_true', help='After stopping, rebuild the fixed host baseline (setup only)')
     p.add_argument('--enable-profiling', action='store_true', help='Launch this session under Nsight Systems; disabled by default on new setup (setup only)')
     p.add_argument('--full',action='store_true',help='Evaluate all benchmark requests; forward also runs fresh builtin controls before and after')
     p.add_argument('--operator', action='append', default=[], dest='operators', help='Exact weight/operator name; repeat for several; omitted means all supported calls (replay/profile/compare without --forward)')
     p.add_argument('--tokens-per-call', type=int, action='append', default=[], help='Operator input token count, not generation length; repeat for several; omitted means every shape')
+    p.add_argument('--record-start',type=int,default=0,help='Skip this many matching calls before capture, or matching records in execution order in --corpus')
+    p.add_argument('--record-limit',type=int,default=0,help='Select at most this many matching records (0 means all); capture selection happens before device copies')
+    p.add_argument('--corpus',help='Existing remote corpus shard directory; select immutable record IDs without recording a new request')
     p.add_argument('--warmup', type=int, help='Warmup executions (0..10000); profile --forward defaults to 0, other modes use their usual defaults')
     p.add_argument('--samples', type=int, help='Timed samples; profile --forward defaults to 1; compare alternates this many pairs')
     p.add_argument('--candidate', default='current', help='current freezes worktree kernels; otherwise a saved immutable name or builtin')
@@ -248,14 +265,19 @@ def main(argv=None):
     supplied={a.split('=',1)[0] for a in arguments if a.startswith('--')}
     allowed={
         '--config':{'setup'}, '--new-baseline':{'setup'}, '--enable-profiling':{'setup'}, '--full':{'forward','compare'},
-        '--operator':{'replay','profile','compare'}, '--tokens-per-call':{'replay','profile','compare'},
+        '--operator':{'replay','profile','compare','export'}, '--tokens-per-call':{'replay','profile','compare','export'},
+        '--record-start':{'replay','profile','compare','export'}, '--record-limit':{'replay','profile','compare','export'},
+        '--corpus':{'replay','profile','compare','export'},
         '--warmup':{'replay','forward','compare','profile'}, '--samples':{'replay','forward','compare','profile'},
-        '--candidate':{'replay','forward','compare','profile'}, '--baseline':{'compare'},
+        '--candidate':{'replay','forward','compare','profile','export'}, '--baseline':{'compare'},
         '--save-as':{'replay'}, '--forward':{'compare','profile'}}
     for option in supplied:
         if option in allowed and args.action not in allowed[option]:p.error(option+' does not apply to '+args.action)
     if args.action=='compare' and args.full and not args.compare_forward:p.error('--full requires compare --forward')
-    if args.compare_forward and (args.operators or args.tokens_per_call):p.error('--operator/--tokens-per-call do not apply to '+args.action+' --forward')
+    if not 0<=args.record_start<(1<<64) or not 0<=args.record_limit<(1<<64):p.error('--record-start/--record-limit must be unsigned 64-bit integers')
+    if args.corpus and (not args.corpus.startswith('/') or any(c in args.corpus for c in '\0\n\r')):p.error('--corpus must be an absolute remote shard path')
+    if args.action=='export' and args.record_limit!=1:p.error('export requires --record-limit 1')
+    if args.compare_forward and (args.operators or args.tokens_per_call or args.record_start or args.record_limit or args.corpus or supplied & {'--record-start','--record-limit','--corpus'}):p.error('operator/record selectors do not apply to '+args.action+' --forward')
     if args.warmup is not None and not 0 <= args.warmup <= 10000:p.error('--warmup must be 0..10000')
     if args.samples is not None and not 1 <= args.samples <= 10000:p.error('--samples must be 1..10000')
     if any(not n or ',' in n for n in args.operators):p.error('--operator requires one exact nonempty weight name per flag')
@@ -335,6 +357,7 @@ def main(argv=None):
             payload = dict(owner=receipt['owner'],config=receipt['config'],source=source,
                            new_baseline=args.new_baseline,operation=uuid.uuid4().hex,full=args.full,
                            operators=args.operators,tokens_per_call=args.tokens_per_call,
+                           record_start=args.record_start,record_limit=args.record_limit,corpus=args.corpus,
                            candidate=args.candidate,baseline=args.baseline,save_as=args.save_as,
                            compare_forward=args.compare_forward and args.action=='compare',
                            profile_forward=args.compare_forward and args.action=='profile')
