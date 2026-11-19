@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import select
 import socket
@@ -51,6 +52,49 @@ def case_agrees(a, b):
         (r['emitted'],r['extent']) for r in a['rounds']] == [(r['emitted'],r['extent']) for r in b['rounds']]
 
 
+def filesystem_type(path):
+    """Read the mount covering the resolved path, including nested bind mounts."""
+    if sys.platform != 'linux':
+        return None
+    path = Path(path).resolve()
+    matches = []
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        mount, filesystem = line.split(' - ', 1)
+        name = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), mount.split()[4])
+        point = Path(name)
+        if path.is_relative_to(point):
+            matches.append((len(point.parts), filesystem.split()[0]))
+    if not matches:
+        raise ValueError('cannot determine build filesystem: ' + str(path))
+    return max(matches, key=lambda match: match[0])[1]
+
+
+def require_disk(path):
+    resolved = Path(path).resolve()
+    filesystem = filesystem_type(resolved)
+    if filesystem in ('tmpfs', 'ramfs'):
+        raise ValueError(f'Lab build path {path} resolves to {resolved} on {filesystem}; '
+                         'set build_root to a disk-backed directory (prefer a local SSD). '
+                         'Existing kernel/build links and cache subdirectories must also be disk-backed; '
+                         'migrate inactive caches and update links before retrying. No files were moved.')
+
+
+def prepare_build(root, build_root):
+    """Validate all compiler destinations before creating directories or building."""
+    native = root/'kernel/build'
+    paths = [build_root, *(build_root/name for name in ('target', 'tmp', 'kernel', 'candidates'))]
+    existing_native = native.exists() or native.is_symlink()
+    for path in [*paths, *([native] if existing_native else [])]:
+        require_disk(path)
+    if native.is_symlink() and not native.exists():
+        raise ValueError(f'kernel/build has a broken link: {native}; repair it to a disk-backed cache before retrying')
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+    if not existing_native:
+        native.symlink_to(build_root/'kernel', target_is_directory=True)
+    return dict(os.environ, CARGO_TARGET_DIR=str(build_root/'target'), TMPDIR=str(build_root/'tmp'))
+
+
 class Owner(Iteration):
     def __init__(self, root, state):
         self.root, self.state = root, state
@@ -58,6 +102,10 @@ class Owner(Iteration):
         self.directory = Path(state['directory'])
         self.engine = None
         self.state_file = root / '.scratch/lab/state.json'
+
+    @property
+    def build_root(self):
+        return Path(self.config.get('build_root', str(Path(self.config['data_dir'])/'build'))).resolve()
 
     def publish(self, **fields):
         current=read(self.state_file)
@@ -77,15 +125,9 @@ class Owner(Iteration):
         for k in ('artifact', 'data_dir'):
             if not Path(cfg[k]).is_absolute():
                 raise ValueError(k + ' must be an absolute remote path')
-        build_root = Path(cfg.get('build_root', str(Path(cfg['data_dir'])/'build')))
-        build_root.mkdir(parents=True, exist_ok=True)
-        (build_root/'tmp').mkdir(exist_ok=True)
-        native = self.root/'kernel/build'
-        (build_root/'kernel').mkdir(exist_ok=True)
-        if not native.exists():
-            native.symlink_to(build_root/'kernel', target_is_directory=True)
-        env = dict(os.environ, CARGO_TARGET_DIR=str(build_root/'target'),TMPDIR=str(build_root/'tmp'),
-                   IGNIS_KERNEL_BUILD_JOBS=str(cfg.get('build_jobs',4)))
+        build_root = self.build_root
+        env = prepare_build(self.root, build_root)
+        env['IGNIS_KERNEL_BUILD_JOBS'] = str(cfg.get('build_jobs',4))
         cargo = ['cargo']
         if (self.root/'.remote.cargo.toml').is_file():
             cargo += ['--config',str(self.root/'.remote.cargo.toml')]
@@ -303,11 +345,11 @@ def main():
     os.umask(0o077)
     p=argparse.ArgumentParser()
     p.add_argument('--root',type=Path,required=True)
-    p.add_argument('action',choices=['start','serve','stop','replay','forward','compare','candidates','profile'])
+    p.add_argument('action',choices=['start','serve','stop','replay','forward','compare','candidates','profile','export'])
     p.add_argument('--owner',required=True)
     args=p.parse_args()
     try:
-        payload=json.load(sys.stdin) if args.action in ('start','replay','forward','compare','candidates','profile') else None
+        payload=json.load(sys.stdin) if args.action in ('start','replay','forward','compare','candidates','profile','export') else None
         if args.action=='serve':serve(args.root,args.owner);return
         result=start(args.root,args.owner,payload) if args.action=='start' else control(args.root,args.owner,args.action,payload)
         print(json.dumps(result))

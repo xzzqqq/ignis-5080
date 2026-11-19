@@ -1,5 +1,7 @@
 """CPU coverage for exploratory replay, scope caching and immutable snapshots."""
 import json
+import hashlib
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -61,6 +63,221 @@ class IterationTests(unittest.TestCase):
                 (next(value.corpus.glob('*/data.bin'))).write_bytes(b'corrupt')
                 with self.assertRaisesRegex(ValueError,'corrupt'):
                     value.select_corpus(dict(operators=['gate'],tokens_per_call=[1]))
+
+    def test_fresh_capture_is_verified_without_rehash_until_file_changes(self):
+        with tempfile.TemporaryDirectory() as t:
+            value=self.owner(Path(t))
+            value.quick_case=dict(id='quick',tokens=[1])
+            reference=dict(tokens=[2],input_tokens=1,finish_reason='length',stop_token=None,
+                           logits_sha256='fixed',rounds=[])
+            value.reference_forward=Mock(return_value={'quick':reference})
+            record=dict(id=0,weight={'name':'gate'},tokens=1)
+            def engine_call(request):
+                result={}
+                if request['op']=='capture_minimum':result=dict(prefill_bytes_lower_bound=6)
+                elif request['op']=='capture_start':
+                    path=Path(request['path'])
+                    (path/'records.jsonl').write_text(json.dumps(record)+'\n')
+                    (path/'data.bin').write_bytes(b'frozen')
+                elif request['op']=='benchmark':result=reference
+                return dict(ok=True,result=result)
+            value.engine=SimpleNamespace(call=Mock(side_effect=engine_call))
+            payload=dict(operators=['gate'],tokens_per_call=[1])
+            with patch.object(iteration,'digest',wraps=common.digest) as capture_digest, \
+                 patch.object(host,'digest',wraps=common.digest) as verify_digest:
+                groups=value.select_corpus(payload)
+                path=Path(groups[0]['shard'])
+                self.assertEqual(groups[0]['records'],[record])
+                self.assertEqual(capture_digest.call_count,2)
+                self.assertEqual({call.args[0].name for call in capture_digest.call_args_list},
+                                 {'data.bin','records.jsonl'})
+                value.verify_shard(path)
+                value.select_corpus(payload)
+                verify_digest.assert_not_called()
+                self.assertEqual(capture_digest.call_count,2)
+                (path/'data.bin').write_bytes(b'corrupt')
+                with self.assertRaisesRegex(ValueError,'corrupt corpus: data.bin'):
+                    value.select_corpus(payload)
+                verify_digest.assert_called_once_with(path/'data.bin')
+
+    def hashed_shard(self, owner, records=4):
+        path,manifest=self.shard(owner,['gate'],[1])
+        rows=[dict(id=i,source_record=i+40,weight={'name':'gate'},tokens=1,
+                   offset=i*4,bytes=4) for i in range(records)]
+        (path/'data.bin').write_bytes(b''.join(bytes([i])*4 for i in range(records)))
+        for row in rows:row['data_sha256']=iteration.range_digest(path/'data.bin',row['offset'],row['bytes'])
+        (path/'records.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+        manifest.update(records=len(rows),files={n:common.digest(path/n) for n in ('records.jsonl','data.bin')})
+        common.atomic(path/'manifest.json',manifest)
+        return path,rows
+
+    def test_publication_hashes_full_stream_and_records_in_one_bounded_pass(self):
+        data=b'a'*(2<<20)+b'bc'
+        rows=[dict(id=0,offset=0,bytes=2<<20),dict(id=1,offset=2<<20,bytes=2)]
+        sizes=[]
+        class Stream(io.BytesIO):
+            def read(self,size=-1):
+                sizes.append(size)
+                return super().read(size)
+        with patch.object(Path,'open',return_value=Stream(data)) as opened, \
+             patch.object(iteration,'digest',side_effect=AssertionError('must not rehash whole file')):
+            actual=iteration.publish_record_integrity(Path('/data.bin'),rows)
+        opened.assert_called_once_with('rb')
+        self.assertEqual(actual,hashlib.sha256(data).hexdigest())
+        self.assertEqual([r['data_sha256'] for r in rows],[hashlib.sha256(data[:-2]).hexdigest(),hashlib.sha256(b'bc').hexdigest()])
+        self.assertTrue(all(0<size<=1<<20 for size in sizes))
+
+    def test_selected_existing_record_hashes_only_selected_bytes(self):
+        with tempfile.TemporaryDirectory() as t:
+            owner=self.owner(Path(t));path,rows=self.hashed_shard(owner)
+            payload=dict(corpus=str(path),record_start=2,record_limit=1)
+            owner.capture=Mock(side_effect=AssertionError('existing corpus must not capture'))
+            with patch.object(iteration,'digest',wraps=common.digest) as digest, \
+                 patch.object(iteration,'range_digest',wraps=iteration.range_digest) as ranges:
+                groups=owner.select_corpus(payload)
+            self.assertEqual(groups[0]['records'],[rows[2]])
+            self.assertEqual([c.args[0].name for c in digest.call_args_list],['records.jsonl'])
+            ranges.assert_called_once_with(path/'data.bin',8,4)
+            self.assertEqual(iteration.coverage(groups)['mode'],'sample')
+            # Changes outside the explicitly selected record do not read or invalidate it.
+            with (path/'data.bin').open('r+b') as data:data.write(b'XXXX')
+            self.assertEqual(owner.select_corpus(payload)[0]['records'],[rows[2]])
+            with (path/'data.bin').open('r+b') as data:data.seek(8);data.write(b'XXXX')
+            with self.assertRaisesRegex(ValueError,'corrupt corpus record: 2'):owner.select_corpus(payload)
+
+    def test_existing_sample_orders_source_calls_before_slicing(self):
+        with tempfile.TemporaryDirectory() as t:
+            owner=self.owner(Path(t));path,rows=self.hashed_shard(owner)
+            rows[0]['source_record']=43;rows[3]['source_record']=40
+            (path/'records.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+            manifest=common.read(path/'manifest.json')
+            manifest['files']['records.jsonl']=common.digest(path/'records.jsonl')
+            common.atomic(path/'manifest.json',manifest)
+            groups=owner.select_corpus(dict(corpus=str(path),record_start=0,record_limit=1))
+            self.assertEqual(groups[0]['records'],[rows[3]])
+            self.assertEqual(iteration.coverage(groups)['shards'][0]['source_records'],[40])
+
+    def test_record_selectors_reject_invalid_or_overflow_values_before_capture(self):
+        owner=iteration.Iteration();owner.capture=Mock(side_effect=AssertionError('must not capture'))
+        for name in ('record_start','record_limit'):
+            for invalid in (None,True,False,-1,1.0,'1',1<<64):
+                with self.subTest(name=name,invalid=invalid),self.assertRaisesRegex(ValueError,'unsigned 64-bit'):
+                    owner.select_corpus({name:invalid})
+        owner.capture.assert_not_called()
+        self.assertEqual(iteration.record_window(dict(record_start=(1<<64)-1,record_limit=(1<<64)-1)),((1<<64)-1,(1<<64)-1))
+
+    def test_existing_sample_rejects_invalid_record_ordinals_before_engine(self):
+        with tempfile.TemporaryDirectory() as t:
+            owner=self.owner(Path(t));path,rows=self.hashed_shard(owner)
+            owner.engine=SimpleNamespace(call=Mock(side_effect=AssertionError('must not replay')))
+            for field in ('id','source_record'):
+                for invalid in (None,True,-1,'2',1.5,1<<64):
+                    malformed=[dict(r) for r in rows];malformed[0][field]=invalid
+                    (path/'records.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in malformed))
+                    with self.subTest(field=field,invalid=invalid),self.assertRaisesRegex(ValueError,'invalid corpus record '+field):
+                        owner.select_corpus(dict(corpus=str(path),record_limit=1))
+            owner.engine.call.assert_not_called()
+
+    def test_selected_metadata_and_legacy_integrity_remain_checked(self):
+        with tempfile.TemporaryDirectory() as t:
+            owner=self.owner(Path(t));path,rows=self.hashed_shard(owner)
+            with (path/'records.jsonl').open('a') as stream:stream.write('\n')
+            with self.assertRaisesRegex(ValueError,'corrupt corpus: records.jsonl'):
+                owner.select_corpus(dict(corpus=str(path),record_limit=1))
+        with tempfile.TemporaryDirectory() as t:
+            owner=self.owner(Path(t));path,_=self.shard(owner,['gate'],[1])
+            with patch.object(host,'digest',wraps=common.digest) as digest:
+                owner.select_corpus(dict(corpus=str(path),record_limit=1))
+            self.assertEqual({c.args[0].name for c in digest.call_args_list},{'data.bin','records.jsonl'})
+
+    def test_limited_scope_never_satisfies_full_capture(self):
+        with tempfile.TemporaryDirectory() as t:
+            owner=self.owner(Path(t));path,manifest=self.shard(owner,['gate'],[1])
+            limited=dict(operators=['gate'],tokens_per_call=[1],record_start=5,record_limit=1)
+            manifest['scope']=limited
+            common.atomic(path/'manifest.json',manifest)
+            new_path=path.with_name(common.key(limited));path.rename(new_path)
+            self.assertFalse(iteration.covers(limited,['gate'],[1]))
+            owner.capture=Mock(side_effect=lambda names,tokens:self.shard(owner,names,tokens))
+            owner.select_corpus(dict(operators=['gate'],tokens_per_call=[1]))
+            owner.capture.assert_called_once_with(['gate'],[1])
+
+    def test_capture_window_reaches_engine_before_publication_and_keeps_source_id(self):
+        with tempfile.TemporaryDirectory() as t:
+            owner=self.owner(Path(t));owner.quick_case=dict(id='quick',tokens=[1])
+            reference=dict(tokens=[2],input_tokens=1,finish_reason='length',stop_token=None,logits_sha256='x',rounds=[])
+            owner.reference_forward=Mock(return_value={'quick':reference})
+            def engine(request):
+                if request['op']=='capture_minimum':return dict(ok=True,result=dict(prefill_bytes_lower_bound=10**30))
+                if request['op']=='capture_start':
+                    self.assertEqual((request['record_start'],request['record_limit']),(42,1))
+                    path=Path(request['path']);(path/'data.bin').write_bytes(b'data')
+                    (path/'records.jsonl').write_text(json.dumps(dict(id=0,source_record=42,weight={'name':'gate'},tokens=1,offset=0,bytes=4))+'\n')
+                return dict(ok=True,result=reference if request['op']=='benchmark' else {})
+            owner.engine=SimpleNamespace(call=Mock(side_effect=engine))
+            with patch.object(iteration,'range_digest',side_effect=AssertionError('fresh capture must not reread data')):
+                groups=owner.select_corpus(dict(operators=['gate'],tokens_per_call=[1],record_start=42,record_limit=1))
+            self.assertEqual(groups[0]['records'][0]['source_record'],42)
+            self.assertEqual(groups[0]['records'][0]['data_sha256'],common.digest(Path(groups[0]['data'])))
+            self.assertEqual(groups[0]['manifest']['scope']['record_limit'],1)
+            self.assertEqual(iteration.coverage(groups)['mode'],'sample')
+
+    def test_export_replays_selected_candidate_and_enriches_native_manifest(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);owner=self.owner(root);path,rows=self.hashed_shard(owner)
+            owner.selection=owner.select_corpus(dict(corpus=str(path),record_start=2,record_limit=1))
+            exported=root/'tensors'/'record-2';exported.mkdir(parents=True)
+            (exported/'candidate.bin').write_bytes(b'actual')
+            manifest=exported/'manifest.json'
+            common.atomic(manifest,dict(tensors=[dict(name='output',purpose='candidate_output',dtype='bf16',shape=[3],file='candidate.bin',offset=0,bytes=6)]))
+            owner.engine=SimpleNamespace(call=Mock(return_value=dict(ok=True,result=[dict(record=2,export=dict(path=str(exported),manifest=str(manifest)))])))
+            owner.evaluation_source={'kernel/source':'sha'}
+            result=owner.export_record(root,dict(identity='candidate',path='/candidate.so'))
+            request=owner.engine.call.call_args.args[0]
+            self.assertEqual(request['records'],[rows[2]])
+            self.assertEqual((request['warmup'],request['samples']),(0,1))
+            final=common.read(manifest)
+            self.assertEqual(final['tensors'][0]['sha256'],common.digest(exported/'candidate.bin'))
+            self.assertEqual(final['source'],owner.evaluation_source)
+            self.assertEqual(final['candidate']['identity'],'candidate')
+            self.assertEqual(final['corpus']['record']['id'],2)
+            self.assertEqual(result['coverage']['mode'],'sample')
+
+    def test_explicit_legacy_sample_times_every_selected_record(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);owner=self.owner(root);path,rows=self.hashed_shard(owner)
+            owner.selection=owner.select_corpus(dict(corpus=str(path),record_start=1,record_limit=3))
+            def replay(request):
+                return dict(ok=True,result=[dict(record=r['id'],mismatches=0,samples_ms=[1.0]) for r in request['records']])
+            owner.engine=SimpleNamespace(call=Mock(side_effect=replay))
+            result=owner.local(root,'sample',warmup=0,samples=1)
+            self.assertEqual(result['records'],3)
+            self.assertEqual(result['performance_records'],3)
+            self.assertEqual([r['record'] for r in result['timings']],[1,2,3])
+
+    def test_sample_compare_reuses_exact_record_ids_for_all_legs(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);owner=self.owner(root);path,rows=self.hashed_shard(owner)
+            owner.selection=owner.select_corpus(dict(corpus=str(path),record_start=2,record_limit=1))
+            def replay(request):
+                return dict(ok=True,result=[dict(record=r['id'],mismatches=0,samples_ms=[1.0]) for r in request['records']])
+            owner.engine=SimpleNamespace(call=Mock(side_effect=replay),reload=Mock())
+            result=owner.compare(root,dict(samples=2,warmup=0),dict(identity='before',path='/before'),dict(identity='after',path='/after'))
+            self.assertTrue(all(c.args[0]['records']==[rows[2]] for c in owner.engine.call.call_args_list))
+            self.assertEqual(result['coverage']['mode'],'sample')
+            self.assertEqual(result['coverage']['shards'][0]['record_ids'],[2])
+            self.assertEqual(result['coverage']['shards'][0]['source_records'],[42])
+
+    def test_cli_rejects_inapplicable_record_controls_before_remote_calls(self):
+        invalid=[['export'],['export','--record-limit','2'],['replay','--record-start','-1'],
+            ['forward','--record-limit','1'],['setup','--corpus','/remote/shard'],
+            ['replay','--record-start',str(1<<64)],['replay','--record-limit',str(1<<64)],
+            ['profile','--forward','--record-limit','0'],['replay','--corpus','relative']]
+        with patch.object(client,'probe') as probe:
+            for args in invalid:
+                with self.subTest(args=args),self.assertRaises(SystemExit) as error:client.main(args)
+                self.assertEqual(error.exception.code,2)
+            probe.assert_not_called()
 
     def test_numerical_mismatch_still_times_representatives(self):
         with tempfile.TemporaryDirectory() as t:

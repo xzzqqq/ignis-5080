@@ -139,3 +139,21 @@ extern "C" int32_t ignis_lab_gqa_segment_run(const ignis_gqa_segment_call *c,
     check(cudaGetLastError());return 0;
   }catch(const std::exception &e){segment_error=e.what();return -1;}
 }
+
+// Optional retained-workspace diagnostics; independent from the candidate ABI.
+extern "C" IGNIS_LAB_DIAGNOSTIC_EXPORT int32_t ignis_lab_gqa_segment_tensors_v1(const ignis_segment_profile *p,
+    const void *workspace,uint64_t bytes,ignis_lab_segment_tensor *out,uint32_t capacity){
+  if(!p || !workspace || bytes<ignis_lab_gqa_segment_workspace(p) || !ignis_lab_gqa_segment_workspace(p))return -1;
+  constexpr uint32_t count=9;if(!out || capacity<count)return -1;
+  const char *names[]={"normalized_input","query","gate","key","value","rotated_query","rotated_key","attention","interleaved_query_gate"};
+  const uint32_t widths[]={kHidden,kQuery,kQuery,kKv,kKv,kQuery,kKv,kQuery,2*kQuery};
+  auto *cursor=static_cast<const char *>(workspace);
+  for(uint32_t i=0;i<count;++i){const auto width=widths[i];
+    out[i]={names[i],cursor,uint64_t(width)*kTokens*2,0,{int32_t(width),int32_t(kTokens),1,1}};
+    if(i==1 || i==2 || i==5) {out[i].ne[0]=256;out[i].ne[1]=24;out[i].ne[2]=kTokens;}
+    if(i==3 || i==4 || i==6) {out[i].ne[0]=256;out[i].ne[1]=4;out[i].ne[2]=kTokens;}
+    if(i==8) {out[i].ne[0]=512;out[i].ne[1]=24;out[i].ne[2]=kTokens;}
+    cursor+=tensor_bytes(width);
+  }
+  return count;
+}

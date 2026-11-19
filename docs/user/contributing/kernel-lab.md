@@ -46,6 +46,33 @@ layer costs about 153 MiB per recorded call. Narrow the scope and budget disk
 space for the complete fixed request. See the [reference](kernel-lab-reference.md#stateful-gqa-attention-replay)
 for limits, candidate workspace ownership and supported source edits.
 
+For a short diagnostic pass, explicitly limit the recording:
+
+```sh
+python3 scripts/lab.py replay --candidate current --operator layer.3.attention --tokens-per-call 8 --record-start 0 --record-limit 1
+```
+
+The limit is applied before device-to-host tensor copies and file writes. Results
+label this coverage as a sample; a limited corpus never satisfies a later full
+scope. To revisit a particular existing recording, copy its remote `shard` path
+from the result and use `--corpus /remote/path/to/shard --record-start N
+--record-limit 1` (matching records are ordered by execution ordinal). Both legs of `compare` use the same selected immutable record
+IDs. New recordings include per-record hashes, so checking a sample reads only
+its recorded byte ranges rather than hashing the entire data file.
+
+Export a selected record, including the loaded candidate's actual output:
+
+```sh
+python3 scripts/lab.py export --candidate current --corpus /remote/path/to/shard --record-start 0 --record-limit 1
+```
+
+The result links a remote artifact containing inputs, frozen references,
+candidate outputs, state and exact model weights, with shapes, dtypes, byte
+ranges, hashes and candidate/source identities. Native candidates may also
+provide internal diagnostic taps; their availability is explicit in the manifest.
+See the [sampling and export reference](kernel-lab-reference.md#sample-records-and-export-tensors)
+for ordering and integrity guarantees.
+
 To explore a larger boundary, select a finite block:
 
 ```sh

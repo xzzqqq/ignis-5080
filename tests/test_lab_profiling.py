@@ -95,6 +95,22 @@ class CollectionTests(unittest.TestCase):
         self.assertIn('--capture-range=cudaProfilerApi', commands[0])
         self.assertEqual(commands[-1][1], 'export')
 
+    def test_stateful_profile_keeps_each_selected_window(self):
+        owner=self.owner()
+        owner.selection[0]['records']=[dict(r,kind='gqa_attention') for r in owner.selection[0]['records']]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary)
+            def run(argv,log,required=True,timeout=None):
+                if argv[1]=='stop':(directory/'operator-profile.nsys-rep').touch()
+                return 0
+            with patch('lab_support.profiling.shutil.which',return_value='/bin/nsys'), \
+                 patch('lab_support.profiling.command',side_effect=run), \
+                 patch('lab_support.profiling.summarize',return_value=dict(kernel_count=2,timeline=[])):
+                result=profile(owner,directory,{},dict(identity='candidate'))
+            self.assertEqual(result['representatives'],2)
+            self.assertEqual([r['id'] for r in owner.calls[2]['records']],[1,2])
+            self.assertEqual(result['coverage']['records'],2)
+
     def test_replay_failure_closes_native_range_and_collection(self):
         owner = self.owner(fail=True)
         with tempfile.TemporaryDirectory() as temporary, \
