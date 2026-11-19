@@ -913,3 +913,8 @@ add_test(NAME ignis_kernel_trellis_body_test COMMAND ignis_kernel_trellis_body_t
 add_executable(ignis_lab_profile_test test_lab_profile.cpp)
 target_include_directories(ignis_lab_profile_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 add_test(NAME ignis_lab_profile_test COMMAND ignis_lab_profile_test)
+
+# NVFP4 production codec, graph-active split policy, band carry and four-plane state.
+add_executable(ignis_kernel_nvfp4_kv_test test_nvfp4_kv.cu)
+target_link_libraries(ignis_kernel_nvfp4_kv_test PRIVATE ignis_kernel ignis_vendor)
+add_test(NAME ignis_kernel_nvfp4_kv_test COMMAND ignis_kernel_nvfp4_kv_test)

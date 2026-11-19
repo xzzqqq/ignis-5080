@@ -4,6 +4,10 @@
 # break the byte-identical guarantee of ADR 0010, so git must leave them alone.
 kernel/vendor/** -text
 
+# The independent XQA snapshot and patches are also content-addressed by their
+# manifest: preserve exact bytes instead of applying automatic EOL conversion.
+kernel/third_party/flashinfer_xqa/** -text
+
 # The Makefile and its includes run under a POSIX sh on every OS: keep them LF.
 Makefile text eol=lf
 *.mk text eol=lf

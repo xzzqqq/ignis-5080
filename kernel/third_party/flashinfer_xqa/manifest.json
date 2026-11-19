@@ -1,0 +1,100 @@
+{
+  "reference": {
+    "repo": "flashinfer-ai/flashinfer",
+    "branch": "v0.7.2",
+    "commit": "d84335d8c54e0c8f9f7e22faa15c7e34a58abf94",
+    "default_path": ".scratch/flashinfer-v0.7.2"
+  },
+  "vendor_root": "kernel/third_party/flashinfer_xqa",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "cb67c224f503e0a063908950b12f89a7280c6e527dcffac972aa114e4bf3c5de"
+    },
+    {
+      "path": "csrc/xqa/barriers.cuh",
+      "sha256": "1891ddd0923b67145c9261b3e4d02d00a10b8d2b6924672efab2d4e756b5d11f"
+    },
+    {
+      "path": "csrc/xqa/cuda_hint.cuh",
+      "sha256": "68277000d4ed517a22ba05d8ed2891e9ab425d8969c449d729347b6f9b340871"
+    },
+    {
+      "path": "csrc/xqa/defines.h",
+      "sha256": "722dd1cba129d23ba532bdab69c15c7255d6870af52d0d3e1d5667734e752973"
+    },
+    {
+      "path": "csrc/xqa/gmma.cuh",
+      "sha256": "0894bb6c61bdaa26283fb444d34910ee974b016087ad272c5665419d8d135959"
+    },
+    {
+      "path": "csrc/xqa/gmma_impl.cuh",
+      "sha256": "6fcd59935e9703cbc92a90a739bbbc7238a6290c91426c34ee02695d1eb6e9c1"
+    },
+    {
+      "path": "csrc/xqa/hostUtils.h",
+      "sha256": "48336384eae56886654e39be726f37ccebc06ce3586d781151e692017d6a0682"
+    },
+    {
+      "path": "csrc/xqa/ldgsts.cuh",
+      "sha256": "08f2531efd9f8f4fcd1d66c8fd00e18e92743e0e1c4497c0d4d73cb8de7afb75"
+    },
+    {
+      "path": "csrc/xqa/mha.cu",
+      "sha256": "fac9c9a116be125b800257c455ee3abe2a2a620b2816a3c254792d3a5033ace4",
+      "patch": {
+        "diff": "patches/csrc/xqa/mha.cu.diff",
+        "sha256": "625f91fd7247c21fa9f370d4bd30c47633cbca559bb49200675f1b81eeee6ff1",
+        "reason": "Measured NVFP4 KV attention bottleneck: M48 Kpart32/Vtile32 reduces real W19962 full-chain median 69.696/94.272us to65.856/89.600us warm/eviction with identical output. Preserve M48 Q-copy/barrier participants and4B paired SF transfer; production graph uses device actual-length active splits and fixed21 capacity. Explicit prepare removes CUDA work from global initialization."
+      }
+    },
+    {
+      "path": "csrc/xqa/mha.h",
+      "sha256": "e23d3741868ec09c3aa2cb08ffea298db21737362b7ba89bb9d6f9c6533746fa"
+    },
+    {
+      "path": "csrc/xqa/mhaUtils.cuh",
+      "sha256": "9a62daf9bc47e03d68eb4ea8e650d4f72b29ad50538a07404f3a0793d5a1ade8"
+    },
+    {
+      "path": "csrc/xqa/mha_components.cuh",
+      "sha256": "6a549616e31ede5413ea7b5e89328f69906a0504ea35324c38941b77d31ad6c4"
+    },
+    {
+      "path": "csrc/xqa/mha_stdheaders.cuh",
+      "sha256": "54799afa4a1f605efa4b0be5963b0cbfab4bb567d70b1d600c2f852f80000e39"
+    },
+    {
+      "path": "csrc/xqa/mla_sm120.cuh",
+      "sha256": "fdc762b4470b9c86367c1a3b9e0fdea03d39024c3b3d23add25e9310b9e394d2"
+    },
+    {
+      "path": "csrc/xqa/mma.cuh",
+      "sha256": "a4a8ffbd9ecb0329864f21943916640d805e92137387b7f23e0fbc06c6dfe4d2"
+    },
+    {
+      "path": "csrc/xqa/platform.h",
+      "sha256": "e8e6e0a29992bce8cfcdc435a281730d6bc9ddaf8b8cfb647de5aad85d2c9b88"
+    },
+    {
+      "path": "csrc/xqa/specDec.h",
+      "sha256": "657a7232f4c756f3dbd12f92d7dfc6636571d9a8afc860b3d738e82ad0cb6fe7"
+    },
+    {
+      "path": "csrc/xqa/tensorMap.h",
+      "sha256": "3bbd4b09decc9b0bb289b224ee12867206c0774a45a42c70f8e4181da3790a66"
+    },
+    {
+      "path": "csrc/xqa/tma.h",
+      "sha256": "820c3633f0de1096a668d9bb8a3cb34154bd93f59a1f3a7404ebbfe0aad83904"
+    },
+    {
+      "path": "csrc/xqa/utils.cuh",
+      "sha256": "04f996f1951d8534aec7fc10e0303e10bd13b53de7eda22bc7f4a629cd627eab"
+    },
+    {
+      "path": "csrc/xqa/utils.h",
+      "sha256": "cbbcd6f7ddd2ab310f4edd3660f3535c5500071f4f359f9f49b7517f4c63c6ed"
+    }
+  ]
+}

@@ -112,7 +112,7 @@ SERVER_INPUTS := Cargo.toml $(wildcard .cargo/config.toml) \
   $(call rfiles,web/dist)
 ifeq ($(CUDA),1)
   SERVER_INPUTS += $(wildcard kernel/CMakeLists.txt) $(KERNEL_BUILD_INPUTS) \
-    $(foreach r,src include vendor/src vendor/include,$(call rfiles,kernel/$r))
+    $(foreach r,src include vendor/src vendor/include third_party,$(call rfiles,kernel/$r))
 endif
 
 WEB_INDEX := web/dist/index.html
@@ -145,7 +145,7 @@ help: ## Show this list
 	  /^[a-zA-Z0-9_.%-]+:.*## / { printf "  %-16s %s\n", $$1, $$2 }' Makefile
 	@echo ""
 	@echo "Knobs (make config for all):  CUDA=$(CUDA)  PROFILE=$(PROFILE)  UI=$(UI)  METRICS=$(METRICS)  BIND=$(BIND)  host=$(HOST_OS)"
-	@echo "GPU engine: MAX_CONTEXT=$(or $(MAX_CONTEXT),the profile's)  SPEC=$(or $(SPEC),server default)  DRAFT_TOKENS=$(DRAFT_TOKENS)  KV_FORMAT=$(KV_FORMAT)"
+	@echo "GPU engine: MAX_CONTEXT=$(or $(MAX_CONTEXT),the profile's)  SPEC=$(or $(SPEC),server default)  DRAFT_TOKENS=$(DRAFT_TOKENS)  KV_FORMAT=$(or $(KV_FORMAT),profile default)"
 	@echo "  e.g.  make dev CUDA=0 PROFILE=dev      make dev-ui SPEC=off MAX_CONTEXT=40960"
 
 .PHONY: config
@@ -157,7 +157,7 @@ config: ## Print the resolved knobs and paths
 	@echo "UI              $(UI)"
 	@echo "METRICS         $(METRICS)  $(if $(filter 0,$(METRICS)),(off),(Prometheus: $(METRICS_URL)/metrics; Playground: /ui/metrics$(if $(API_KEY), behind the API key)))"
 	@echo "ARTIFACT        $(ARTIFACT)"
-	@echo "engine (CUDA=1) context=$(or $(MAX_CONTEXT),profile default) kv=$(KV_FORMAT) chunk=$(or $(PREFILL_CHUNK),profile default) lanes=$(or $(LANES),profile default) spec=$(SPEC)/$(DRAFT_TOKENS) host_pool=$(KV_HOST_POOL_BYTES)"
+	@echo "engine (CUDA=1) context=$(or $(MAX_CONTEXT),profile default) kv=$(or $(KV_FORMAT),profile default) chunk=$(or $(PREFILL_CHUNK),profile default) lanes=$(or $(LANES),profile default) spec=$(SPEC)/$(DRAFT_TOKENS) host_pool=$(KV_HOST_POOL_BYTES)"
 	@echo "KV-DISK (CUDA=1) $(if $(filter 0,$(KV_DISK_BUDGET)),off$(if $(KV_DISK_BYTES),, (the 27B's default; KV_DISK_BYTES=4G turns it on)),budget=$(KV_DISK_BUDGET) (cut at start to the volume's free space less 10 GiB) dir=$(KV_DISK_LOCATION)/ignis-kv-disk/<pid>-<nonce>)"
 	@echo "VISION (CUDA=1) $(if $(filter 1,$(VISION)),on  max_tokens=$(or $(VISION_MAX_TOKENS),(server default)),profile default (on for rtx50-16gb))"
 	@echo "VRAM (CUDA=1)   $(if $(VRAM_BUDGET),budget=$(VRAM_BUDGET)$(if $(filter 1,$(ALLOW_VRAM_OVERSUBSCRIPTION)), (oversubscription allowed)),headroom=$(or $(VRAM_HEADROOM),(server default: 1536M))) retained_device=$(or $(RETAINED_DEVICE),(server default: 0)) retained_host=$(or $(RETAINED_HOST),(server default: two per lane))"

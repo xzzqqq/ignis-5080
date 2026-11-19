@@ -45,6 +45,9 @@
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ignis_gqa_workspace.h"
+#include "ignis_nvfp4_kv.h"
+extern "C" uint64_t ignis_gqa_native_q_fixed_workspace();
+extern "C" uint64_t ignis_gqa_native_kv_pair_workspace();
 #include "ninfer/ops/gqa_attention.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
@@ -562,7 +565,7 @@ std::size_t i32_bytes(int64_t elements) {
 // halves move into `query` and `gate` (kernel/src/trellis_body.h).
 std::size_t gqa_layer_scratch_bytes(const ignis_topology &topology, const GqaLayerWeights &w,
                                      std::int32_t T, uint32_t max_context_tokens,
-                                     ninfer::DType cache_dtype, std::int32_t batch, bool trellis) {
+                                     ninfer::DType cache_dtype, std::int32_t batch, bool trellis, std::int32_t kv_format) {
   const auto hidden = static_cast<std::int32_t>(topology.hidden);
   const auto q_width = static_cast<std::int32_t>(topology.num_q_heads * topology.head_dim);
   const auto kv_width = static_cast<std::int32_t>(topology.num_kv_heads * topology.head_dim);
@@ -585,16 +588,18 @@ std::size_t gqa_layer_scratch_bytes(const ignis_topology &topology, const GqaLay
 
   const ninfer::ops::GqaExecutionEnvelope envelope{
       /*min_visible_keys=*/1, /*max_visible_keys=*/max_context_tokens};
-  const auto original_attention_bytes=ignis_gqa_attention_capacity_bytes(
-      cache_dtype, envelope, /*batch_size=*/batch, /*min_width=*/1, /*max_width=*/T);
+  const auto original_attention_bytes=kv_format==IGNIS_KV_FORMAT_NVFP4
+      ? ignis::nvfp4_attention_workspace_bytes(max_context_tokens,T,batch)
+      : ignis_gqa_attention_capacity_bytes(
+          cache_dtype, envelope, /*batch_size=*/batch, /*min_width=*/1, /*max_width=*/T);
   const auto native_attention_bytes=trellis && hidden==5120 && q_width==6144 &&
-      kv_width==1024 && T>=8 && cache_dtype==ninfer::DType::U8
+      kv_width==1024 && T>=8 && kv_format==IGNIS_KV_FORMAT_HQ_E8_2B
       ?ignis_gqa_native_workspace(max_context_tokens):0;
   bytes += round_up_arena_align(std::max<std::size_t>(original_attention_bytes,native_attention_bytes));
   if (trellis) {
     bytes += bf16_bytes(2 * static_cast<int64_t>(q_width) * columns);  // interleaved q | gate
     if(hidden==5120 && q_width==6144 && kv_width==1024 && T>=8 &&
-        cache_dtype==ninfer::DType::U8 && ignis_gqa_native_workspace(max_context_tokens)){
+        kv_format==IGNIS_KV_FORMAT_HQ_E8_2B && ignis_gqa_native_workspace(max_context_tokens)){
       // C1 uses the native token mixer even when the reservation also covers
       // wider lane groups. Its complete private workspace is transient here.
       const ignis_segment_profile profile{IGNIS_SEGMENT_GQA,8,1,5120,0,
@@ -722,7 +727,7 @@ std::size_t compute_program_scratch_bytes(const ignis_model &model, const ignis_
   for (const auto &layer : model.layers) {
     const std::size_t layer_bytes = layer.kind == IGNIS_LAYER_GQA
         ? gqa_layer_scratch_bytes(topology, layer.gqa, chunk, max_context_tokens, cache_dtype, batch,
-                                  model.is_trellis_body)
+                                  model.is_trellis_body, model.kv_format)
         : gdn_layer_scratch_bytes(topology, layer.gdn, chunk, batch, model.is_trellis_body);
     layer_peak = std::max(layer_peak, layer_bytes);
   }
@@ -1177,9 +1182,16 @@ std::unique_ptr<ignis_model> validate_and_bind(const struct ignis_bound_tensor *
   // sized for. Refused here rather than defaulted to BF16 -- an unrecognized
   // value would otherwise reserve one format's arena and let the layers run
   // the other's routes out of it.
-  if (kv_format != IGNIS_KV_FORMAT_BF16 && kv_format != IGNIS_KV_FORMAT_HQ_E8_2B) {
+  if (kv_format != IGNIS_KV_FORMAT_BF16 && kv_format != IGNIS_KV_FORMAT_HQ_E8_2B &&
+      kv_format != IGNIS_KV_FORMAT_NVFP4) {
     set_error("ignis_model_load: kv_format " + std::to_string(kv_format) +
               " is not an ignis_kv_format");
+    return nullptr;
+  }
+  if (kv_format == IGNIS_KV_FORMAT_NVFP4 &&
+      (flash_next || topology->num_q_heads != 24 || topology->num_kv_heads != 4 ||
+       topology->head_dim != 256 || max_context_tokens > 524288)) {
+    set_error("nvfp4 KV supports Qwen3.8-27B 24Q/4KV/D256 and at most524288 keys");
     return nullptr;
   }
   out.cache_dtype = ignis_kv_cache_dtype(kv_format);
@@ -1370,6 +1382,7 @@ std::unique_ptr<ignis_model> validate_and_bind(const struct ignis_bound_tensor *
   // artifact's head is trellis like every one of its body's linears, the
   // served artifact's W8 beside its NVFP4 planes; the whole body binds under
   // the one schema, so a tensor of the other body fails naming itself.
+  model->kv_format = kv_format;
   model->is_trellis_body = binder.is_trellis("text/output_head");
   if (!binder.bind("text/token_embedding", {g.vocab, g.hidden}, model->token_embedding) ||
       !binder.bind("text/final_norm", {g.hidden}, model->final_norm) ||
@@ -1611,6 +1624,12 @@ std::size_t trellis_workspace_bytes(const ignis_model &model, uint32_t prefill_c
       ask(c.prefill_tokens);
     }
   }
+  if(model.kv_format==IGNIS_KV_FORMAT_NVFP4){
+    const auto q=ignis_gqa_native_q_fixed_workspace();
+    const auto kv=ignis_gqa_native_kv_pair_workspace();
+    if(!q || !kv)throw std::runtime_error("nvfp4 GQA projection workspace query failed");
+    line=std::max({line,std::size_t(q),std::size_t(kv)});
+  }
   return line;
 }
 
@@ -1635,8 +1654,9 @@ LoadSizes plan_load_sizes(const ignis_model &model, const ignis_topology &topolo
                           const LoadOptions &options) {
   const Geometry g = Geometry::from(topology);
   LoadSizes sizes;
+  if(model.kv_format==IGNIS_KV_FORMAT_NVFP4) ignis::nvfp4_prepare();
   if(model.is_trellis_body && topology.hidden==5120 && topology.num_q_heads==24 &&
-      options.cache_dtype==ninfer::DType::U8 && ignis_gqa_native_workspace(max_context_tokens) &&
+      model.kv_format==IGNIS_KV_FORMAT_HQ_E8_2B && ignis_gqa_native_workspace(max_context_tokens) &&
       ignis_gqa_native_segment_prepare())
     throw std::runtime_error(std::string("preparing native GQA: ")+ignis_gqa_native_segment_error());
   // GitHub #336: every round line below is the load's lanes wide.

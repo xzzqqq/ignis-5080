@@ -1322,12 +1322,12 @@ mod tests {
         assert_eq!(shape.adaptable, Adaptable::ALL);
         assert_eq!(rtx5080_27b(&["--model-max-context", "131072"]).adaptable, Adaptable { max_context: false, ..Adaptable::ALL });
         assert_eq!(shape.rope_setting, ignis_core::RopeSetting::Auto);
-        assert_eq!(shape.adapt_ladder, crate::adaptation::Ladder { context_step: 65_536, spare_tokens: 65_536 });
+        assert_eq!(shape.adapt_ladder, crate::adaptation::Ladder { context_step: 65_536, spare_tokens: 8_192 });
         let ladder = rtx5080_27b(&["--model-adapt-context-step", "131072", "--vram-adapt-spare-tokens", "0"]).adapt_ladder;
         assert_eq!(ladder, crate::adaptation::Ladder { context_step: 131_072, spare_tokens: 0 }, "the fields reach the shape");
-        assert_eq!((shape.max_context, shape.rope_scaling.factor()), (262_144, 0.0));
+        assert_eq!((shape.max_context, shape.rope_scaling.factor()), (139_264, 0.0));
         let start = shape.adaptation_start();
-        assert_eq!(start, Attempt { max_context: 262_144, decode_lanes: 2, draft_head: Some(ProposalHead::Full) });
+        assert_eq!(start, Attempt { max_context: 139_264, decode_lanes: 2, draft_head: Some(ProposalHead::Full) });
         assert_eq!(shape.at(start), shape, "at its own values, itself");
 
         let narrower = shape.at(Attempt { max_context: 786_432, ..start });
@@ -1825,12 +1825,29 @@ mod tests {
         let qwen = ignis_core::KvGeometry::qwen38_27b();
         for (case, bytes) in [
             ("flash-next:bf16", flash.paged_sections(KvFormat::Bf16).bytes_per_token()),
-            ("flash-next:*", flash.paged_sections(KvFormat::HqE8_2b).bytes_per_token()),
+            ("flash-next:hq-e8-2b", flash.paged_sections(KvFormat::HqE8_2b).bytes_per_token()),
             ("27b:bf16", KvFormat::Bf16.bytes_per_token(qwen)),
-            ("*", KvFormat::HqE8_2b.bytes_per_token(qwen)),
+            ("27b:hq-e8-2b", KvFormat::HqE8_2b.bytes_per_token(qwen)),
+            ("27b:nvfp4", KvFormat::Nvfp4.bytes_per_token(qwen)),
         ] {
             let line = format!("{case}) per_token={bytes} ;;");
             assert!(script.contains(&line), "`{line}` missing from mk/kv-pool-tokens.sh");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kv_pool_make_helper_refuses_unsupported_formats_and_reports_nvfp4_capacity() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mk/kv-pool-tokens.sh");
+        let run = |family: &str, format: &str| std::process::Command::new("sh")
+            .arg(&script).args(["4G", family, format]).output().expect("run capacity helper");
+        let nvfp4 = run("27b", "nvfp4");
+        assert!(nvfp4.status.success());
+        assert_eq!(String::from_utf8(nvfp4.stdout).unwrap().trim(), "232960");
+        for (family, format) in [("flash-next", "nvfp4"), ("27b", "int4"), ("unknown", "hq")] {
+            let refused = run(family, format);
+            assert!(!refused.status.success(), "{family}:{format}");
+            assert!(refused.stdout.is_empty());
         }
     }
 

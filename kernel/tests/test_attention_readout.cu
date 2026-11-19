@@ -302,6 +302,7 @@ void the_hq_keys_are_read_in_the_codec_frame(std::mt19937 &rng) {
   const HqKeys hq(rows, span);
   ninfer::PagedKVBatchLayerView cache;
   cache.dtype = ninfer::DType::U8;
+  cache.quant_group = 32; // HQ fixture declares its encoding explicitly.
 
   const Run got = run(scene, cache, &hq.keys);
   check(got.rc == 0 && got.read, "the hq readout reads");
@@ -347,6 +348,7 @@ void a_span_past_one_band_is_read(std::mt19937 &rng) {
   scene.key_begin = kStart + 37;
   ninfer::PagedKVBatchLayerView cache;
   cache.dtype = ninfer::DType::U8;
+  cache.quant_group = 32; // HQ fixture declares its encoding explicitly.
   const Run got = run(scene, cache, &hq.keys);
   check(got.rc == 0 && got.read, "a span past 262,144 keys is read");
   const int kv_head = scene.query_head / (kQHeads / kKvHeads);
@@ -371,6 +373,7 @@ void a_read_that_cannot_be_made_is_left_unread(std::mt19937 &rng) {
   const HqKeys keys(gaussian_rows(scene.visible, rng), scene.visible);
   ninfer::PagedKVBatchLayerView hq;
   hq.dtype = ninfer::DType::U8;
+  hq.quant_group = 32;
 
   Run got = run(scene, hq, nullptr);
   check(got.rc == 0 && !got.read, "no prompt attention: unread, not an error");
@@ -562,6 +565,7 @@ void the_set_is_read_in_one_launch_off_the_hq_keys(std::mt19937 &rng) {
   const HqKeys hq(rows, span);
   ninfer::PagedKVBatchLayerView cache;
   cache.dtype = ninfer::DType::U8;
+  cache.quant_group = 32; // HQ fixture declares its encoding explicitly.
   const std::vector<std::int32_t> excluded = {0, static_cast<std::int32_t>(planted.excluded_key),
                                               static_cast<std::int32_t>(scene.key_count - 1)};
   const KeyAt key = [&](int kv, std::int64_t position, int d) {
@@ -639,6 +643,7 @@ void a_set_that_cannot_be_read_is_left_unread(std::mt19937 &rng) {
   const HqKeys keys(gaussian_rows(scene.visible, rng), scene.visible);
   ninfer::PagedKVBatchLayerView hq;
   hq.dtype = ninfer::DType::U8;
+  hq.quant_group = 32;
   SetRun got = run_set(scene, kSetHeads, scene.query_head, {}, hq, nullptr);
   check(got.rc == 0 && !got.read, "no prompt attention: the set is unread, not an error");
   bool untouched = true;
@@ -725,6 +730,7 @@ void the_set_is_read_in_rows_over_a_text_span(std::mt19937 &rng) {
   const HqKeys keys(gaussian_rows(span, rng), span);
   ninfer::PagedKVBatchLayerView hq;
   hq.dtype = ninfer::DType::U8;
+  hq.quant_group = 32;
   const KeyAt hq_key = [&](int kv, std::int64_t position, int d) {
     return from_bf16(keys.fetched_rows[(static_cast<std::size_t>(kv) * span + position) * kHeadDim + d]);
   };
@@ -782,6 +788,66 @@ void the_set_is_read_in_rows_over_a_text_span(std::mt19937 &rng) {
   check(nowhere.rc != 0 && !nowhere.read, "a set with neither rows nor a grid: refused");
 }
 
+// Fixed NV4 codes/scales give exactly known normal-frame BF16 keys. The
+// query has one nonzero coordinate; every expected score is binary-exact.
+// Test row, fused set/argmax/exclusion and top-neighbour paths across a
+// nonidentity physical page boundary without invoking the encoder as oracle.
+void nvfp4_normal_frame_rows_sets_and_neighbours() {
+  constexpr int pages=4, begin=60, count=8, tokens=2;
+  std::vector<std::uint8_t> code(pages*kKvHeads*kPage*128,0),sf(pages*kKvHeads*kPage*16,0);
+  const std::vector<std::int32_t> table={2,0};
+  for(int position=0;position<128;++position)for(int head=0;head<kKvHeads;++head) {
+    const auto row=(std::size_t(table[position/64])*kKvHeads+head)*64+position%64;
+    code[row*128]=7; // d0=E2M1(6), d1..255=0
+    sf[row*16]=std::uint8_t(0x38+(position+head)%8); //1..1.875
+  }
+  std::vector<std::uint16_t> query(tokens*kQHeads*kHeadDim,0x7FC0);
+  std::fill(query.begin()+kQHeads*kHeadDim,query.end(),0);
+  for(int h=0;h<kQHeads;++h)query[(kQHeads+h)*kHeadDim]=to_bf16(1.f+h*.125f);
+  Device<std::uint8_t> codes(code),scales(sf);Device<std::int32_t> mapping(table);
+  Device<std::uint16_t> q(query);Device<float> scores(count),rows(2*count),neighbours(8);
+  Device<unsigned long long> best(2);
+  ninfer::PagedKVBatchLayerView cache{};
+  cache.k_pages=ninfer::Tensor(codes.p,ninfer::DType::U8,{128,kPage,kKvHeads,pages});
+  cache.v_pages=cache.k_pages;
+  cache.k_scale_pages=ninfer::Tensor(scales.p,ninfer::DType::U8,{16,kPage,kKvHeads,pages});
+  cache.v_scale_pages=cache.k_scale_pages;
+  cache.block_tables=ninfer::Tensor(mapping.p,ninfer::DType::I32,{2,1});
+  cache.dtype=ninfer::DType::U8;cache.quant_group=16;cache.head_dim=256;cache.num_kv_heads=4;
+  const auto expected=[](int head,int relative) {
+    return (1.f+head*.125f)*6.f*(1.f+((begin+relative+head/6)%8)*.125f)*.0625f;
+  };
+  AttentionReadoutTarget target;bool read=false;const char *error=nullptr;
+  target.query_head=10;target.key_begin=begin;target.key_count=count;
+  target.device_scores=scores.p;target.read=&read;
+  check(ignis_attention_readout_run(target,q.p,kQHeads,kKvHeads,tokens,128,cache,nullptr,kScale,nullptr,&error)==0 && read,
+        "NV4 single-head readout launches without HQ keys");
+  CUDA_FATAL(cudaDeviceSynchronize());
+  auto result=scores.read();
+  for(int k=0;k<count;++k)check(result[k]==expected(10,k),"NV4 normal-frame row scores");
+  target.set_heads=2;target.set_query_head[0]=0;target.set_query_head[1]=23;
+  target.set_slot[0]=0;target.set_slot[1]=1;target.device_set_best=best.p;
+  target.device_set_rows=rows.p;target.device_set_neighbours=neighbours.p;target.grid_cols=4;
+  target.excluded_count=1;target.excluded[0]=3;read=false;
+  check(ignis_attention_readout_run(target,q.p,kQHeads,kKvHeads,tokens,128,cache,nullptr,kScale,nullptr,&error)==0 && read,
+        "NV4 fused row/set/neighbour readout launches");
+  CUDA_FATAL(cudaDeviceSynchronize());
+  const auto row_result=rows.read(),near=neighbours.read();const auto peaks=best.read();
+  result=scores.read();
+  for(int k=0;k<count;++k)check(result[k]==expected(10,k),"NV4 pointing head outside armed set");
+  for(int slot=0;slot<2;++slot) {
+    const int head=slot?23:0;int peak=-1;
+    for(int k=0;k<count;++k) {
+      check(row_result[slot*count+k]==expected(head,k),"NV4 fused set row scores");
+      if(k!=3 && (peak<0 || expected(head,k)>=expected(head,peak)))peak=k;
+    }
+    check(std::uint32_t(peaks[slot])==std::uint32_t(peak),"NV4 set argmax/excluded key");
+    const int wanted[4]={peak%4?peak-1:-1,peak%4<3?peak+1:-1,peak>=4?peak-4:-1,peak<4?peak+4:-1};
+    for(int n=0;n<4;++n)check(wanted[n]<0?std::isnan(near[slot*4+n]):near[slot*4+n]==expected(head,wanted[n]),
+                              "NV4 normal-frame neighbours/off-grid NaN");
+  }
+}
+
 } // namespace
 
 int main() {
@@ -792,6 +858,7 @@ int main() {
     return EXIT_FAILURE;
   }
   std::mt19937 rng(20260922);
+  nvfp4_normal_frame_rows_sets_and_neighbours();
   the_pages_are_read_through_the_block_table(rng);
   the_hq_keys_are_read_in_the_codec_frame(rng);
   a_span_past_one_band_is_read(rng);

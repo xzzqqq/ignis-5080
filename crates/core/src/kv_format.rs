@@ -1,11 +1,12 @@
 //! The KV cache storage format and the byte-budget pool plan it implies
 //! (ADR 0022, GitHub #122, P4-04).
 //!
-//! Two formats exist, and which one a model load runs on is a load option
+//! The format a model load runs on is a load option
 //! fixed for the life of that load: [`KvFormat::Bf16`] (what every
 //! correctness oracle loads) and [`KvFormat::HqE8_2b`] (the reference's own
-//! serving format, and this engine's serving default since P4-05, GitHub
-//! #123, wired its attention routes). Both keep the paged-KV contract's
+//! serving format and the base default since P4-05, GitHub #123, wired its
+//! attention routes), plus [`KvFormat::Nvfp4`]. Family-scoped server profiles
+//! may select another default. All keep the paged-KV contract's
 //! fixed-bytes-per-token property, so the only thing the format changes
 //! about the pool is how many bytes one (token, KV head) row costs.
 //!
@@ -65,6 +66,11 @@ pub const HQ_ROW_CODE_BYTES: u32 = 64;
 /// row norm, the Rice parameter, the used-bit count and the group-decode
 /// segment offsets.
 pub const HQ_ROW_META_BYTES: u32 = 8;
+
+/// NVFP4 E2M1 stores two coordinates per byte, with one positive E4M3
+/// scale per 16 coordinates. The format fixes the restoration global to 1;
+/// it carries no mutable calibration state beside its four storage planes.
+pub const NVFP4_SCALE_GROUP: u32 = 16;
 
 /// The default paged-KV pool byte budget when the operator names none.
 ///
@@ -134,14 +140,15 @@ pub enum KvFormat {
     /// The reference's HyperQuant KV format: a fixed 64-byte code row plus
     /// an 8-byte metadata row per (token, KV head).
     ///
-    /// The serving default since P4-05 (GitHub #123) wired its attention
-    /// routes — the default ADR 0022 named and #122 could not yet honour. It
-    /// is the format the reference has run in production the whole time, and
-    /// the one both engines run for the G4 gate; at 9,216 bytes per
-    /// sequence-token against BF16's 65,536 it is what makes N-lane
-    /// concurrency a long-context promise rather than a short-context one.
+    /// Retained as the unprofiled/base default so model families without an
+    /// NVFP4 route keep their established storage. A server profile can select
+    /// NVFP4 for the supported 27B while this format remains explicitly usable.
     #[default]
     HqE8_2b,
+    /// E2M1 packed values with G16 E4M3 block scales and fixed global 1.
+    /// The first serving implementation supports Qwen3.8-27B geometry;
+    /// unsupported model families are rejected before loading.
+    Nvfp4,
 }
 
 /// Most visible keys the vendored GQA attention serves on a linear (BF16)
@@ -160,7 +167,7 @@ impl KvFormat {
     /// on this cache format (GitHub #228).
     pub fn gqa_max_context(&self) -> u32 {
         match self {
-            Self::Bf16 => GQA_MAX_LINEAR_VISIBLE_KEYS,
+            Self::Bf16 | Self::Nvfp4 => GQA_MAX_LINEAR_VISIBLE_KEYS,
             Self::HqE8_2b => GQA_MAX_VISIBLE_KEYS,
         }
     }
@@ -170,6 +177,7 @@ impl KvFormat {
         match self {
             Self::Bf16 => "bf16",
             Self::HqE8_2b => "hq-e8-2b",
+            Self::Nvfp4 => "nvfp4",
         }
     }
 
@@ -179,6 +187,7 @@ impl KvFormat {
         match self {
             Self::Bf16 => 0,
             Self::HqE8_2b => 1,
+            Self::Nvfp4 => 2,
         }
     }
 
@@ -189,8 +198,9 @@ impl KvFormat {
         match raw.trim().to_ascii_lowercase().as_str() {
             "bf16" => Ok(Self::Bf16),
             "hq-e8-2b" | "hq_e8_2b" | "hq" => Ok(Self::HqE8_2b),
+            "nvfp4" => Ok(Self::Nvfp4),
             other => Err(format!(
-                "unknown KV format `{other}` (expected `bf16` or `hq-e8-2b`)"
+                "unknown KV format `{other}` (expected `bf16`, `hq-e8-2b` or `nvfp4`)"
             )),
         }
     }
@@ -198,9 +208,9 @@ impl KvFormat {
     /// The storage planes one GQA layer's K/V history occupies, in the
     /// order the pool allocates them.
     ///
-    /// BF16 is one plane per role. hq-e8-2b is two per role — a code plane
-    /// and a metadata plane — which is the *only* structural difference
-    /// between the formats: the page addressing over them is identical
+    /// BF16 is one plane per role. Quantized formats are two per role:
+    /// HQ has code/metadata planes and NVFP4 has code/G16-scale planes.
+    /// The page addressing over them is identical
     /// (`paged_kv_element_offset` with the plane's own leading extent).
     pub fn planes_per_gqa_layer(&self, geometry: KvGeometry) -> Vec<KvPlaneSpec> {
         let heads = geometry.num_kv_heads;
@@ -241,6 +251,13 @@ impl KvFormat {
                     head_extent: heads,
                 },
             ],
+            Self::Nvfp4 => vec![
+                // K codes, K G16 scales, V codes, V G16 scales.
+                KvPlaneSpec { dtype: KvPlaneDtype::U8, leading_extent: geometry.head_dim / 2, head_extent: heads },
+                KvPlaneSpec { dtype: KvPlaneDtype::U8, leading_extent: geometry.head_dim / NVFP4_SCALE_GROUP, head_extent: heads },
+                KvPlaneSpec { dtype: KvPlaneDtype::U8, leading_extent: geometry.head_dim / 2, head_extent: heads },
+                KvPlaneSpec { dtype: KvPlaneDtype::U8, leading_extent: geometry.head_dim / NVFP4_SCALE_GROUP, head_extent: heads },
+            ],
         }
     }
 
@@ -264,8 +281,8 @@ impl KvFormat {
     }
 
     /// Bytes one sequence-token costs across every GQA layer and both
-    /// roles. 65,536 under BF16 and 9,216 under hq-e8-2b at this model's
-    /// geometry.
+    /// roles. At the 27B geometry this is 65,536 under BF16, 9,216 under
+    /// hq-e8-2b, and 18,432 under NVFP4 including its block scales.
     pub fn bytes_per_token(&self, geometry: KvGeometry) -> u64 {
         self.page_bytes(geometry) / u64::from(KV_PAGE_TOKENS)
     }
@@ -436,6 +453,24 @@ mod tests {
     }
 
     #[test]
+    fn nvfp4_uses_g16_e4m3_scales_and_accounts_for_all_four_planes() {
+        let planes = KvFormat::Nvfp4.planes_per_gqa_layer(QWEN);
+        assert_eq!(planes.iter().map(|p| p.leading_extent).collect::<Vec<_>>(), [128,16,128,16]);
+        assert!(planes.iter().all(|p| p.dtype == KvPlaneDtype::U8));
+        assert_eq!(KvFormat::Nvfp4.pool_planes(QWEN).len(), 64);
+        assert_eq!(KvFormat::Nvfp4.bytes_per_token(QWEN), 18_432);
+        assert_eq!(KvFormat::Nvfp4.page_bytes(QWEN), 1_179_648);
+        let plan = plan_kv_pool(KvFormat::Nvfp4, QWEN, DEFAULT_KV_POOL_BYTES);
+        assert_eq!(plan.token_capacity, 232_960);
+        assert_eq!(plan.page_count, 3_640);
+        let model = crate::compute::ModelConfig::qwen38_27b();
+        assert_eq!(model.state_image(KvFormat::Nvfp4).hq_residual_window, 0);
+        assert_eq!(model.state_image(KvFormat::Nvfp4), model.state_image(KvFormat::Bf16));
+        assert!(plan_kv_pool_for_context(KvFormat::Nvfp4, QWEN, DEFAULT_KV_POOL_BYTES, 131_072).is_ok());
+        assert!(plan_kv_pool_for_context(KvFormat::Nvfp4, QWEN, DEFAULT_KV_POOL_BYTES, 262_144).is_err());
+    }
+
+    #[test]
     fn token_capacity_is_derived_from_the_budget_and_the_format() {
         // One budget, two formats, two capacities — the whole point of
         // describing the pool in bytes.
@@ -477,7 +512,7 @@ mod tests {
 
     #[test]
     fn a_bigger_budget_buys_more_tokens_in_either_format() {
-        for format in [KvFormat::Bf16, KvFormat::HqE8_2b] {
+        for format in [KvFormat::Bf16, KvFormat::HqE8_2b, KvFormat::Nvfp4] {
             let small = plan_kv_pool(format, QWEN, DEFAULT_KV_POOL_BYTES);
             let big = plan_kv_pool(format, QWEN, 2 * DEFAULT_KV_POOL_BYTES);
             // Doubling the budget doubles the pages, up to the partial page
@@ -496,7 +531,7 @@ mod tests {
 
     #[test]
     fn the_auto_default_always_holds_one_configured_context() {
-        for format in [KvFormat::Bf16, KvFormat::HqE8_2b] {
+        for format in [KvFormat::Bf16, KvFormat::HqE8_2b, KvFormat::Nvfp4] {
             for context in [1_024u32, 40_960, 400_000, 1_000_000] {
                 let budget = auto_kv_pool_bytes(format, QWEN, context);
                 let plan = plan_kv_pool_for_context(format, QWEN, budget, context)
@@ -534,6 +569,8 @@ mod tests {
     fn format_spellings_round_trip() {
         assert_eq!(KvFormat::parse("bf16"), Ok(KvFormat::Bf16));
         assert_eq!(KvFormat::parse("BF16"), Ok(KvFormat::Bf16));
+        assert_eq!(KvFormat::parse(" NVFP4 "), Ok(KvFormat::Nvfp4));
+        assert_eq!(KvFormat::Nvfp4.as_str(), "nvfp4");
         assert_eq!(KvFormat::parse("hq-e8-2b"), Ok(KvFormat::HqE8_2b));
         assert_eq!(KvFormat::parse(" hq "), Ok(KvFormat::HqE8_2b));
         assert_eq!(KvFormat::Bf16.as_str(), "bf16");
@@ -547,15 +584,11 @@ mod tests {
         // 1:1 with `enum ignis_kv_format` (kernel/include/ignis_seq.h).
         assert_eq!(KvFormat::Bf16.abi_code(), 0);
         assert_eq!(KvFormat::HqE8_2b.abi_code(), 1);
+        assert_eq!(KvFormat::Nvfp4.abi_code(), 2);
     }
 
     #[test]
-    fn hq_is_the_serving_default_now_that_its_routes_are_wired() {
-        // ADR 0022: "hq-e8-2b is the serving default, and the format both
-        // engines run in for the G4 gate. In force since P4-05 (GitHub
-        // #123)." A load that names no format runs the format the reference
-        // serves in and the G4 gate measures; BF16 is retained and is what
-        // every correctness oracle asks for by name.
+    fn hq_remains_the_base_default_for_unprofiled_loads() {
         assert_eq!(KvFormat::default(), KvFormat::HqE8_2b);
     }
 
@@ -577,5 +610,6 @@ mod tests {
         assert_eq!(GQA_MAX_VISIBLE_KEYS, value("kGqaAttentionMaximumVisibleKeys"));
         assert_eq!(KvFormat::Bf16.gqa_max_context(), GQA_MAX_LINEAR_VISIBLE_KEYS);
         assert_eq!(KvFormat::HqE8_2b.gqa_max_context(), GQA_MAX_VISIBLE_KEYS);
+        assert_eq!(KvFormat::Nvfp4.gqa_max_context(), GQA_MAX_LINEAR_VISIBLE_KEYS);
     }
 }

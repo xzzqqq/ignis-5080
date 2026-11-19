@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run --release -p ignis-core --features cuda --example span_logits -- \
-//!     ARTIFACT KV_FORMAT WINDOWS_JSON OUT_DIR [PREFILL_CHUNK [TAIL]]
+//!     ARTIFACT KV_FORMAT WINDOWS_JSON OUT_DIR [PREFILL_CHUNK [TAIL [TAIL_STEP]]]
 //! ```
 //!
 //! `WINDOWS_JSON` is a JSON array of token-id arrays. Each window is
@@ -13,8 +13,13 @@
 //! logits land in `OUT_DIR/wNNN.bin`. Row `i` is the distribution of the
 //! token after `window[i]`. With `TAIL`, only the last `TAIL` rows are read
 //! (a long window's head is prefilled first, without logits, so a 32K window
-//! costs 1 GB of host memory rather than 16); `TAIL` must be a multiple of
-//! the chunk so the chunks are the ones a whole-window prefill cuts.
+//! costs 1 GB of host memory rather than 16). Without `TAIL_STEP`, `TAIL`
+//! must be a multiple of the chunk; original whole-window chunk cuts also
+//! require the head prefix length to be chunk-aligned. With `TAIL_STEP`,
+//! only the tail is submitted in smaller calls (e.g. TAIL32/TAIL_STEP8);
+//! the head retains the configured prefill chunk. These are eager prefill
+//! traversals, not verify-graph replay. The output head's internal 32-column
+//! readout blocks do not change the backbone's attention width.
 //! `IGNIS_MODEL_EXCEPTION_WEIGHTS=fp8`, the server's own variable for
 //! `--model-exception-weights`, holds the BF16 exception tensors in FP8
 //! (GitHub #341); unset, they are held as stored, as the server's default.
@@ -33,16 +38,21 @@ const SERVING_PREFILL_CHUNK: u32 = 1024;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if !(5..=7).contains(&args.len()) {
-        eprintln!("usage: span_logits ARTIFACT KV_FORMAT WINDOWS_JSON OUT_DIR [PREFILL_CHUNK [TAIL]]");
+    if !(5..=8).contains(&args.len()) {
+        eprintln!("usage: span_logits ARTIFACT KV_FORMAT WINDOWS_JSON OUT_DIR [PREFILL_CHUNK [TAIL [TAIL_STEP]]]");
         std::process::exit(2);
     }
     let prefill_chunk: u32 = args
         .get(5)
         .map_or(SERVING_PREFILL_CHUNK, |v| v.parse().unwrap_or_else(|e| panic!("prefill chunk: {e}")));
     let tail: Option<usize> = args.get(6).map(|v| v.parse().unwrap_or_else(|e| panic!("tail: {e}")));
-    if let Some(tail) = tail {
-        assert!(tail % prefill_chunk as usize == 0, "TAIL {tail} is not a multiple of the chunk {prefill_chunk}");
+    let tail_step: Option<usize> = args.get(7).map(|v| v.parse().unwrap_or_else(|e| panic!("tail step: {e}")));
+    if let Some(step) = tail_step {
+        let tail = tail.expect("TAIL_STEP requires TAIL");
+        assert!(step > 0 && step <= prefill_chunk as usize && tail > 0 && tail % step == 0,
+                "TAIL_STEP must be positive, <= PREFILL_CHUNK, and divide the positive TAIL");
+    } else if let Some(tail) = tail {
+        assert!(tail > 0 && tail % prefill_chunk as usize == 0, "TAIL {tail} is not a positive multiple of the chunk {prefill_chunk}");
     }
     let kv_format = KvFormat::parse(&args[2]).unwrap_or_else(|e| panic!("kv format: {e}"));
     let windows: Vec<Vec<i32>> = serde_json::from_str(
@@ -81,6 +91,9 @@ fn main() {
 
     for (index, window) in windows.iter().enumerate() {
         let began = std::time::Instant::now();
+        if tail_step.is_some() {
+            assert!(tail.unwrap() <= window.len(), "window {index} is shorter than TAIL");
+        }
         let head = tail.map_or(0, |tail| window.len().saturating_sub(tail));
         let mut rows = vec![0u16; (window.len() - head) * vocab];
         {
@@ -89,8 +102,15 @@ fn main() {
                 prefill_program(&model, &pool, &mut sequence, &window[..head], 0, None)
                     .unwrap_or_else(|e| panic!("window {index} head: {e}"));
             }
-            prefill_program_span_logits(&model, &pool, &mut sequence, &window[head..], head as u64, &mut rows)
-                .unwrap_or_else(|e| panic!("window {index}: {e}"));
+            let step = tail_step.unwrap_or(window.len() - head);
+            assert!(step > 0, "window {index} has no tail tokens");
+            for offset in (0..window.len() - head).step_by(step) {
+                let end = (offset + step).min(window.len() - head);
+                prefill_program_span_logits(
+                    &model, &pool, &mut sequence, &window[head + offset..head + end],
+                    (head + offset) as u64, &mut rows[offset * vocab..end * vocab],
+                ).unwrap_or_else(|e| panic!("window {index}, tail offset {offset}: {e}"));
+            }
         }
         let path = out_dir.join(format!("w{index:03}.bin"));
         let mut file = std::io::BufWriter::new(

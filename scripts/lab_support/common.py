@@ -164,7 +164,7 @@ def validate_config(cfg):
     context=settings.get('max_context',65536);chunk=settings.get('prefill_chunk',1024)
     if context>131072 or chunk%128 or chunk>context or settings.get('lanes',2)>2:
         raise ValueError('unsupported engine geometry')
-    if settings.get('kv_format','hq-e8-2b') not in ('bf16','hq-e8-2b') or settings.get('speculation','dflash2') not in ('off','dflash2'):
+    if settings.get('kv_format','hq-e8-2b') not in ('bf16','hq-e8-2b','nvfp4') or settings.get('speculation','dflash2') not in ('off','dflash2'):
         raise ValueError('unsupported KV format or speculation')
     if 'capture_names' in cfg or 'view' in cfg:
         raise ValueError('capture_names/view are retired; remove them and use replay --operator/--tokens-per-call')

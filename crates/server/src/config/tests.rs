@@ -608,6 +608,19 @@ fn the_kv_format_flag_wins_over_the_env_var_and_the_default() {
 }
 
 #[test]
+fn nvfp4_is_explicit_and_supported_only_for_the_27b() {
+    let selected = config(&["--profile", "none", "--model-kv-format", "nvfp4"]);
+    assert_eq!(selected.kv_format, KvFormat::Nvfp4);
+    assert_eq!(selected.for_family(ModelFamily::Qwen38_27b).unwrap().kv_format, KvFormat::Nvfp4);
+    let error = selected.for_family(ModelFamily::FlashNext).unwrap_err().0;
+    assert!(error.contains("nvfp4") && error.contains("Qwen3.8-27B"), "{error}");
+    assert_eq!(config(&["--profile", "none"]).kv_format, KvFormat::HqE8_2b);
+    let too_long = config(&["--profile", "none", "--model-kv-format", "nvfp4", "--model-max-context", "524289"]);
+    let error = too_long.for_family(ModelFamily::Qwen38_27b).unwrap_err().0;
+    assert!(error.contains("524288") && error.contains("nvfp4"), "{error}");
+}
+
+#[test]
 fn an_unknown_kv_format_is_a_usage_error() {
     let err = refused(&["--model-kv-format", "fp8"]);
     assert!(err.contains("--model-kv-format") && err.contains("fp8") && err.contains("bf16"), "{err}");
@@ -678,7 +691,7 @@ fn the_config_only_parses_a_pool_and_the_plan_judges_it() {
     // the load knows which. The config accepts it in either format, and the
     // plan refuses it below one context and a page per retained slot
     // (`vram.rs`'s `a_named_pool_below_one_context_refuses_*`).
-    for format in ["bf16", "hq-e8-2b"] {
+    for format in ["bf16", "hq-e8-2b", "nvfp4"] {
         assert_eq!(config(&["--vram-kv-pool-bytes", "1M", "--model-kv-format", format]).kv_pool, Some(KvPoolSize::Bytes(1 << 20)));
     }
     // What the plan will make of 512 MiB on the 27B at the default context:
@@ -2122,7 +2135,7 @@ fn auto_on_a_5080_resolves_exactly_as_the_named_profile_does() {
         assert_eq!(a.settings(), n.settings(), "{family:?}");
         assert_eq!(a.max_context, n.max_context, "{family:?}");
     }
-    assert_eq!(auto.for_family(ModelFamily::Qwen38_27b).unwrap().max_context, 262_144);
+    assert_eq!(auto.for_family(ModelFamily::Qwen38_27b).unwrap().max_context, 139_264);
 }
 
 /// GitHub #418 (ADR 0063 as amended by ADR 0075): `rtx50-16gb` turns vision
@@ -2172,7 +2185,7 @@ fn only_the_profiles_and_the_defaults_values_adapt() {
 #[test]
 fn the_adaptation_ladder_is_two_fields_at_65536_tokens() {
     use crate::adaptation::Ladder;
-    let defaults = config(&[]);
+    let defaults = config(&["--profile", "none"]);
     assert_eq!((defaults.settings().model.adapt_context_step, defaults.settings().vram.adapt_spare_tokens), (65_536, 65_536));
     assert_eq!((DEFAULT_ADAPT_CONTEXT_STEP, DEFAULT_ADAPT_SPARE_TOKENS), (65_536, 65_536));
     assert_eq!(defaults.adapt_ladder(), Ladder::default());
@@ -2262,4 +2275,19 @@ fn the_config_verbs_refuse_a_card_of_no_class_under_auto() {
     let refused = resolve_on(&args(&["config", "print"]), no_env, &file::NoFiles, &|| profile::Card::Total(24 << 30)).unwrap_err().0;
     assert!(refused.contains("--profile"), "{refused}");
     resolve_on(&args(&["config", "print", "--profile", "none"]), no_env, &file::NoFiles, &|| profile::Card::Total(24 << 30)).unwrap();
+}
+
+#[test]
+fn the_rtx50_profile_selects_nvfp4_only_for_the_27b_and_keeps_128k_input_room() {
+    let profile = config(&["--profile", "rtx50-16gb"]);
+    let qwen = profile.for_family(ModelFamily::Qwen38_27b).unwrap();
+    assert_eq!(qwen.kv_format, KvFormat::Nvfp4);
+    assert_eq!(qwen.max_context, 131_072 + 8_192);
+    assert_eq!(qwen.adapt_ladder().spare_tokens, 8_192);
+    assert_eq!(profile.for_family(ModelFamily::FlashNext).unwrap().kv_format, KvFormat::HqE8_2b);
+    let base = config(&["--profile", "none"]).for_family(ModelFamily::Qwen38_27b).unwrap();
+    assert_eq!(base.kv_format, KvFormat::HqE8_2b);
+    let hq = config(&["--profile", "rtx50-16gb", "--model-kv-format", "hq", "--model-max-context", "262144"])
+        .for_family(ModelFamily::Qwen38_27b).unwrap();
+    assert_eq!((hq.kv_format, hq.max_context), (KvFormat::HqE8_2b, 262_144));
 }

@@ -95,7 +95,7 @@ struct AttentionReadoutTarget {
 // `rotated_query` is the layer's BF16 [q_heads * 256, tokens] query after its
 // norm and rotary embedding; the query is its column `tokens - 1`. The keys:
 //
-// - under hq-e8-2b (`cache.dtype == U8`), the keys ignis's prompt attention
+// - under hq-e8-2b (`cache.dtype == U8`, quant_group32), the keys ignis's prompt attention
 //   read (GitHub #335, kernel/include/ignis_hq_prompt_attention.h), fetched
 //   row by row as it fetched them -- the chunk's own rows, the sinks and the
 //   ring before the chunk exact, every other key through the codec -- in the
@@ -105,6 +105,10 @@ struct AttentionReadoutTarget {
 //   The query is rotated into the same frame first (signs, a natural-order
 //   256-point Walsh-Hadamard transform, 1/16: the codec's orthonormal
 //   rotation), so the dot product is unchanged by the frame;
+// - under NVFP4 (`cache.dtype == U8`, quant_group16), the packed pages and
+//   E4M3 scale pages through row0, decoded by the production fixed-global1
+//   codec into normal-frame BF16 keys; Q takes no HQ transform and hq_keys
+//   is not required;
 // - under BF16, the cache's own pages through `cache.block_tables` row 0,
 //   which the layer's attention appended before it read them.
 //

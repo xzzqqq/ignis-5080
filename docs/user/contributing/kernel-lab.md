@@ -14,6 +14,13 @@ GQA attention launcher, and three finite layer segments (MLP, GQA and GDN). The 
 and real forward graphs. Other attention shapes use builtin code; GDN state
 updates and normalization remain fixed.
 
+NVFP4 settings are supported for full-model `forward --candidate builtin`
+and `profile --forward --candidate builtin`. Stateful `layer.N.attention`
+and `layer.N.gqa_block` recording/replay still require HQ's G32 cache and
+reject NVFP4's G16 cache. This does not add an NVFP4 attention hot-load ABI;
+the HQ attention/segment scope above remains unchanged. The configuration
+example pins HQ so its replay examples use that supported scope.
+
 Create `.scratch/lab-settings.json` from the
 [configuration example](kernel-lab-reference.md#configure-once), then run:
 

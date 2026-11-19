@@ -453,7 +453,7 @@ void *lab_gqa_before(const ignis_model &m,uint32_t layer,const ninfer::Tensor &q
   // Graphs for unused pool widths are discovered too. Only the C1 graph is
   // instrumented; selecting attention explicitly documents this supported scope.
   if(q.ne[3]!=1)return nullptr;
-  if(q.ne[2]!=8 || cache.dtype!=ninfer::DType::U8)
+  if(q.ne[2]!=8 || cache.dtype!=ninfer::DType::U8 || cache.quant_group!=32)
     throw std::runtime_error("GQA capture currently supports C1 T8 HQ attention only");
   cudaStreamCaptureStatus status;ck(cudaStreamIsCapturing(stream,&status));
   const bool graph=status!=cudaStreamCaptureStatusNone;

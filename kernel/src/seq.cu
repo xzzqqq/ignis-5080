@@ -103,12 +103,20 @@ void push_layer_planes(ninfer::PagedKVPoolSpec &spec, int32_t kv_format, uint32_
     spec.planes.push_back({ninfer::DType::U8, kIgnisHqMetaRowBytes, heads});
     return;
   }
+  if (kv_format == IGNIS_KV_FORMAT_NVFP4) {
+    spec.planes.push_back({ninfer::DType::U8, static_cast<std::int32_t>(head_dim / 2), heads});
+    spec.planes.push_back({ninfer::DType::U8, static_cast<std::int32_t>(head_dim / 16), heads});
+    spec.planes.push_back({ninfer::DType::U8, static_cast<std::int32_t>(head_dim / 2), heads});
+    spec.planes.push_back({ninfer::DType::U8, static_cast<std::int32_t>(head_dim / 16), heads});
+    return;
+  }
   spec.planes.push_back({ninfer::DType::BF16, static_cast<std::int32_t>(head_dim), heads});
   spec.planes.push_back({ninfer::DType::BF16, static_cast<std::int32_t>(head_dim), heads});
 }
 
 bool known_kv_format(int32_t kv_format) {
-  return kv_format == IGNIS_KV_FORMAT_BF16 || kv_format == IGNIS_KV_FORMAT_HQ_E8_2B;
+  return kv_format == IGNIS_KV_FORMAT_BF16 || kv_format == IGNIS_KV_FORMAT_HQ_E8_2B ||
+         kv_format == IGNIS_KV_FORMAT_NVFP4;
 }
 
 // Zero `slot`'s lane of the drafter window (P5-03, GitHub #152), so a
@@ -737,6 +745,11 @@ bool validate_pool_spec(const struct ignis_seq_pool_spec &spec, const std::strin
       spec.head_dim != static_cast<std::uint32_t>(kIgnisHqHeadDim)) {
     set_error(fn + ": hq-e8-2b KV requires head_dim " + std::to_string(kIgnisHqHeadDim) +
               ", got " + std::to_string(spec.head_dim));
+    return false;
+  }
+  if (spec.kv_format == IGNIS_KV_FORMAT_NVFP4 &&
+      (spec.head_dim != 256 || spec.num_kv_heads != 4)) {
+    set_error(fn + ": nvfp4 KV requires head_dim256 and4 KV heads");
     return false;
   }
   if (spec.speculative_backend != IGNIS_SPECULATIVE_NONE &&

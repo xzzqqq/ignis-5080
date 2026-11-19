@@ -305,6 +305,12 @@ list(FILTER IGNIS_KERNEL_SRCS EXCLUDE REGEX "/lab_gqa_candidate[.]cu$")
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/lab_gqa_segment.cu
   PROPERTIES COMPILE_DEFINITIONS IGNIS_SEGMENT_BUILTIN=1)
 add_library(ignis_kernel STATIC ${IGNIS_KERNEL_SRCS})
+# XQA is a single isolated SM120 TU. Other kernels/codec retain their own flags.
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/nvfp4_xqa.cu PROPERTIES
+  COMPILE_OPTIONS "--use_fast_math;--expt-relaxed-constexpr"
+  COMPILE_DEFINITIONS "NDEBUG=1;BEAM_WIDTH=1;USE_INPUT_KV=0;USE_CUSTOM_BARRIER=1;TOKENS_PER_PAGE=64;HEAD_ELEMS=256;INPUT_FP16=0;DTYPE=__nv_bfloat16;CACHE_ELEM_ENUM=3;HEAD_GRP_SIZE=6;SLIDING_WINDOW=0;LOW_PREC_OUTPUT=0;SPEC_DEC=1;IS_SPEC_DEC_TREE=0;MLA_WRAPPER=0;USE_SM90_MHA=0;M_TILESIZE=48")
+target_include_directories(ignis_kernel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/flashinfer_xqa)
+
 # No PREFIX override: the platform default is what crates/artifact/build.rs
 # expects on each host — "" on MSVC (ignis_kernel.lib), "lib" on Linux, where
 # `-lignis_*` only finds libignis_kernel.a.

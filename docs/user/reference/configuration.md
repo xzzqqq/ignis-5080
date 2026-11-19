@@ -231,12 +231,12 @@ Output cap for requests that omit `max_tokens`, including reasoning tokens. The 
 | Env var | `IGNIS_MODEL_KV_FORMAT` |
 | Kind | `kv format` |
 | Default | `hq-e8-2b` |
-| Rule | one of bf16, hq-e8-2b, hq_e8_2b, hq |
+| Rule | one of bf16, hq-e8-2b, hq_e8_2b, hq, nvfp4 |
 | Models | all |
 | Per model | `--qwen38-model-kv-format` |
 | `/v1/config` | shown by `GET`, patchable, with a model reload |
 
-KV storage format: `hq-e8-2b` by default, or `bf16` for reference comparisons.
+KV storage format: `nvfp4` for Qwen3.8-27B, `hq-e8-2b`, or `bf16` for reference comparisons. The base default is `hq-e8-2b`.
 
 ### `model.prefill_attention`
 

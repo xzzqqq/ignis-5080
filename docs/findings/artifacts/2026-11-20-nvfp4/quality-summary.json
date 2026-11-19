@@ -1,0 +1,550 @@
+{
+  "schema": "ignis.nvfp4-quality-summary/1",
+  "scope": "Bounded same-history operator/model-distribution evidence; no task-solving score or universal quality-win claim.",
+  "provenance": {
+    "artifact": {
+      "name": "qwen3_8_27b_trellis_sc30-v2.ninfer",
+      "bytes": 13379877124,
+      "sha256": "2c4c9ee4d6b25c08da6c2d85840126e73d120564e230f926b6230b5b95ee8b3c",
+      "hash_provenance": "Earlier compatible Lab corpus digest, with unchanged artifact file stat; not a new per-leg model rehash."
+    },
+    "main_quality": {
+      "binary_sha256": "19e361c21dbb2761d0b1f0cf30dd5b4eeb7a1cbb72681d6fcb922caca7ee2926",
+      "runtime_sources_sha256": "3eb4bb127d3c8ec493a327cdbc0f8d45c4aaa2b21320b7b053819dd7d7d802bd"
+    },
+    "additional_T8_quality": {
+      "binary_sha256": "d22be4b05c7078f444e86b7b0c5616a17d9758d0fe19ff9952d2696508b3b0fa",
+      "runtime_sources_sha256": "1d21177e0d77c7c1c10829bf122e6fe720b491614a16c63b892bc775ba35421c"
+    },
+    "common_configuration": {
+      "kv_formats": [
+        "bf16",
+        "hq-e8-2b",
+        "nvfp4"
+      ],
+      "exception_weights": "fp8",
+      "prefill_chunk": 1024,
+      "main_tail": 1024,
+      "main_tail_step": null,
+      "t8_tail": 32,
+      "t8_tail_step": 8,
+      "global_policy": "NV4 fixedglobal1; G16 E4M3SF/E2M1; BF16compute"
+    },
+    "exception_weight_policy_effect": {
+      "requested_quality_policy": "fp8",
+      "normal_default_policy": "bf16",
+      "physical_reencoding_for_selected_artifact": "none; this Trellis SC30 body has no BF16 exception linear tensors to convert; weights remain as stored",
+      "selected_inventory_encoding": "DeviceEncoding::Stored",
+      "observed_resident_weights_bytes": {
+        "earlier_default_bf16_policy": 10907958020,
+        "quality_fp8_policy": 10907958020
+      },
+      "evidence": [
+        {
+          "file": "crates/artifact/src/inventory.rs",
+          "symbol": "with_modules",
+          "rule": "Exception conversion selects NumericFormat::Bf16 only; Trellis matrices keep their stored encoding."
+        },
+        {
+          "file": "crates/artifact/src/inventory.rs",
+          "symbol": "tests::fp8_exceptions_never_reencode_a_trellis_matrix",
+          "rule": "Existing test requires every Trellis inventory entry to retain DeviceEncoding::Stored with the flag enabled."
+        }
+      ],
+      "scope": "The fp8 configuration flag is recorded honestly; it is not an actual FP8-reencoded-weight baseline or a different physical weight control."
+    }
+  },
+  "protocol": {
+    "reference": "same as-stored Trellis SC30 artifact with BF16 KV; requested exception policy fp8 is a physical-weight no-op for this artifact, not full-BF16 checkpoint weights",
+    "arms": [
+      "bf16",
+      "hq",
+      "nvfp4"
+    ],
+    "fresh_sequence_per_prompt": true,
+    "head_prefill_chunk": 1024,
+    "tail_tokens": 1024,
+    "same_explicit_head_then_tail_chunking_across_arms": true,
+    "monolithic_prefill_chunk_equivalence_claimed": false,
+    "head_final_partial_chunks": [
+      498,
+      916,
+      333
+    ],
+    "backbone_attention_tail_width": 1024,
+    "output_head_readout_block_max_columns": 32,
+    "row_i_predicts_original_token": "span_start+i+1",
+    "unknown_final_next_token_excluded_from_NLL": true,
+    "distribution_rows": 3072,
+    "known_next_token_rows": 3069
+  },
+  "aggregate": {
+    "bf16": {
+      "distribution_rows": 3072,
+      "KL_reference_to_arm_nats": 0.0,
+      "KL_median_nats": 0.0,
+      "KL_p99_nats": 0.0,
+      "reference_argmax_agreement": 1.0,
+      "known_next_token_rows": 3069,
+      "observed_next_token_top1_correct": 1147,
+      "observed_next_token_top1_accuracy": 0.37373737373737376,
+      "observed_text_NLL_nats": 10.089134075007365,
+      "mean_entropy_nats": 0.6358840755456155,
+      "mean_max_probability": 0.8119406522080538,
+      "entropy_on_wrong_next_token_nats": 0.9383464970803062,
+      "max_probability_on_wrong_next_token": 0.7240215970907274
+    },
+    "hq": {
+      "distribution_rows": 3072,
+      "KL_reference_to_arm_nats": 4.594254068862458,
+      "KL_median_nats": 0.27994293102111395,
+      "KL_p99_nats": 25.790300943970838,
+      "reference_argmax_agreement": 0.5891927083333334,
+      "known_next_token_rows": 3069,
+      "observed_next_token_top1_correct": 1177,
+      "observed_next_token_top1_accuracy": 0.3835125448028674,
+      "observed_text_NLL_nats": 9.693039657799263,
+      "mean_entropy_nats": 0.6275684558927249,
+      "mean_max_probability": 0.81175385167216,
+      "entropy_on_wrong_next_token_nats": 0.9335642274270092,
+      "max_probability_on_wrong_next_token": 0.7212091612880115
+    },
+    "nvfp4": {
+      "distribution_rows": 3072,
+      "KL_reference_to_arm_nats": 2.4564860680603577,
+      "KL_median_nats": 0.04001962221114359,
+      "KL_p99_nats": 22.578880068193325,
+      "reference_argmax_agreement": 0.6956380208333334,
+      "known_next_token_rows": 3069,
+      "observed_next_token_top1_correct": 1172,
+      "observed_next_token_top1_accuracy": 0.3818833496252851,
+      "observed_text_NLL_nats": 9.956391128058653,
+      "mean_entropy_nats": 0.6410042699128486,
+      "mean_max_probability": 0.8113994181541503,
+      "entropy_on_wrong_next_token_nats": 0.9457049324841977,
+      "max_probability_on_wrong_next_token": 0.7239985858730877
+    }
+  },
+  "windows": [
+    {
+      "id": "astropy__astropy-12907",
+      "prompt_tokens": 19954,
+      "span_start": 18930,
+      "span_rows": 1024,
+      "input_ids_u32le_sha256": "70a4768caa52008f9cd174b5229f244ae0bbef5327eaefa0aa585095953abd27",
+      "request_fixture_sha256": "21a7d230baa23d348a737c71d93662d431d9f08aa52132cc08377427ab5ca7d4",
+      "scored_rows_at_or_beyond_16K": 1024,
+      "head_final_partial_chunk": 498,
+      "target_serialized_roles": {
+        "assistant": 100,
+        "user": 923
+      },
+      "target_positions_in_open_tool_response_context": 911,
+      "arms": {
+        "bf16": {
+          "distribution_rows": 1024,
+          "KL_reference_to_arm_nats": 0.0,
+          "KL_median_nats": 0.0,
+          "KL_p99_nats": 0.0,
+          "reference_argmax_agreement": 1.0,
+          "known_next_token_rows": 1023,
+          "observed_next_token_top1_correct": 356,
+          "observed_next_token_top1_accuracy": 0.3479960899315738,
+          "observed_text_NLL_nats": 10.873313212503033,
+          "mean_entropy_nats": 0.6394598451730992,
+          "mean_max_probability": 0.8115623139754372,
+          "entropy_on_wrong_next_token_nats": 0.9239093439691467,
+          "max_probability_on_wrong_next_token": 0.7272413670088071
+        },
+        "hq": {
+          "distribution_rows": 1024,
+          "KL_reference_to_arm_nats": 5.217453776045927,
+          "KL_median_nats": 0.6772555325021633,
+          "KL_p99_nats": 25.643168595960116,
+          "reference_argmax_agreement": 0.5341796875,
+          "known_next_token_rows": 1023,
+          "observed_next_token_top1_correct": 375,
+          "observed_next_token_top1_accuracy": 0.36656891495601174,
+          "observed_text_NLL_nats": 10.293335212008081,
+          "mean_entropy_nats": 0.6426870472043718,
+          "mean_max_probability": 0.8071780806391698,
+          "entropy_on_wrong_next_token_nats": 0.9591819304936213,
+          "max_probability_on_wrong_next_token": 0.7124988550103395
+        },
+        "nvfp4": {
+          "distribution_rows": 1024,
+          "KL_reference_to_arm_nats": 2.500684554560605,
+          "KL_median_nats": 0.089687234495651,
+          "KL_p99_nats": 22.183592947044076,
+          "reference_argmax_agreement": 0.6845703125,
+          "known_next_token_rows": 1023,
+          "observed_next_token_top1_correct": 368,
+          "observed_next_token_top1_accuracy": 0.3597262952101662,
+          "observed_text_NLL_nats": 10.701896719454874,
+          "mean_entropy_nats": 0.630586674700885,
+          "mean_max_probability": 0.8133694186132462,
+          "entropy_on_wrong_next_token_nats": 0.9113261063382759,
+          "max_probability_on_wrong_next_token": 0.730478012854333
+        }
+      }
+    },
+    {
+      "id": "django__django-10097",
+      "prompt_tokens": 22420,
+      "span_start": 21396,
+      "span_rows": 1024,
+      "input_ids_u32le_sha256": "c146e6e3d730bb056dcd038c4f0f53fbfef345b75b3d53ef0d62ba35441c6581",
+      "request_fixture_sha256": "6877d43ca8dd8edb9908be291fa4df8da68453e3a37c799435fcc008777b2ce9",
+      "scored_rows_at_or_beyond_16K": 1024,
+      "head_final_partial_chunk": 916,
+      "target_serialized_roles": {
+        "user": 836,
+        "assistant": 187
+      },
+      "target_positions_in_open_tool_response_context": 822,
+      "arms": {
+        "bf16": {
+          "distribution_rows": 1024,
+          "KL_reference_to_arm_nats": 0.0,
+          "KL_median_nats": 0.0,
+          "KL_p99_nats": 0.0,
+          "reference_argmax_agreement": 1.0,
+          "known_next_token_rows": 1023,
+          "observed_next_token_top1_correct": 399,
+          "observed_next_token_top1_accuracy": 0.39002932551319647,
+          "observed_text_NLL_nats": 9.752174195718466,
+          "mean_entropy_nats": 0.6393979800972408,
+          "mean_max_probability": 0.8114587236210807,
+          "entropy_on_wrong_next_token_nats": 0.9821610370207964,
+          "max_probability_on_wrong_next_token": 0.7145811785863216
+        },
+        "hq": {
+          "distribution_rows": 1024,
+          "KL_reference_to_arm_nats": 4.000447188790658,
+          "KL_median_nats": 0.1684486327435999,
+          "KL_p99_nats": 24.883412256605418,
+          "reference_argmax_agreement": 0.62109375,
+          "known_next_token_rows": 1023,
+          "observed_next_token_top1_correct": 405,
+          "observed_next_token_top1_accuracy": 0.39589442815249265,
+          "observed_text_NLL_nats": 9.34866470362417,
+          "mean_entropy_nats": 0.6127087457071677,
+          "mean_max_probability": 0.8161256244683585,
+          "entropy_on_wrong_next_token_nats": 0.9436452148629133,
+          "max_probability_on_wrong_next_token": 0.7194608100509998
+        },
+        "nvfp4": {
+          "distribution_rows": 1024,
+          "KL_reference_to_arm_nats": 2.5617598551876006,
+          "KL_median_nats": 0.02724990670710844,
+          "KL_p99_nats": 22.448297340130814,
+          "reference_argmax_agreement": 0.6962890625,
+          "known_next_token_rows": 1023,
+          "observed_next_token_top1_correct": 406,
+          "observed_next_token_top1_accuracy": 0.396871945259042,
+          "observed_text_NLL_nats": 9.633670537089856,
+          "mean_entropy_nats": 0.6618943777433545,
+          "mean_max_probability": 0.809158651839573,
+          "entropy_on_wrong_next_token_nats": 1.014744592920531,
+          "max_probability_on_wrong_next_token": 0.7114850035891728
+        }
+      }
+    },
+    {
+      "id": "sympy__sympy-11618",
+      "prompt_tokens": 16717,
+      "span_start": 15693,
+      "span_rows": 1024,
+      "input_ids_u32le_sha256": "401c81e115da4df6a1682d085f9b923308ff079fed26a198d7672bf83747a8d7",
+      "request_fixture_sha256": "0ac09494a44dac1bb8c50f636a967f245c7f37029f8d73789b300582adaea211",
+      "scored_rows_at_or_beyond_16K": 333,
+      "head_final_partial_chunk": 333,
+      "target_serialized_roles": {
+        "user": 758,
+        "assistant": 265
+      },
+      "target_positions_in_open_tool_response_context": 738,
+      "arms": {
+        "bf16": {
+          "distribution_rows": 1024,
+          "KL_reference_to_arm_nats": 0.0,
+          "KL_median_nats": 0.0,
+          "KL_p99_nats": 0.0,
+          "reference_argmax_agreement": 1.0,
+          "known_next_token_rows": 1023,
+          "observed_next_token_top1_correct": 392,
+          "observed_next_token_top1_accuracy": 0.3831867057673509,
+          "observed_text_NLL_nats": 9.641914816800599,
+          "mean_entropy_nats": 0.6287944013665068,
+          "mean_max_probability": 0.8128009190276436,
+          "entropy_on_wrong_next_token_nats": 0.9102788397146602,
+          "max_probability_on_wrong_next_token": 0.7299538230992698
+        },
+        "hq": {
+          "distribution_rows": 1024,
+          "KL_reference_to_arm_nats": 4.56486124175079,
+          "KL_median_nats": 0.11963236514212153,
+          "KL_p99_nats": 25.83434199509848,
+          "reference_argmax_agreement": 0.6123046875,
+          "known_next_token_rows": 1023,
+          "observed_next_token_top1_correct": 397,
+          "observed_next_token_top1_accuracy": 0.38807429130009774,
+          "observed_text_NLL_nats": 9.437119057765543,
+          "mean_entropy_nats": 0.6273095747666355,
+          "mean_max_probability": 0.8119578499089517,
+          "entropy_on_wrong_next_token_nats": 0.897094064771173,
+          "max_probability_on_wrong_next_token": 0.7319515886560702
+        },
+        "nvfp4": {
+          "distribution_rows": 1024,
+          "KL_reference_to_arm_nats": 2.3070137944328666,
+          "KL_median_nats": 0.02498146378163551,
+          "KL_p99_nats": 23.553478877315,
+          "reference_argmax_agreement": 0.7060546875,
+          "known_next_token_rows": 1023,
+          "observed_next_token_top1_correct": 398,
+          "observed_next_token_top1_accuracy": 0.3890518084066471,
+          "observed_text_NLL_nats": 9.533606127631234,
+          "mean_entropy_nats": 0.6305317572943063,
+          "mean_max_probability": 0.8116701840096319,
+          "entropy_on_wrong_next_token_nats": 0.9135779895023758,
+          "max_probability_on_wrong_next_token": 0.7295615548274234
+        }
+      }
+    }
+  ],
+  "paired_NV4_minus_HQ": {
+    "kl_ref_to_arm": {
+      "candidate_minus_control_window_mean": -2.137768000802101,
+      "windows": 3,
+      "per_window": [
+        -2.716769221485322,
+        -1.4386873336030574,
+        -2.257847447317923
+      ],
+      "window_bootstrap_95pct": [
+        -2.716769221485322,
+        -1.4386873336030572
+      ]
+    },
+    "nll": {
+      "candidate_minus_control_window_mean": 0.26335147025939004,
+      "windows": 3,
+      "per_window": [
+        0.40856150744679276,
+        0.28500583346568575,
+        0.09648706986569167
+      ],
+      "window_bootstrap_95pct": [
+        0.09648706986569167,
+        0.40856150744679276
+      ]
+    }
+  },
+  "role_counts": {
+    "serialized_user": 2517,
+    "serialized_assistant": 552,
+    "open_tool_response_context": 2471,
+    "other_user_or_markup": 46,
+    "attribution": "Most recent serialized message header and tool-tag state at target token byte start; includes boundary/markup effects. These are supplied histories, not assistant gold completions."
+  },
+  "additional_T8": {
+    "prompt": "astropy__astropy-12907",
+    "prompt_tokens": 19954,
+    "head_tokens": 19922,
+    "head_prefill_chunk": 1024,
+    "tail_tokens": 32,
+    "tail_step": 8,
+    "tail_call_starts": [
+      19922,
+      19930,
+      19938,
+      19946
+    ],
+    "route": "eager GQA prefill body C1/T8 invokes formal M48 NV4 attention; not batched verify-graph replay",
+    "aggregate": {
+      "bf16": {
+        "distribution_rows": 32,
+        "KL_reference_to_arm_nats": 0.0,
+        "KL_median_nats": 0.0,
+        "KL_p99_nats": 0.0,
+        "reference_argmax_agreement": 1.0,
+        "known_next_token_rows": 31,
+        "observed_next_token_top1_correct": 17,
+        "observed_next_token_top1_accuracy": 0.5483870967741935,
+        "observed_text_NLL_nats": 4.711585829144673,
+        "mean_entropy_nats": 0.5328678223416117,
+        "mean_max_probability": 0.8563019087993494,
+        "entropy_on_wrong_next_token_nats": 0.9223689875843821,
+        "max_probability_on_wrong_next_token": 0.7333910969293737
+      },
+      "hq": {
+        "distribution_rows": 32,
+        "KL_reference_to_arm_nats": 4.2787424828189575,
+        "KL_median_nats": 0.04244710324490404,
+        "KL_p99_nats": 21.773645481604262,
+        "reference_argmax_agreement": 0.625,
+        "known_next_token_rows": 31,
+        "observed_next_token_top1_correct": 17,
+        "observed_next_token_top1_accuracy": 0.5483870967741935,
+        "observed_text_NLL_nats": 4.282721271273751,
+        "mean_entropy_nats": 0.5441906810765689,
+        "mean_max_probability": 0.843467448350316,
+        "entropy_on_wrong_next_token_nats": 0.9561821208976448,
+        "max_probability_on_wrong_next_token": 0.7080971139456907
+      },
+      "nvfp4": {
+        "distribution_rows": 32,
+        "KL_reference_to_arm_nats": 3.440374165235005,
+        "KL_median_nats": 0.009613645149626236,
+        "KL_p99_nats": 20.951695944565838,
+        "reference_argmax_agreement": 0.6875,
+        "known_next_token_rows": 31,
+        "observed_next_token_top1_correct": 17,
+        "observed_next_token_top1_accuracy": 0.5483870967741935,
+        "observed_text_NLL_nats": 4.347755203856955,
+        "mean_entropy_nats": 0.5573674887262128,
+        "mean_max_probability": 0.8520533978433844,
+        "entropy_on_wrong_next_token_nats": 0.8337840708311062,
+        "max_probability_on_wrong_next_token": 0.7739334515550561
+      }
+    },
+    "dump_sha256": {
+      "bf16": "5fcf6407afbc9aeb97d1dff3adc9d5129075576f70cc1c817421b86d523ea519",
+      "hq": "b8e301ef8d7005eedafdb638415386b3b6a14e5679a0bc21a1a644ee5f117ff0",
+      "nvfp4": "b53efd37de1f434d5c44097f08d167d6f92c2235201dacced47f1fe8aca1d892"
+    }
+  },
+  "fixed_global_policy": {
+    "selected_candidate": 1.0,
+    "calibration": "No prefix calibration or mutable sequence global; global1 is part of the format contract.",
+    "scope": "CPU independent codec + FP64 attention on one original pre-HQ BF16 call W19962; 192 unique query-head rows. Not production GPU output error.",
+    "input_reference_sha256": "f7815218db3554848846daccbbd22444769e6e73f76eca138b7318121077e9b7",
+    "rows": [
+      {
+        "global": 1.0,
+        "maximum_group_amax_without_scale_clipping": 2688.0,
+        "pregate_format_ideal_relativeL2": 0.04079884735448542,
+        "pregate_decoded_BF16_relativeL2": 0.04079884735448542,
+        "gated_continuous_relativeL2": 0.04339147423195588,
+        "roles": {
+          "k": {
+            "groups": 1277568,
+            "scale_clipped_groups": 0,
+            "nonzero_groups_rounded_to_zero_scale": 0,
+            "subnormal_scale_groups": 0,
+            "max_group_amax": 11.5625,
+            "min_nonzero_group_amax": 0.359375,
+            "code_saturated_coordinates": 653279
+          },
+          "v": {
+            "groups": 1277568,
+            "scale_clipped_groups": 0,
+            "nonzero_groups_rounded_to_zero_scale": 0,
+            "subnormal_scale_groups": 1,
+            "max_group_amax": 9.375,
+            "min_nonzero_group_amax": 0.083984375,
+            "code_saturated_coordinates": 644109
+          }
+        }
+      },
+      {
+        "global": 0.0625,
+        "maximum_group_amax_without_scale_clipping": 168.0,
+        "pregate_format_ideal_relativeL2": 0.04079884735448542,
+        "pregate_decoded_BF16_relativeL2": 0.04079884735448542,
+        "gated_continuous_relativeL2": 0.04339147423195588,
+        "roles": {
+          "k": {
+            "groups": 1277568,
+            "scale_clipped_groups": 0,
+            "nonzero_groups_rounded_to_zero_scale": 0,
+            "subnormal_scale_groups": 0,
+            "max_group_amax": 11.5625,
+            "min_nonzero_group_amax": 0.359375,
+            "code_saturated_coordinates": 653279
+          },
+          "v": {
+            "groups": 1277568,
+            "scale_clipped_groups": 0,
+            "nonzero_groups_rounded_to_zero_scale": 0,
+            "subnormal_scale_groups": 0,
+            "max_group_amax": 9.375,
+            "min_nonzero_group_amax": 0.083984375,
+            "code_saturated_coordinates": 644109
+          }
+        }
+      },
+      {
+        "global": 0.0078125,
+        "maximum_group_amax_without_scale_clipping": 21.0,
+        "pregate_format_ideal_relativeL2": 0.04079884735448542,
+        "pregate_decoded_BF16_relativeL2": 0.04079884735448542,
+        "gated_continuous_relativeL2": 0.04339147423195588,
+        "roles": {
+          "k": {
+            "groups": 1277568,
+            "scale_clipped_groups": 0,
+            "nonzero_groups_rounded_to_zero_scale": 0,
+            "subnormal_scale_groups": 0,
+            "max_group_amax": 11.5625,
+            "min_nonzero_group_amax": 0.359375,
+            "code_saturated_coordinates": 653279
+          },
+          "v": {
+            "groups": 1277568,
+            "scale_clipped_groups": 0,
+            "nonzero_groups_rounded_to_zero_scale": 0,
+            "subnormal_scale_groups": 0,
+            "max_group_amax": 9.375,
+            "min_nonzero_group_amax": 0.083984375,
+            "code_saturated_coordinates": 644109
+          }
+        }
+      }
+    ],
+    "code_saturation_note": "Ordinary endpoint saturation may result from scale rounding down; it is not synonymous with out-of-range groups.",
+    "recommendation": "Global1 gives the largest representable-amax headroom with no observed precision cost vs1/16 or1/128 in this one call; production rejects nonfinite/out-of-range groups rather than altering historical calibration."
+  },
+  "interpretation": {
+    "BF16_fidelity": "NV4 improves KL and BF16 argmax agreement in all three main windows and the additional T8 sample.",
+    "unfavorable_NLL_retained": "NV4 minus HQ NLL +0.408562/+0.285006/+0.096487 nats per main window; additionalT8 +0.065034. Do not erase or call this a universal task-quality regression.",
+    "observed_next_token_accuracy": "Main NV4 has5 fewer correct observed next tokens than HQ out of3069; per-window delta−7/+1/+1. T8 all formats17/31.",
+    "entropy": "Complete-row mean entropy/maxP do not support a general HQ-is-softer explanation; HQ entropy is slightly below BF16 overall.",
+    "alignment": "Small171-row immutable sample plus scalar target reads supports correct token+1 and row-major BF16 layout, including32-column boundaries. No simple ±1 or ±32 offset evidence.",
+    "adoption_scope": "BF16 fidelity and formal correctness support the user-selected NV4 integration without a new NLL hard gate. Model-task quality and final service acceptance are separate claims."
+  },
+  "limits": [
+    "Only three supplied coding-agent histories; window bootstrap has3clusters and is descriptive, not broad population evidence.",
+    "Most NLL targets are external tool observations or supplied historical text, not desired new assistant answers.",
+    "Format-route comparison also includes the corresponding HQ vs NV4 prefill arithmetic/current-chunk encoding; it does not isolate a codebook alone.",
+    "Historical KLD reports used a different weight/reference experiment and corpus; their thresholds/numeric scales are not transferred.",
+    "Fixed-global1 CPU4.0798847% error is not the older prefix-calibrated NV4 GPU4.015% measurement; neither is the prior fixed-HQ-input arithmetic error.",
+    "Final service/capacity/canary/Vision/GPU acceptance is recorded independently."
+  ],
+  "evidence_sha256": {
+    "primary_quality_report": "3593835c139742b4d6aa2ef1cde40fa23644d873c29f50142c4f0c38db27928a",
+    "augmented_quality_report": "6f9b4db8fb47dfbec5619ec72fb5a4e39be149ec86a41d0d6c786459a446a6ef",
+    "additional_T8_report": "a5cec8a22ce767eb4e0ae5fa40bd121c9d36c398455ef33b06fc671ed60be0fd",
+    "input_windows_json": "313af5905bcbfb126d9d1a49657a1c32c5e59bb779bb674d8ade3eb847686aaa",
+    "scoring_script": "456ef6292e0f1aef092730bf45a91b739044882a89d1e36dc224f9e986c9e553",
+    "alignment_review": "438a188b9bb975a2603111a0f996284c29f52dc342a746599ac9231eba96128b"
+  },
+  "dump_sha256_by_window": {
+    "astropy__astropy-12907": {
+      "bf16": "8518580e9acafb62c216afaeff99fb336cd569b2fb1eff189934ddfd3d48ef3a",
+      "hq": "5efe696bc6e6437ce7b12ba522d715e0ddcfa066640d1770e8be3b134c71932e",
+      "nvfp4": "5ac9c6252efde8e9323274875c9d1292c95192dbf05660bcc9094db62d5016d3"
+    },
+    "django__django-10097": {
+      "bf16": "0b12743bbf4a5c118ff5ebb777b017b4de17e31bfe50a46403d6b6a30f17f21c",
+      "hq": "06b1df009ebc1b1cb25912567e6b03b68e47a2a800fc69eb13c6f930bf30fd8e",
+      "nvfp4": "c435cb3cd980bbf618f86e3b0fbfbe8e577da5e8f91ea0406cefc7e7c2bfd380"
+    },
+    "sympy__sympy-11618": {
+      "bf16": "000418253a56e0d0b1538d0a9b3abfa9c92ab25ff710e72cfa0342b048629567",
+      "hq": "8c7c21f8a64aa916399fbcd942d7dfda599c484c6063ff3859df0d3fc39cf9b3",
+      "nvfp4": "431ee593ebb38e216c911da361f2d527754047b418ca95f3ffb697261a43eb34"
+    }
+  }
+}

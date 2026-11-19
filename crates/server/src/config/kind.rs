@@ -557,7 +557,7 @@ impl FieldKind for KvPool {
     }
 }
 
-/// The KV storage format (ADR 0022): `bf16` or `hq-e8-2b`.
+/// The KV storage format: `bf16`, `hq-e8-2b`, or Qwen3.8-27B `nvfp4`.
 pub struct KvFormatKind;
 
 impl FieldKind for KvFormatKind {

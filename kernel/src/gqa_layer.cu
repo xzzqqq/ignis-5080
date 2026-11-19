@@ -5,8 +5,12 @@
 // KV append -> attention + sigmoid output gate -> output residual -> MLP tail.
 
 #include "ignis_gqa_native.h"
+#include "ignis_nvfp4_kv.h"
 extern "C" int32_t ignis_gqa_native_q_fixed_splits(const ignis_trellis_weight *,
     const void *,void *,const ignis_trellis_workspace *,void *);
+extern "C" int32_t ignis_gqa_native_kv_pair(const ignis_trellis_weight *,
+    const ignis_trellis_weight *,const void *,void *,void *,
+    const ignis_trellis_workspace *,void *);
 #include "lab_profile.h"
 #include "lab_trace.h"
 #include "lab_segment.h"
@@ -84,6 +88,13 @@ void input_projection(ignis_model &model, const GqaLayerWeights &weights, const 
       })());
     }else{
     IGNIS_PROFILE_OP("linear.q_proj", ignis::trellis_body::query_gate(model, t.q_proj, normalized, heads, head_dim, arena, query, gate, stream));
+    }
+    if(native_q_s3 && model.kv_format==IGNIS_KV_FORMAT_NVFP4 && !model.lab_trace){
+      IGNIS_PROFILE_OP("linear.kv_pair", ([&](){
+        if(ignis_gqa_native_kv_pair(&t.k_proj,&t.v_proj,normalized.data,key.data,value.data,
+            &model.trellis_workspace,stream))throw std::runtime_error(ignis_trellis_last_error());
+      })());
+      return;
     }
     IGNIS_PROFILE_OP("linear.k_proj", ignis::trellis_body::linear(model, t.k_proj, normalized, key.data, static_cast<uint32_t>(key.ne[0]),
                                 IGNIS_TRELLIS_STORE, stream));
@@ -298,7 +309,9 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
     // ignis_gqa_workspace.h), which answers for whichever op the width
     // takes.
     const std::size_t attention_workspace_bytes =
-        ignis_gqa_attention_workspace_bytes(batch_cache.dtype, envelope, tokens);
+        pool->kv_format == IGNIS_KV_FORMAT_NVFP4
+            ? ignis::nvfp4_attention_workspace_bytes(envelope.max_visible_keys, tokens)
+            : ignis_gqa_attention_workspace_bytes(batch_cache.dtype, envelope, tokens);
     const ninfer::DeviceSpan attention_workspace_storage =
         model->scratch->alloc_bytes(std::max<std::size_t>(attention_workspace_bytes, 1));
     if (ignis_gqa_workspace_needs_zeroing(batch_cache.dtype)) {
@@ -320,7 +333,7 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
     // attention. The vendored route keeps every other call: BF16 caches and
     // the small-T widths.
     const bool hq_prompt =
-        batch_cache.dtype == ninfer::DType::U8 &&
+        pool->kv_format == IGNIS_KV_FORMAT_HQ_E8_2B &&
         ninfer::ops::detail::gqa_attention_resolve_route(kQHeads, tokens, 1, batch_cache.dtype,
                                                          envelope) ==
             ninfer::ops::detail::GqaAttentionRoute::Prompt;
@@ -348,7 +361,13 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
         readout_failed = true;
       }
     };
-    if (hq_prompt) {
+    if (pool->kv_format == IGNIS_KV_FORMAT_NVFP4) {
+      IGNIS_PROFILE_OP("nvfp4_attention", ignis::nvfp4_attention(
+          rotated_query_heads, rotated_key_heads, value_heads, positions,
+          ninfer::Tensor{}, kv_table_rows, gate.view({kHeadDim,kQHeads,tokens,1}),
+          attention_scale, batch_cache, envelope, attention_workspace, attention_heads, stream));
+      readout(nullptr);
+    } else if (hq_prompt) {
       IgnisHqPromptOptions options;
       options.precision = model->prefill_attention == IGNIS_PREFILL_ATTENTION_FP16
                               ? IgnisHqPromptPrecision::kFp16
@@ -500,10 +519,13 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {q_width, columns, 1, 1});
     ninfer::Tensor key =
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {kv_width, columns, 1, 1});
+    ninfer::Tensor value;
+    if(pool->kv_format==IGNIS_KV_FORMAT_NVFP4 && lane_tokens==8 && batch==1)
+      value=model->decode_graph_scratch->alloc(ninfer::DType::BF16,{kv_width,columns,1,1});
     ninfer::Tensor gate =
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {q_width, columns, 1, 1});
-    ninfer::Tensor value =
-        model->decode_graph_scratch->alloc(ninfer::DType::BF16, {kv_width, columns, 1, 1});
+    if(!value.data)
+      value=model->decode_graph_scratch->alloc(ninfer::DType::BF16,{kv_width,columns,1,1});
     ninfer::Tensor rotated_query =
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {q_width, columns, 1, 1});
     ninfer::Tensor rotated_key =
@@ -522,7 +544,8 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
     input_projection(*model, weights, normalized, query, gate, key, value, kQHeads, kHeadDim,
                      *model->decode_graph_scratch, mode, stream,
                      model->is_trellis_body && model->hidden==5120 && lane_tokens==8 && batch==1 &&
-                     pool->kv_format==IGNIS_KV_FORMAT_HQ_E8_2B && !model->trellis_candidate &&
+                     (pool->kv_format==IGNIS_KV_FORMAT_HQ_E8_2B || pool->kv_format==IGNIS_KV_FORMAT_NVFP4) &&
+                     !model->trellis_candidate &&
                      kQHeads==24 && ignis_gqa_native_workspace(model->max_context_tokens));
 
     // Graph-safe positions (ADR 0019): the round's staged absolute
@@ -609,9 +632,11 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
     // the verify width the resolver's own chunking decides the route -- one
     // hq width-8 tile, or BF16's two passes of six -- not this layer.
     const std::size_t native_attention_bytes = model->is_trellis_body && hidden==5120 &&
-        kQHeads==24 && batch==1 && lane_tokens==8 && batch_cache.dtype==ninfer::DType::U8
+        kQHeads==24 && batch==1 && lane_tokens==8 && pool->kv_format==IGNIS_KV_FORMAT_HQ_E8_2B
         ? ignis_gqa_native_workspace(envelope.max_visible_keys) : 0;
-    const std::size_t attention_workspace_bytes = std::max<std::size_t>(native_attention_bytes,
+    const std::size_t attention_workspace_bytes = pool->kv_format == IGNIS_KV_FORMAT_NVFP4
+        ? ignis::nvfp4_attention_workspace_bytes(envelope.max_visible_keys, lane_tokens, batch)
+        : std::max<std::size_t>(native_attention_bytes,
         ninfer::ops::gqa_attention_workspace_capacity_bytes(
             kQHeads, batch_cache.dtype, envelope, batch, lane_tokens, lane_tokens));
     const ninfer::DeviceSpan attention_workspace_storage =

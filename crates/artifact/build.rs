@@ -9,7 +9,7 @@ use std::process::Command;
 /// `kernel/`. A whitelist rather than a walk of `kernel/` itself: the build
 /// directory lives there too, and asking cargo to watch a file cmake writes
 /// would rebuild on every single invocation, forever.
-const KERNEL_SOURCE_ROOTS: &[&str] = &["src", "include", "tests", "vendor/src", "vendor/include"];
+const KERNEL_SOURCE_ROOTS: &[&str] = &["src", "include", "tests", "vendor/src", "vendor/include", "third_party"];
 
 /// Files directly under `kernel/` that decide how the leaf is built. Both
 /// host scripts are watched on both hosts: which one runs depends on the
