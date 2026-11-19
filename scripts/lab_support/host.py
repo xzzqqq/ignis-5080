@@ -84,7 +84,7 @@ def prepare_build(root, build_root):
     native = root/'kernel/build'
     paths = [build_root, *(build_root/name for name in ('target', 'tmp', 'kernel', 'candidates'))]
     existing_native = native.exists() or native.is_symlink()
-    for path in [*paths, *([native] if existing_native else [])]:
+    for path in [*paths, build_root/'candidates/objects', *([native] if existing_native else [])]:
         require_disk(path)
     if native.is_symlink() and not native.exists():
         raise ValueError(f'kernel/build has a broken link: {native}; repair it to a disk-backed cache before retrying')

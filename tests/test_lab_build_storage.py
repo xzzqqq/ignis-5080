@@ -52,6 +52,7 @@ class LabBuildStorageTests(unittest.TestCase):
             for name in ('target', 'kernel', 'tmp', 'candidates'):
                 self.assertTrue((build/name).is_dir())
                 self.assertIn(unittest.mock.call(build/name), filesystem.call_args_list)
+            self.assertIn(unittest.mock.call(build/'candidates/objects'), filesystem.call_args_list)
             self.assertEqual(env['CARGO_TARGET_DIR'], str(build/'target'))
             self.assertEqual(env['TMPDIR'], str(build/'tmp'))
             self.assertEqual(dict(os.environ), inherited)
@@ -114,8 +115,21 @@ class LabBuildStorageTests(unittest.TestCase):
                 self.assertEqual(native.is_symlink(), symlink)
                 self.assertEqual((native/'sentinel').read_text(), 'keep')
 
+    def test_existing_disk_objects_link_is_not_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve();(root/'kernel').mkdir()
+            build = root/'configured';(build/'candidates').mkdir(parents=True)
+            disk = root/'other-disk';disk.mkdir();(disk/'sentinel').write_text('keep')
+            objects = build/'candidates/objects';objects.symlink_to(disk, target_is_directory=True)
+            with patch.object(host, 'filesystem_type', return_value='ext4') as filesystem:
+                host.prepare_build(root, build)
+            self.assertIn(unittest.mock.call(disk), filesystem.call_args_list)
+            self.assertTrue(objects.is_symlink())
+            self.assertEqual(objects.resolve(), disk)
+            self.assertEqual((objects/'sentinel').read_text(), 'keep')
+
     def test_ram_cache_or_hidden_native_link_fails_before_creating_build_root(self):
-        for location in ('root', 'target', 'tmp', 'candidates', 'native'):
+        for location in ('root', 'target', 'tmp', 'candidates', 'candidates/objects', 'native'):
             with self.subTest(location=location), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory).resolve();(root/'kernel').mkdir()
                 build = root/'configured'
@@ -126,7 +140,8 @@ class LabBuildStorageTests(unittest.TestCase):
                 elif location == 'root':
                     bad = build
                 else:
-                    build.mkdir();(build/location).symlink_to(ram, target_is_directory=True)
+                    (build/location).parent.mkdir(parents=True)
+                    (build/location).symlink_to(ram, target_is_directory=True)
                     bad = ram
                 def filesystem(path):
                     return 'tmpfs' if path == bad else 'ext4'
