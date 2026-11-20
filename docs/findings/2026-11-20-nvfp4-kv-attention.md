@@ -174,18 +174,10 @@ The saved final Lab receipt reports ready, no active operation, profiling enable
 
 ## Finding
 
-Observed: the formal fixed-global-1 storage, graph-safe M48 route, bounded band fallback, workspace boundary checks and cumulative integration checks are validated within the stated scopes. The 128 Ki-input capacity and bounded canary checks passed. The earlier local kernel measurements suggest performance opportunities, but the R1 service behavior is mixed: Django fails to produce a useful tool turn under both loop-guard-off and product-default Rewind checks, and Sympy throughput falls. **Implementation validated; service behavior mixed; default adoption pending.**
-
-Inference: reduced padding and a smaller staging footprint are useful resource opportunities on SM120, but the timing does not isolate one cause. Neither those resources nor the local kernel measurements establish full-service improvement.
-
-## Implications
-
-Keep graph capacity separate from active device work, preserve actual masks/page selectors, and budget both decoded bands and FP32 carry. Compare formats against original pre-HQ inputs and also against their own decoded-storage targets. Keep the existing-library consumer's precision and fast-math choices explicit.
+The final mixed window and weighted M48 scheduler support 131,072 uncached input tokens on one RTX 5080. On the fixed Django request, all three R3 benchmark samples and the independent default-Rewind run reached a bash tool call after 873 tokens. The original all-NVFP4 run hit the 8,192-token cap. Compared with the earlier HQ measurements, final median output rates changed by +7.1% on Astropy, +10.8% on Django and −2.4% on SymPy.
 
 ## Limits and unknowns
 
-Fixed global 1 has bounded model evidence on the supplied histories above; task-solving quality beyond those histories is not established. Cumulative CUDA coverage and the stated R2 targeted/capacity/canary checks are complete. The Django service failure remains unresolved; Vision is a capped path smoke without a matched HQ semantic control. Default adoption remains pending a user decision; no overall service speedup or comprehensive model-quality pass is claimed here. Earlier prefix-calibrated and synthetic measurements cannot close those gaps. Raw model data, corpora and profiler captures remain outside this finding.
+The benchmark measures a single response on each fixture with free-running generation. It does not measure completed tasks, general loop rates or teacher-forced speculative acceptance. The fresh-only intervention changed the Django trajectory, and switching the attention kernel also changed it; the contribution of sink and recent to that outcome remains unisolated. Vision coverage is a single capped image description.
 
-## Follow-ups
-
-The authoritative current acceptance notes and raw evidence remain under `.scratch/nvfp4-integration-2026-11-20/`. The sanitized summaries distinguish formal R1/R2 identities from the historical screens above. Preserve the unresolved service results when deciding whether to adopt the new default. Any later global-scale policy change must preserve or version the cache/snapshot interpretation; the experiment's calibrated globals are not a production option.
+The [final acceptance record](artifacts/2026-11-20-nvfp4/weighted-acceptance.json) and [operator replay results](artifacts/2026-11-20-nvfp4/window-replay.json) cover R3. The earlier R1/R2 summaries above retain the original failures and their own measurement conditions.

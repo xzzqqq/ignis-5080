@@ -86,8 +86,8 @@ pub struct AttnTapCapture {
     pub rows_written: Vec<i64>,
     /// Per query position: 1 when every armed layer saw it, else 0.
     pub queries_seen: Vec<i32>,
-    /// The keys hq-e8-2b attention consumed for the first query's chunk,
-    /// `[layer][max_positions][KV_HEADS][HEAD_DIM]` BF16, **rotated frame**;
+    /// The keys attention consumed for the first query's chunk,
+    /// `[layer][max_positions][KV_HEADS][HEAD_DIM]` BF16, in the HQ rotated frame or the NVFP4 normal frame;
     /// empty unless taken through [`with_attn_tap_hq`].
     pub kc: Vec<u16>,
     /// Consumed rows each armed layer copied (0 = not captured).
@@ -111,7 +111,7 @@ impl AttnTapCapture {
         &self.k[at..at + HEAD_DIM]
     }
 
-    /// The consumed (rotated-frame) key row of `kv_head` at `position` in
+    /// The consumed key row in the selected format’s frame of `kv_head` at `position` in
     /// armed layer `layer`.
     pub fn consumed_key(&self, layer: usize, position: usize, kv_head: usize) -> &[u16] {
         let at = ((layer * self.max_positions as usize + position) * KV_HEADS + kv_head) * HEAD_DIM;
@@ -174,9 +174,8 @@ impl AttnTapCapture {
     }
 
     /// Scores against the keys consumed by the selected cache format.
-    /// HQ needs a consumed-key capture (`with_attn_tap_hq`); NVFP4 has no
-    /// residual window or mutable global, so its fixed-global1 G16 codec can
-    /// be independently applied to the original captured BF16 keys.
+    /// Capture consumed rows to include the live residual window. Without a
+    /// consumed capture, the NVFP4 fallback estimates fully quantized scores.
     pub fn scores_for_format(
         &self,
         format: crate::KvFormat,
@@ -192,7 +191,11 @@ impl AttnTapCapture {
                 let q = self.query(layer, query, q_head);
                 let kv_head = q_head / (Q_HEADS / KV_HEADS);
                 positions.iter().map(|&position| {
-                    let key = nvfp4_key(self.key(layer, position, kv_head));
+                    let key = if self.consumed_rows[layer] > position as i64 {
+                        self.consumed_key(layer, position, kv_head).iter().map(|&b| bf16_to_f32(b)).collect()
+                    } else {
+                        nvfp4_key(self.key(layer, position, kv_head))
+                    };
                     q.iter().zip(key).map(|(&a, b)| bf16_to_f32(a) * b).sum::<f32>() / 16.0
                 }).collect()
             }
@@ -230,10 +233,13 @@ pub fn with_attn_tap<T>(
     armed(ordinals, query_positions, max_positions, false, f)
 }
 
-/// [`with_attn_tap`], plus the keys hq-e8-2b attention consumed for the
+/// Backwards-compatible name for [`with_attn_tap_consumed`].
+pub use with_attn_tap_consumed as with_attn_tap_hq;
+
+/// [`with_attn_tap`], plus the keys HQ or NVFP4 attention consumed for the
 /// chunk holding `query_positions[0]` ([`AttnTapCapture::kc`]). On a cache or
 /// route that does not materialize them, `consumed_rows` comes back 0.
-pub fn with_attn_tap_hq<T>(
+pub fn with_attn_tap_consumed<T>(
     ordinals: &[i32],
     query_positions: &[i64],
     max_positions: i64,
@@ -468,6 +474,9 @@ mod tests {
         // amax1 -> RN_E4M3(1/6)=0.171875 -> E2M1(1/sf)=6 ->1.03125.
         assert_eq!(cap.scores_for_format(crate::KvFormat::Nvfp4, 0, 0, 10, &[0]), vec![1.03125 / 16.0]);
         assert_eq!(cap.scores_for_format(crate::KvFormat::Bf16, 0, 0, 10, &[0]), vec![1.0 / 16.0]);
+        cap.kc = cap.k.clone();
+        cap.consumed_rows[0] = 1;
+        assert_eq!(cap.scores_for_format(crate::KvFormat::Nvfp4, 0, 0, 10, &[0]), vec![1.0 / 16.0]);
     }
 
     #[test]

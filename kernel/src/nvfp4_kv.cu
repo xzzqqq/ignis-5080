@@ -206,6 +206,9 @@ void nvfp4_store_window(const ninfer::Tensor &k, const ninfer::Tensor &v,
                         const ninfer::Tensor &positions, const ninfer::Tensor &valid,
                         const ninfer::Tensor &rows, ninfer::PagedKVBatchLayerView cache,
                         bool publish, cudaStream_t stream) {
+  if (!cache.residual_k.data && !cache.residual_v.data && !cache.ring_valid.data) return;
+  if (!cache.residual_k.data || !cache.residual_v.data || !cache.ring_valid.data)
+    throw std::invalid_argument("nvfp4 window: incomplete side planes or validity bitmap");
   store_window<<<dim3(k.ne[2], k.ne[3]), Heads * D / 8, 0, stream>>>(window(cache,k,v,0),
       static_cast<const int *>(positions.data), static_cast<const int *>(valid.data),
       static_cast<const int *>(rows.data), int(k.ne[2]), publish);

@@ -107,8 +107,8 @@ struct AttentionReadoutTarget {
 //   rotation), so the dot product is unchanged by the frame;
 // - under NVFP4 (`cache.dtype == U8`, quant_group16), the packed pages and
 //   E4M3 scale pages through row0, decoded by the production fixed-global1
-//   codec into normal-frame BF16 keys; Q takes no HQ transform and hq_keys
-//   is not required;
+//   codec into normal-frame BF16 keys. With a window, the supplied keys
+//   select exact sink, recent and fresh rows. Q takes no HQ transform;
 // - under BF16, the cache's own pages through `cache.block_tables` row 0,
 //   which the layer's attention appended before it read them.
 //
@@ -130,3 +130,7 @@ int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
                                     const ninfer::PagedKVBatchLayerView &cache,
                                     const IgnisHqPromptKeys *hq_keys, float scale,
                                     cudaStream_t stream, const char **error);
+
+// NVFP4 consumed-key capture uses the same normal-frame fetch as the readout.
+void ignis_nvfp4_fetch_rows(const IgnisHqPromptKeys &keys, bool values, int begin,
+                            int count, void *dst, cudaStream_t stream);

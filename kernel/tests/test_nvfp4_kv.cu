@@ -560,11 +560,13 @@ void heterogeneous_values_and_dense_scores(cudaStream_t stream) {
 
 // Zero-coded pages and distinct BF16 rows expose accidental codec reads,
 // stale ring aliases and MMA lane/fragment swaps. Slot 0 stays poisoned.
-void mixed_window(cudaStream_t stream) {
-  constexpr int start = 647, capacity = 704, rows = 544;
+void mixed_window(cudaStream_t stream, int start) {
+  constexpr int rows = 544;
+  const int capacity = (start + 9 + Page - 1) / Page * Page;
   Cache cache(capacity);
   for (auto *p : {&cache.k, &cache.v, &cache.ks, &cache.vs})
     MOE_CUDA(cudaMemsetAsync(p->p, 0, p->bytes, stream));
+  ignis::nvfp4_store_window({}, {}, {}, {}, {}, cache.view, true, stream);
   DeviceBytes sk(2 * rows * H * D * 2), sv(sk.bytes), bits(2 * 16 * 4);
   cache.view.residual_k = ninfer::Tensor(sk.p, ninfer::DType::BF16, {D,H,rows,2});
   cache.view.residual_v = ninfer::Tensor(sv.p, ninfer::DType::BF16, {D,H,rows,2});
@@ -595,7 +597,7 @@ void mixed_window(cudaStream_t stream) {
   MOE_CUDA(cudaStreamSynchronize(stream));
   // Invalidate 32 recent positions as after a speculative reject.
   MOE_CUDA(cudaMemsetAsync(bits.as<std::uint32_t>()+16+6,0,4,stream));
-  for (int tokens : {8,9}) {
+  for (int tokens : {1,8,9}) {
     Inputs x(tokens,1);
     fill(x,start);
     std::vector<std::uint16_t> q(x.q.bytes/2,0);
@@ -662,7 +664,7 @@ void checkpoint_four_plane_copy() {
 int main() {
   try {
     MOE_CUDA(cudaSetDevice(0));cudaStream_t stream=nullptr;MOE_CUDA(cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking));
-    codec_scatter_and_unselected_bytes(stream);dynamic_graph_and_bands(stream);nonuniform_score_scale_and_rescale(stream);all_scale_groups_have_analytic_scores(stream);heterogeneous_values_and_dense_scores(stream);mixed_window(stream);checkpoint_four_plane_copy();
+    codec_scatter_and_unselected_bytes(stream);dynamic_graph_and_bands(stream);nonuniform_score_scale_and_rescale(stream);all_scale_groups_have_analytic_scores(stream);heterogeneous_values_and_dense_scores(stream);mixed_window(stream,647);mixed_window(stream,6000);checkpoint_four_plane_copy();
     MOE_CUDA(cudaStreamDestroy(stream));
   }catch(const std::exception &error){std::fprintf(stderr,"FATAL NV4 regression: %s\n",error.what());return 1;}
   std::printf("nvfp4 KV regression: %s\n",g_failed?"FAILED":"ok");return g_failed?1:0;

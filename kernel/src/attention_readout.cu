@@ -19,6 +19,7 @@
 #include "ops/kernel/paged_kv_address.cuh"
 
 #include <cuda_bf16.h>
+#include <stdexcept>
 
 namespace {
 
@@ -445,7 +446,25 @@ __global__ void attention_set_readout_kernel(const SetReadoutArgs args) {
   }
 }
 
+__global__ void capture_nvfp4_keys(IgnisHqPromptKeys keys, int begin, int count, __nv_bfloat16 *dst) {
+  const int pos = blockIdx.x * kWarpsPerBlock + threadIdx.x / 32;
+  if (pos >= count) return;
+  const int head = blockIdx.y;
+  fetch_nv4_row(keys, static_cast<const __nv_bfloat16 *>(keys.codes_k),
+                static_cast<const std::uint8_t *>(keys.meta_k), keys.block_table, head,
+                begin + pos, dst + (std::int64_t(head) * count + pos) * kHeadDim, threadIdx.x % 32);
+}
+
 } // namespace
+
+void ignis_nvfp4_fetch_rows(const IgnisHqPromptKeys &keys, bool values, int begin,
+                            int count, void *dst, cudaStream_t stream) {
+  if (values) throw std::invalid_argument("NVFP4 readout captures keys only");
+  capture_nvfp4_keys<<<dim3((count + kWarpsPerBlock - 1) / kWarpsPerBlock, kKvHeads),
+                       kThreads, 0, stream>>>(keys, begin, count, static_cast<__nv_bfloat16 *>(dst));
+  const auto err = cudaGetLastError();
+  if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+}
 
 int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
                                     const void *rotated_query, int32_t q_heads, int32_t kv_heads,

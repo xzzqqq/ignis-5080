@@ -348,7 +348,8 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
     const char *readout_error = nullptr;
     bool readout_failed = false;
     const auto readout = [&](const IgnisHqPromptKeys *hq_keys) {
-      if (ignis_attn_tap_record_consumed(gqa_layer, start_position, tokens, hq_keys, stream) != 0) {
+      if (ignis_attn_tap_record_consumed(gqa_layer, start_position, tokens, hq_keys, stream,
+              pool->kv_format == IGNIS_KV_FORMAT_NVFP4 ? ignis_nvfp4_fetch_rows : ignis_hq_prompt_fetch_rows) != 0) {
         readout_error = ignis_attn_tap_last_error();
         readout_failed = true;
         return;
@@ -366,17 +367,16 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
           rotated_query_heads, rotated_key_heads, value_heads, positions,
           ninfer::Tensor{}, kv_table_rows, gate.view({kHeadDim,kQHeads,tokens,1}),
           attention_scale, batch_cache, envelope, attention_workspace, attention_heads, stream));
-      if (attention_readout) {
-        IgnisHqPromptKeys keys{};
-        keys.start = start_position;
-        keys.width = tokens;
-        keys.new_k = rotated_key_heads.data;
-        keys.residual_k = batch_cache.residual_k.data;
-        keys.ring_valid = static_cast<const std::uint32_t *>(batch_cache.ring_valid.data);
-        readout_failed = ignis_attention_readout_run(*attention_readout, rotated_query.data,
-            kQHeads, kKvHeads, tokens, envelope.max_visible_keys, batch_cache, &keys,
-            attention_scale, stream, &readout_error) != 0;
-      }
+      IgnisHqPromptKeys keys{};
+      keys.start = start_position;
+      keys.width = tokens;
+      keys.new_k = rotated_key_heads.data;
+      keys.residual_k = batch_cache.residual_k.data;
+      keys.ring_valid = static_cast<const std::uint32_t *>(batch_cache.ring_valid.data);
+      keys.codes_k = batch_cache.k_pages.data;
+      keys.meta_k = batch_cache.k_scale_pages.data;
+      keys.block_table = static_cast<const std::int32_t *>(batch_cache.block_tables.data);
+      readout(&keys);
       ignis::nvfp4_store_window(rotated_key_heads, value_heads, positions, {}, kv_table_rows,
           batch_cache, gqa_layer + 1 == pool->kv_num_layers, stream);
     } else if (hq_prompt) {

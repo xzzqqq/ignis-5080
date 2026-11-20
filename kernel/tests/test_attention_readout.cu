@@ -45,6 +45,7 @@
 // busy GPU fails this test rather than skipping it.
 
 #include "attention_readout.h"
+#include "ignis_attn_tap.h"
 
 #include "core/tensor.h"
 #include "ignis_hq_prompt_attention.h"
@@ -817,6 +818,30 @@ void nvfp4_normal_frame_rows_sets_and_neighbours() {
   const auto expected=[](int head,int relative) {
     return (1.f+head*.125f)*6.f*(1.f+((begin+relative+head/6)%8)*.125f)*.0625f;
   };
+  // Arm only the tap. A cleared recent bitmap forces non-sink history
+  // through the codec; sink and current keys are independently tagged.
+  const int end = 68, ordinal = 0;
+  const int64_t query_pos = end - 1;
+  std::vector<std::uint16_t> host_q(kQHeads*kHeadDim), host_k(end*kKvHeads*kHeadDim), kc(host_k.size());
+  Device<std::uint16_t> side(std::vector<std::uint16_t>(544*kKvHeads*kHeadDim,to_bf16(2.f)));
+  Device<std::uint16_t> fresh(std::vector<std::uint16_t>(tokens*kKvHeads*kHeadDim,to_bf16(3.f)));
+  Device<std::uint32_t> valid(std::vector<std::uint32_t>(16,0));
+  IgnisHqPromptKeys keys{};
+  keys.start=end-tokens; keys.width=tokens; keys.new_k=fresh.p; keys.residual_k=side.p;
+  keys.ring_valid=valid.p; keys.codes_k=codes.p; keys.meta_k=scales.p; keys.block_table=mapping.p;
+  check(ignis_attn_tap_arm(&ordinal,1,&query_pos,1,end,host_q.data(),host_k.data())==0,"arm NV4 tap");
+  check(ignis_attn_tap_arm_consumed(kc.data())==0,"arm consumed keys");
+  check(ignis_attn_tap_record_consumed(0,keys.start,tokens,&keys,nullptr,ignis_nvfp4_fetch_rows)==0,
+        "capture normal-frame NV4 keys");
+  int64_t captured=0, start=-1;
+  check(ignis_attn_tap_disarm(nullptr,nullptr,&captured,&start)==0 && captured==end && start==keys.start,
+        "NV4 consumed span");
+  bool match=true;
+  for(int pos=0;pos<end;++pos) for(int head=0;head<kKvHeads;++head) for(int d=0;d<kHeadDim;++d) {
+    const float want=pos<32?2.f:pos>=start?3.f:d==0?6.f*(1.f+(pos+head)%8*.125f):0.f;
+    match &= kc[(pos*kKvHeads+head)*kHeadDim+d]==to_bf16(want);
+  }
+  check(match,"NV4 tap sink, paged codec and fresh keys in position/head order");
   AttentionReadoutTarget target;bool read=false;const char *error=nullptr;
   target.query_head=10;target.key_begin=begin;target.key_count=count;
   target.device_scores=scores.p;target.read=&read;

@@ -258,7 +258,7 @@ int32_t ignis_attn_tap_record(uint32_t gqa_ordinal, int64_t start_position, int3
 
 int32_t ignis_attn_tap_record_consumed(uint32_t gqa_ordinal, int64_t start_position,
                                        int32_t tokens, const IgnisHqPromptKeys *hq_keys,
-                                       cudaStream_t stream) {
+                                       cudaStream_t stream, decltype(&ignis_hq_prompt_fetch_rows) fetch) {
   if (!g_tap.armed.load(std::memory_order_acquire) || g_tap.kc_out == nullptr) {
     return 0;
   }
@@ -297,7 +297,7 @@ int32_t ignis_attn_tap_record_consumed(uint32_t gqa_ordinal, int64_t start_posit
     return -1;
   }
   try {
-    ignis_hq_prompt_fetch_rows(*hq_keys, /*values=*/false, 0, static_cast<std::int32_t>(end), rows,
+    fetch(*hq_keys, /*values=*/false, 0, static_cast<std::int32_t>(end), rows,
                                stream);
   } catch (const std::exception &e) {
     cudaFree(rows);
