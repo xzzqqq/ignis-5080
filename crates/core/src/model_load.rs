@@ -267,6 +267,7 @@ fn layout_code(layout: StorageLayout) -> i32 {
         StorageLayout::ContiguousLeV1 => 1,
         StorageLayout::BlockScaleK16M128x4V1 => 2,
         StorageLayout::RowScaleV1 => 3,
+        StorageLayout::Nvfp4Mma16V1 => 65,
         StorageLayout::TrellisTile16V1 => 64,
         // Flash-Next's n-gram table is not bound by the 27B loader.
         StorageLayout::RowInterleavedV1 => -1,

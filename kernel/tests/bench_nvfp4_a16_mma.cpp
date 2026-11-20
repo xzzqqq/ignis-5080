@@ -14,7 +14,9 @@
 //
 //   ignis_nvfp4_a16_mma_bench [--iters 50] [--all | --drafter | --narrow]
 
+#include "core/arena.h"
 #include "ignis_nvfp4_a16_mma.h"
+#include "ninfer/ops/linear_swiglu.h"
 
 #include "ops/linear/linear_test_common.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
@@ -105,18 +107,30 @@ void bench_shape(std::int32_t n, std::int32_t k, const std::vector<std::int32_t>
 
     cudaStream_t stream;
     CUDA_OK(cudaStreamCreate(&stream));
+    ninfer::DeviceArena arena(256);
     for (const std::int32_t t : widths) {
         Tensor x(x_data, DType::BF16, {k, t});
-        Tensor gemv(gemv_out, DType::BF16, {n, t});
-        Tensor mma(mma_out, DType::BF16, {n, t});
+        const bool fused = t <= 16 && n == 34816;
+        const int rows = fused ? n / 2 : n;
+        Tensor gemv(gemv_out, DType::BF16, {rows, t});
+        Tensor mma(mma_out, DType::BF16, {rows, t});
         const double gemv_us = median_us(iters, stream, [&] {
-            ops::detail::nvfp4_dispatch(x, weight, gemv, ops::LinearPolicy::A16Only, nullptr,
-                                        stream);
+          if (fused)
+            ops::linear_swiglu(x, weight, gemv, ops::LinearPolicy::A16Only,
+                               arena, stream);
+          else
+            ops::detail::nvfp4_dispatch(
+                x, weight, gemv, ops::LinearPolicy::A16Only, nullptr, stream);
         });
-        const double mma_us =
-            median_us(iters, stream, [&] { ignis_nvfp4_a16_mma(x, weight, mma, stream); });
+        const double mma_us = median_us(iters, stream, [&] {
+          if (t <= 16)
+            ignis_dflash2_small_mma(x, weight, mma, fused, stream);
+          else
+            ignis_nvfp4_a16_mma(x, weight, mma, stream);
+        });
 
-        std::vector<std::uint16_t> gemv_host(static_cast<std::size_t>(n) * t);
+        std::vector<std::uint16_t> gemv_host(static_cast<std::size_t>(rows) *
+                                             t);
         std::vector<std::uint16_t> mma_host(gemv_host.size());
         CUDA_OK(cudaMemcpy(gemv_host.data(), gemv_out, gemv_host.size() * 2,
                            cudaMemcpyDeviceToHost));
@@ -150,6 +164,12 @@ int main(int argc, char** argv) {
     bool drafter = false;
     bool narrow  = false;
     for (int i = 1; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--small") == 0) {
+        for (auto shape : {std::pair{5120, 17408}, std::pair{34816, 5120},
+                           std::pair{6144, 5120}, std::pair{5120, 4096}})
+          bench_shape(shape.first, shape.second, {8, 16}, iters);
+        return 0;
+      }
         if (std::strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
             iters = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--all") == 0) {

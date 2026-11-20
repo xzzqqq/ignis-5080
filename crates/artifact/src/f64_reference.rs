@@ -304,6 +304,7 @@ impl<'a> Matrix<'a> {
                 let i = (row * self.cols + col) * 4;
                 Ok(f32::from_le_bytes(self.payload[i..i + 4].try_into().unwrap()) as f64)
             }
+            (NumericFormat::Nvfp4, StorageLayout::Nvfp4Mma16V1) => Ok(self.mma16_value(row, col, self.mma16_divisor()?)),
             (NumericFormat::Nvfp4, StorageLayout::BlockScaleK16M128x4V1) => self.nvfp4(row, col),
             (NumericFormat::W8G32F16S, StorageLayout::RowSplitK128V1) => self.w8(row, col),
             _ => Err(fail(
@@ -334,6 +335,26 @@ impl<'a> Matrix<'a> {
         }
         Ok(e2m1(nibble) * e4m3(self.payload[g.scale_plane_offset as usize + scale]) / divisor)
     }
+    // Byte and scale positions within the lane-packed 16-by-16 MMA tile.
+    fn mma16_value(&self, row: usize, col: usize, divisor: f64) -> f64 {
+        let tile = row / 16 * (self.cols / 16) + col / 16;
+        let byte = col % 16 / 2;
+        let lane = row % 8 * 4 + byte % 4;
+        let pair = self.payload[tile * 128 + lane * 4 + byte / 4 * 2 + row % 16 / 8];
+        let code = if col % 2 == 0 { pair & 15 } else { pair >> 4 };
+        let scale = self.payload[self.rows * self.cols / 2 + tile * 16 + row % 16];
+        e2m1(code) * e4m3(scale) / divisor
+    }
+
+    fn mma16_divisor(&self) -> Result<f64> {
+        let at = block_scale_geometry(self.format, &[self.rows as u64, self.cols as u64])?.weight_divisor_offset as usize;
+        let divisor = f32::from_le_bytes(self.payload[at..at + 4].try_into().unwrap());
+        if !divisor.is_finite() || divisor <= 0.0 {
+            return Err(fail("invalid packed NVFP4 divisor"));
+        }
+        Ok(divisor as f64)
+    }
+
     fn w8(&self, row: usize, col: usize) -> Result<f64> {
         let g = row_split_geometry(
             NumericFormat::W8G32F16S,
@@ -381,6 +402,11 @@ impl<'a> Matrix<'a> {
                         .map(|(word, x)| bf16(u16::from_le_bytes(word.try_into().unwrap())) * x)
                         .sum()
                 });
+            }
+            (NumericFormat::Nvfp4, StorageLayout::Nvfp4Mma16V1) => {
+                let divisor = self.mma16_divisor()?;
+                fill_rows(&mut out, threads, |row| input.iter().enumerate()
+                    .map(|(col, x)| self.mma16_value(row, col, divisor) * x).sum());
             }
             (NumericFormat::Nvfp4, StorageLayout::BlockScaleK16M128x4V1) => {
                 let shape = [self.rows as u64, self.cols as u64];

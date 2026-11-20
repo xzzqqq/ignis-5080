@@ -552,7 +552,7 @@ fn tensor_view(
             let high = (g.high_plane_bytes > 0).then_some(g.high_plane_offset);
             (high, Some(g.scale_plane_offset), None)
         }
-        StorageLayout::BlockScaleK16M128x4V1 => {
+        StorageLayout::Nvfp4Mma16V1 | StorageLayout::BlockScaleK16M128x4V1 => {
             let g = block_scale_geometry(tensor.format, &tensor.shape)?;
             (
                 None,

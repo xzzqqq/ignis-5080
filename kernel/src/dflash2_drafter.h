@@ -71,4 +71,5 @@ void ignis_dflash2_propose(ignis_model *model, ignis_seq_pool *pool, std::uint32
 // taps (`model->verify->features`, written by the traversal) at the round's
 // positions, `model->verify->append_counts` columns per lane (staged by the
 // caller after the cut), into each lane's window.
-void ignis_dflash2_append_round(ignis_model *model, ignis_seq_pool *pool, std::uint32_t width);
+void ignis_dflash2_append_round(ignis_model *model, ignis_seq_pool *pool,
+                                std::uint32_t width, int active_width);

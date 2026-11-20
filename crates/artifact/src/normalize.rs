@@ -125,7 +125,7 @@ pub fn normalize_tensor(
 
     match (layout, format) {
         // ── NVFP4: preserved (codes + scales + weight divisor) ───────────
-        (StorageLayout::BlockScaleK16M128x4V1, NumericFormat::Nvfp4) => {
+        (StorageLayout::Nvfp4Mma16V1 | StorageLayout::BlockScaleK16M128x4V1, NumericFormat::Nvfp4) => {
             let g = block_scale_geometry(format, shape)?;
             let code_end = g.code_plane_bytes as usize;
             let scale_start = g.scale_plane_offset as usize;

@@ -17,6 +17,8 @@ use crate::{
 /// offset), and the trailing FP32 weight divisor (the kernel reads these
 /// on-device).
 pub struct Nvfp4View {
+    /// Physical ordering of code bytes and group scales.
+    pub layout: StorageLayout,
     /// The object's directory name.
     pub name: String,
     pub rows: u64,
@@ -75,7 +77,7 @@ impl<'a> Binding<'a> {
     pub fn nvfp4(&self, name: &str) -> Result<Nvfp4View> {
         let view = self.tensor(name)?;
         if view.format != NumericFormat::Nvfp4
-            || view.layout != StorageLayout::BlockScaleK16M128x4V1
+            || !matches!(view.layout, StorageLayout::BlockScaleK16M128x4V1 | StorageLayout::Nvfp4Mma16V1)
         {
             return Err(fail(format!("object {name} is not an NVFP4 block-scale tensor")));
         }
@@ -84,6 +86,7 @@ impl<'a> Binding<'a> {
         }
         let g = block_scale_geometry(view.format, &view.shape)?;
         Ok(Nvfp4View {
+            layout: view.layout,
             name: view.name.clone(),
             rows: view.shape[0],
             cols: view.shape[1],

@@ -62,6 +62,7 @@ enum ignis_quant_layout {
   IGNIS_LAYOUT_BLOCKSCALE_K16_M128X4 = 2,
   IGNIS_LAYOUT_ROW_SCALE = 3,
   IGNIS_LAYOUT_TRELLIS_TILE16 = 64,
+  IGNIS_LAYOUT_NVFP4_MMA16 = 65,
 };
 
 /* The kind of attention a decoder layer uses (mirrors

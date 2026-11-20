@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <array>
+#include <utility>
 // ignis kernel leaf: A16 NVFP4 linear on BF16 tensor-core MMA, ours (see
 // kernel/include/ignis_nvfp4_a16_mma.h for why it exists and which
 // numerical contract it keeps).
@@ -371,4 +374,162 @@ void ignis_nvfp4_a16_mma(const ninfer::Tensor &x, const ninfer::Weight &w, ninfe
     return;
   }
   throw std::logic_error("ignis_nvfp4_a16_mma: unreachable NVFP4 problem");
+}
+
+#include "ops/linear/nvfp4/nvfp4_small_t.cuh"
+
+namespace {
+using namespace ninfer::ops::detail;
+using KvGeometry = Nvfp4GemvGeometry<1024, 5120>;
+
+// Each slice starts on a complete 128-row blockscale tile.
+template <int T>
+void kv_half(const ninfer::Tensor &x, const ninfer::Weight &w,
+             ninfer::Tensor &out, cudaStream_t stream) {
+  const Nvfp4ContiguousOutput dst{static_cast<__nv_bfloat16 *>(out.data), 1024};
+  const auto *input = static_cast<const __nv_bfloat16 *>(x.data);
+  const auto *codes = static_cast<const uint8_t *>(w.qdata);
+  const auto *scales = static_cast<const uint8_t *>(w.scales);
+  const float inverse = 1.f / w.weight_scale_divisor;
+  if constexpr (T == 1) {
+    using S =
+        Nvfp4LinearDecodeProductionSchedule<Nvfp4DFlash2QkvGeometry>::Type;
+    nvfp4_gemv_kernel<KvGeometry, S>
+        <<<1024 / S::kRowsPerCta, S::kThreads, 0, stream>>>(
+            input, codes, scales, inverse, Nvfp4IdentityEpilogue{}, dst);
+  } else {
+    using S =
+        typename Nvfp4LinearSmallTProductionSchedule<Nvfp4DFlash2QkvGeometry,
+                                                     T>::Type;
+    nvfp4_small_t_kernel<KvGeometry, T, S>
+        <<<1024 / S::kRowsPerCta, S::kThreads, 0, stream>>>(
+            input, codes, scales, inverse, Nvfp4IdentityEpilogue{}, dst);
+  }
+  CUDA_CHECK(cudaGetLastError());
+}
+
+template <size_t... I> constexpr auto kv_launchers(std::index_sequence<I...>) {
+  return std::array{&kv_half<I + 1>...};
+}
+
+// Eight warps divide K within one 16-output tile. Keep the weight fragment in
+// registers across both eight-token groups; reduce warp sums once at the end.
+template <int T, bool SwiGlu, bool Packed = false>
+__global__ void small_projection(const __nv_bfloat16 *x, const uint8_t *codes,
+                                 const uint8_t *scales, int k, int rows,
+                                 float inverse, __nv_bfloat16 *out, int tokens) {
+  constexpr int halves = SwiGlu ? 2 : 1;
+  const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int group = lane / 4, pair = lane % 4;
+  float acc[halves][T / 8][4] = {};
+  for (int start = warp * 16; start < k; start += 8 * 16) {
+    unsigned b[T / 8][2];
+    for (int n = 0; n < T / 8; ++n) {
+      if constexpr (Packed) {
+        if (8 * n + group >= tokens) { b[n][0] = b[n][1] = 0; continue; }
+      }
+      const auto *p = x + (8 * n + group) * k + start + 2 * pair;
+      b[n][0] = *reinterpret_cast<const unsigned *>(p);
+      b[n][1] = *reinterpret_cast<const unsigned *>(p + 8);
+    }
+    for (int h = 0; h < halves; ++h) {
+      unsigned a[4];
+      if constexpr (Packed) {
+        const int tile = ((h * (rows / 16) + blockIdx.x) * (k / 16) + start / 16);
+        const unsigned word = reinterpret_cast<const unsigned *>(codes)[tile * 32 + lane];
+        for (int r = 0; r < 2; ++r) {
+          const float scale = decode_nvfp4_e4m3(scales[tile * 16 + group + 8 * r]);
+          for (int i = 0; i < 2; ++i) {
+            const float2 v = decode_nvfp4_e2m1x2(word >> (8 * (2 * i + r)));
+            a[2 * i + r] = pack_bf16x2(v.x * scale, v.y * scale);
+          }
+        }
+      } else for (int r = 0; r < 2; ++r) {
+        const int row = h * rows + blockIdx.x * 16 + group + r * 8;
+        const float scale = decode_nvfp4_e4m3(
+            scales[nvfp4_scale_offset(row, start / 16, k / 64)]);
+        const auto *p = codes + row * (k / 2) + start / 2 + pair;
+        for (int i = 0; i < 2; ++i) {
+          const float2 v = decode_nvfp4_e2m1x2(p[i * 4]);
+          a[2 * i + r] = pack_bf16x2(v.x * scale, v.y * scale);
+        }
+      }
+      for (int n = 0; n < T / 8; ++n) {
+        float *c = acc[h][n];
+        mma_bf16(c[0], c[1], c[2], c[3], a[0], a[1], a[2], a[3], b[n][0],
+                 b[n][1]);
+      }
+    }
+  }
+  __shared__ float sums[halves][T / 8][4][8][32];
+  for (int h = 0; h < halves; ++h)
+    for (int n = 0; n < T / 8; ++n)
+      for (int i = 0; i < 4; ++i)
+        sums[h][n][i][warp][lane] = acc[h][n][i];
+  __syncthreads();
+  if (warp >= T / 2)
+    return;
+  const int n = warp / 4, i = warp % 4;
+  float v[halves] = {};
+  for (int h = 0; h < halves; ++h) {
+    for (int w = 0; w < 8; ++w)
+      v[h] += sums[h][n][i][w][lane];
+    v[h] *= inverse;
+  }
+  if constexpr (SwiGlu)
+    v[0] = ninfer::ops::silu(v[0]) * v[1];
+  if constexpr (Packed) { if (8 * n + pair * 2 + i % 2 >= tokens) return; }
+  out[(8 * n + pair * 2 + i % 2) * rows + blockIdx.x * 16 + group +
+      8 * (i / 2)] = __float2bfloat16(v[0]);
+}
+
+template <int T, bool Fused, bool Packed = false>
+void launch_small(const ninfer::Tensor &x, const ninfer::Weight &w,
+                  ninfer::Tensor &out, cudaStream_t stream) {
+  small_projection<T, Fused, Packed><<<out.ne[0] / 16, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16 *>(x.data),
+      static_cast<const uint8_t *>(w.qdata),
+      static_cast<const uint8_t *>(w.scales), w.k, out.ne[0],
+      1.f / w.weight_scale_divisor, static_cast<__nv_bfloat16 *>(out.data), x.ne[1]);
+  CUDA_CHECK(cudaGetLastError());
+}
+} // namespace
+
+void ignis_dflash2_small_mma(const ninfer::Tensor &x, const ninfer::Weight &w,
+                             ninfer::Tensor &out, bool swiglu,
+                             cudaStream_t stream) {
+  if (swiglu)
+    (x.ne[1] == 8 ? launch_small<8, true> : launch_small<16, true>)(x, w, out,
+                                                                    stream);
+  else
+    (x.ne[1] == 8 ? launch_small<8, false> : launch_small<16, false>)(x, w, out,
+                                                                      stream);
+}
+
+void ignis_dflash2_packed_swiglu(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &out, cudaStream_t stream) {
+  if (x.ne[1] >= 1 && x.ne[1] <= 8) launch_small<8,true,true>(x,w,out,stream);
+  else if (x.ne[1] > 8 && x.ne[1] <= 16) launch_small<16,true,true>(x,w,out,stream);
+  else throw std::invalid_argument("packed SwiGLU requires an 8- or 16-column tile");
+}
+
+void ignis_dflash2_project_kv(const ninfer::Tensor &x, const ninfer::Weight &w,
+                              ninfer::Tensor &key, ninfer::Tensor &value,
+                              cudaStream_t stream) {
+  static constexpr auto launch = kv_launchers(std::make_index_sequence<32>{});
+  for (int half = 0; half < 2; ++half) {
+    const int row = 4096 + half * 1024;
+    auto slice = w;
+    slice.qdata = static_cast<const uint8_t *>(w.qdata) + row * (w.k / 2);
+    slice.scales = static_cast<const uint8_t *>(w.scales) + row * (w.k / 16);
+    auto &out = half == 0 ? key : value;
+    if (x.ne[1] >= 64) {
+      launch_geometry<KvGeometry>(x, slice, out, stream);
+    } else {
+      for (int first = 0; first < x.ne[1]; first += 32) {
+        const int t = std::min(32, x.ne[1] - first);
+        auto dst = out.slice(1, first, t);
+        launch[t - 1](x.slice(1, first, t), slice, dst, stream);
+      }
+    }
+  }
 }

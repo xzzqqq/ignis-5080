@@ -534,7 +534,15 @@ pub fn model_scope_27b_of(reader: &Reader, scope: ModelScope) -> Result<Vec<Inve
             _ => None,
         })?,
     };
-    Ok(with_modules(text, scope))
+    let mut entries = with_modules(text, scope);
+    for entry in &mut entries {
+        if entry.name.starts_with("dflash2/layers/") && entry.name.ends_with("/mlp/gate_up")
+            && matches!(reader.find(entry.name), Some(Object::Tensor(t)) if t.layout == StorageLayout::Nvfp4Mma16V1)
+        {
+            entry.layout = StorageLayout::Nvfp4Mma16V1;
+        }
+    }
+    Ok(entries)
 }
 
 /// The FP8 row blocks of a BF16 exception tensor's name, or None.
