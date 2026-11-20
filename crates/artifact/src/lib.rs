@@ -597,13 +597,13 @@ pub fn row_split_geometry(format: NumericFormat, shape: &[u64]) -> Result<RowSpl
 /// E4M3FN scale plane, and a trailing little-endian FP32 weight divisor.
 pub fn block_scale_geometry(format: NumericFormat, shape: &[u64]) -> Result<BlockScaleGeometry> {
     if format != NumericFormat::Nvfp4 {
-        return Err(fail("blockscale-k16-m128x4-v1 requires NVFP4"));
+        return Err(fail("NVFP4 plane geometry requires NVFP4 format"));
     }
-    require_rank2("blockscale-k16-m128x4-v1", shape)?;
+    require_rank2("NVFP4 plane geometry", shape)?;
     let (rows, columns) = (shape[0], shape[1]);
     if rows % 128 != 0 || columns % 64 != 0 {
         return Err(fail(
-            "blockscale-k16-m128x4-v1 requires N divisible by 128 and K divisible by 64",
+            "NVFP4 plane geometry requires N divisible by 128 and K divisible by 64",
         ));
     }
     let groups_per_row = columns / 16;

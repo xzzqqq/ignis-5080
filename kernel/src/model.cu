@@ -217,7 +217,7 @@ class ModelBinder {
   // Bind a required field: look up `name`, check its shape, and fill `out`.
   // False (error set) on a missing or mis-shaped tensor.
   bool bind(const std::string &name, std::initializer_list<int64_t> want_shape,
-            ninfer::Weight &out) {
+            ninfer::Weight &out, bool packed_gate_up = false) {
     auto it = index_.find(name);
     if (it == index_.end()) {
       set_error("ignis_model_load: missing bound tensor: " + name);
@@ -230,6 +230,13 @@ class ModelBinder {
       set_error("ignis_model_load: " + name + " is a trellis tensor where the schema binds a stored " +
                 "weight: only a trellis body's linears and head are trellis (text/output_head decides " +
                 "the body), and a load binds one body, never a mix");
+      return false;
+    }
+    if (t.layout == IGNIS_LAYOUT_NVFP4_MMA16 &&
+        (!packed_gate_up || t.qtype != IGNIS_QTYPE_NVFP4)) {
+      set_error(
+          "ignis_model_load: packed NVFP4 requires a DFlash2 gate/up slot: " +
+          name);
       return false;
     }
     if (!shape_matches(t, want_shape)) {
@@ -466,7 +473,7 @@ bool bind_dflash2_layer(ModelBinder &binder, const std::string &prefix, const Ge
          binder.bind(prefix + "attention/conv_proj", {kDflash2ConvProjRows, g.hidden},
                      w.attention_conv_proj) &&
          binder.bind(prefix + "post_attention_norm", {g.hidden}, w.post_attention_norm) &&
-         binder.bind(prefix + "mlp/gate_up", {2 * g.ffn_intermediate, g.hidden}, w.mlp_gate_up) &&
+         binder.bind(prefix + "mlp/gate_up", {2 * g.ffn_intermediate, g.hidden}, w.mlp_gate_up, true) &&
          binder.bind(prefix + "mlp/down", {g.hidden, g.ffn_intermediate}, w.mlp_down) &&
          binder.bind(prefix + "mlp/conv_base", conv_base, w.mlp_conv_base) &&
          binder.bind(prefix + "mlp/conv_proj", {kDflash2ConvProjRows, g.hidden}, w.mlp_conv_proj);
@@ -895,7 +902,6 @@ std::size_t dflash2_prefill_scratch_bytes(const ignis_topology &topology, std::i
   bytes += i32_bytes(1);                                       // lane
   bytes += bf16_bytes(hidden * columns);                       // projected
   bytes += bf16_bytes(hidden * columns);                       // context
-  bytes += bf16_bytes((kDflash2QuerySize + 2 * kv_width) * columns); // query_key_value
   bytes += bf16_bytes(kv_width * columns);                     // key_raw
   bytes += bf16_bytes(kv_width * columns);                     // key
   bytes += bf16_bytes(kv_width * columns);                     // value
@@ -959,7 +965,12 @@ std::size_t dflash2_round_activation_bytes(const ignis_topology &topology, std::
 
   std::size_t append = 0;
   append += bf16_bytes(hidden * columns) * 2;                       // projected, context
-  append += bf16_bytes((kDflash2QuerySize + 2 * kv_width) * columns); // query_key_value
+  if (lanes > 1) {
+    const auto packed_columns =
+        columns - lanes; // max cropped width is block - 1
+    append += bf16_bytes(kDflash2FeatureTaps * hidden * packed_columns) +
+              i32_bytes(packed_columns);
+  }
   append += bf16_bytes(kv_width * columns) * 3;                     // key_raw, key, value
   return std::max(forward, append);
 }

@@ -26,6 +26,18 @@ The small-T kernel decodes NVFP4 weights to BF16 and accumulates on tensor cores
 
 Both MMA layouts produced identical output bits. Global load instructions fell from 4.87M to 2.79M and L1/TEX global-load sectors from 33.42M to 9.75M. Profiled DRAM reads rose from 91.0 MB to 100.4 MB. The packed artifact stores the same codes, group scales and FP32 divisor. It places 128 code bytes per 16×16 tile in warp-lane order. Only the five DFlash2 gate/up tensors carry the new layout tag.
 
+At T=16 the original-layout small MMA microbenchmark measured the following
+same-input times (µs, SIMT → MMA): QKV 72.1 → 51.5, attention output
+41.4 → 31.3, fused gate/up 309.3 → 278.7, MLP down 143.8 → 130.7.
+These operator measurements selected the original-layout T=16 routes.
+
+For append, a separate RTX 5080 screen timed both 1024×5120 KV halves
+using 32-column SIMT chunks versus one MMA launch per half. Median µs
+were 116.0 / 180.7 at T=64, 173.4 / 180.8 at T=96 and 230.8 / 180.7 at
+T=128. The reviewed implementation starts narrow KV MMA at T=128.
+The service A/B below predates this threshold adjustment; it does not
+measure the standalone speedup of context append.
+
 ### Service comparison
 
 Both artifacts ran on the same release binary (SHA-256 `159baa5a3244e198c70d258a190a440c262f93e289d45db6d6aba4eac1b124eb`), with NVFP4 KV, two configured lanes and one active greedy request. Both arms include the append changes. Each request had one warmup and three timed runs to natural completion.
@@ -48,7 +60,7 @@ python3 scripts/repack_dflash2_gate_up.py \
   models/qwen3_8_27b_trellis_sc30-dflash-mma16.ninfer
 ```
 
-The converter writes a companion conversion record and checks the inverse permutation against every original gate/up payload. An independent file comparison verified all other payload bytes and padding. The resulting model file was 13,379,877,124 bytes, SHA-256 `7b38a5470a141c8e08127852219914cd9270efb663790233b7b30d02368108aa`. With the updated binary, set `ARTIFACT := models/qwen3_8_27b_trellis_sc30-dflash-mma16.ninfer` in the serving host's private `local.mk`. Selecting the original path restores its layout-specific dispatch.
+The converter writes a companion conversion record and checks the inverse permutation against every original gate/up payload. An independent file comparison verified all other payload bytes and padding. The resulting model file was 13,379,877,124 bytes, SHA-256 `7b38a5470a141c8e08127852219914cd9270efb663790233b7b30d02368108aa`. With the updated binary, set `ARTIFACT := models/qwen3_8_27b_trellis_sc30-dflash-mma16.ninfer` in the serving host's private `local.mk`. Selecting the original artifact restores row-major gate/up storage and the T=8 SIMT gate/up route. Both artifacts retain this PR’s append changes and small-T projection dispatch, including the T=16 MMA routes.
 
 Acceptance passed 230 artifact unit tests, CUDA all-target compilation, 132 kernel CTests, Trellis GPU projection/layer/lane checks, VRAM reload, 131072-token capacity and the service canary. Raw experiment receipts are under `.scratch/dflash-opt/layout/` on the measurement checkout.
 

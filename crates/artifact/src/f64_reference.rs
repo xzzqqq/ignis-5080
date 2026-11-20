@@ -1072,6 +1072,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn packed_gate_up_preserves_the_logical_nvfp4_element() {
+        // Logical coordinate (137,93), high nibble of byte 6 in group 5.
+        let mut row_major = vec![0; 256*128/2 + 256*128/16 + 4];
+        let mut packed = row_major.clone();
+        let scale_base = 256*128/2;
+        row_major[137*64 + 5*8 + 6] = 0xd2;
+        row_major[scale_base + 3*512 + 9*16 + 1] = 0x38;
+        packed[69*128 + 6*4 + 3] = 0xd2;
+        packed[scale_base + 69*16 + 9] = 0x38;
+        for (layout, bytes) in [(StorageLayout::BlockScaleK16M128x4V1, &mut row_major),
+                                (StorageLayout::Nvfp4Mma16V1, &mut packed)] {
+            let end = bytes.len();
+            bytes[end-4..].copy_from_slice(&2f32.to_le_bytes());
+            let matrix = Matrix { rows: 256, cols: 128, format: NumericFormat::Nvfp4, layout, payload: bytes };
+            assert_eq!(matrix.at(137, 93).unwrap(), -1.5);
+            assert_eq!(matrix.at(137, 92).unwrap(), 0.5);
+        }
+    }
+
     /// A thread count above the row count must not panic on an empty chunk,
     /// and a zero-row matrix must not spawn anything.
     #[test]

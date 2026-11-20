@@ -1251,6 +1251,24 @@ mod tests {
         (artifact, reader)
     }
 
+    #[test]
+    fn packed_layout_is_selected_only_for_the_declared_drafter_gate_up() {
+        let name = "dflash2/layers/0/mlp/gate_up";
+        let neighbor = "dflash2/layers/0/mlp/down";
+        let objects = [name, neighbor].into_iter().enumerate().map(|(i, name)|
+            crate::fixture::FixtureObject::Tensor {
+                name, shape: vec![128,64], format: "NVFP4", layout: "nvfp4-mma16-v1",
+                offset: i as u64 * 4864, bytes: 4612,
+            }).collect::<Vec<_>>();
+        let file = crate::fixture::write_fixture(&objects, &vec![0; 4864+4612], "packed-scope").unwrap();
+        let reader = Reader::open(&file.path).unwrap();
+        let scope = ModelScope { draft: Some(DraftModule::Dflash2), ..Default::default() };
+        let entries = model_scope_27b_of(&reader, scope).unwrap();
+        let layout = |name| entries.iter().find(|e| e.name == name).unwrap().layout;
+        assert_eq!(layout(name), StorageLayout::Nvfp4Mma16V1);
+        assert_eq!(layout(neighbor), StorageLayout::BlockScaleK16M128x4V1);
+    }
+
     /// GitHub #339: the body is the artifact's, read off its head's format;
     /// a trellis head makes the scope the trellis one, whose first missing
     /// matrix is then named.

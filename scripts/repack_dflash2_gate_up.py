@@ -37,6 +37,8 @@ def convert(source, dest):
     metadata = json.loads(source_meta.read_text())
     if dest.exists() or dest_meta.exists():
         raise FileExistsError(dest)
+    if set(metadata["artifact"]) != {"bytes"} or metadata["artifact"]["bytes"] != source.stat().st_size:
+        raise ValueError("expected a size-only artifact identity matching the source file")
     metadata.update(recipe_id=dest.stem, layout_conversion={
         'source_artifact': str(source),
         'source_recipe_id': metadata['recipe_id'],

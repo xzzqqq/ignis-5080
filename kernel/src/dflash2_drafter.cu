@@ -359,6 +359,9 @@ void ignis_dflash2_propose(ignis_model *model, ignis_seq_pool *pool, std::uint32
 
 void ignis_dflash2_append_round(ignis_model *model, ignis_seq_pool *pool,
                                 std::uint32_t width, int active_width) {
+  if (active_width < 0 ||
+      static_cast<unsigned>(active_width) > model->verify->window + 1)
+    throw std::invalid_argument("DFlash2 append width outside verify block");
   if (active_width == 0)
     return;
   IgnisVerifyRound &verify   = *model->verify;

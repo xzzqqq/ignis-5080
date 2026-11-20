@@ -78,43 +78,63 @@ float bf16_to_float(std::uint16_t bits) {
     return value;
 }
 
-void bench_shape(std::int32_t n, std::int32_t k, const std::vector<std::int32_t>& widths,
-                 int iters) {
-    const auto host_weight = test::linear::make_nvfp4_weight(n, k, 901U);
-    void* weight_payload   = nullptr;
-    CUDA_OK(cudaMalloc(&weight_payload, host_weight.payload.size()));
-    CUDA_OK(cudaMemcpy(weight_payload, host_weight.payload.data(), host_weight.payload.size(),
-                       cudaMemcpyHostToDevice));
-    const Weight weight = host_weight.device_weight(weight_payload);
+void bench_shape(std::int32_t n, std::int32_t k,
+                 const std::vector<std::int32_t> &widths, int iters,
+                 bool kv = false) {
+  const auto host_weight = test::linear::make_nvfp4_weight(n, k, 901U);
+  void *weight_payload = nullptr;
+  CUDA_OK(cudaMalloc(&weight_payload, host_weight.payload.size()));
+  CUDA_OK(cudaMemcpy(weight_payload, host_weight.payload.data(),
+                     host_weight.payload.size(), cudaMemcpyHostToDevice));
+  const Weight weight = host_weight.device_weight(weight_payload);
 
-    const std::int32_t max_t = *std::max_element(widths.begin(), widths.end());
-    std::vector<std::uint16_t> activation(static_cast<std::size_t>(k) * max_t);
-    std::mt19937 rng(7U);
-    std::normal_distribution<float> normal(0.0F, 1.0F);
-    for (auto& bits : activation) {
-        const __nv_bfloat16 value = __float2bfloat16_rn(normal(rng));
-        std::memcpy(&bits, &value, sizeof(bits));
+  const std::int32_t max_t = *std::max_element(widths.begin(), widths.end());
+  std::vector<std::uint16_t> activation(static_cast<std::size_t>(k) * max_t);
+  std::mt19937 rng(7U);
+  std::normal_distribution<float> normal(0.0F, 1.0F);
+  for (auto &bits : activation) {
+    const __nv_bfloat16 value = __float2bfloat16_rn(normal(rng));
+    std::memcpy(&bits, &value, sizeof(bits));
+  }
+  void *x_data = nullptr;
+  void *gemv_out = nullptr;
+  void *mma_out = nullptr;
+  const std::size_t out_bytes =
+      static_cast<std::size_t>(n) * max_t * sizeof(std::uint16_t);
+  CUDA_OK(cudaMalloc(&x_data, activation.size() * sizeof(std::uint16_t)));
+  CUDA_OK(cudaMalloc(&gemv_out, out_bytes));
+  CUDA_OK(cudaMalloc(&mma_out, out_bytes));
+  CUDA_OK(cudaMemcpy(x_data, activation.data(),
+                     activation.size() * sizeof(std::uint16_t),
+                     cudaMemcpyHostToDevice));
+
+  cudaStream_t stream;
+  CUDA_OK(cudaStreamCreate(&stream));
+  ninfer::DeviceArena arena(256);
+  for (const std::int32_t t : widths) {
+    Tensor x(x_data, DType::BF16, {k, t});
+    if (kv) {
+      Tensor key(gemv_out, DType::BF16, {1024, t});
+      Tensor value(mma_out, DType::BF16, {1024, t});
+      for (int width : {32, t}) {
+        const double us = median_us(iters, stream, [&] {
+          for (int first = 0; first < t; first += width) {
+            auto a = key.slice(1, first, width),
+                 b = value.slice(1, first, width);
+            ignis_dflash2_project_kv(x.slice(1, first, width), weight, a, b,
+                                     stream);
+          }
+        });
+        std::printf("KV T=%d launch_width=%d %.2f us\n", t, width, us);
+      }
+      continue;
     }
-    void* x_data   = nullptr;
-    void* gemv_out = nullptr;
-    void* mma_out  = nullptr;
-    const std::size_t out_bytes = static_cast<std::size_t>(n) * max_t * sizeof(std::uint16_t);
-    CUDA_OK(cudaMalloc(&x_data, activation.size() * sizeof(std::uint16_t)));
-    CUDA_OK(cudaMalloc(&gemv_out, out_bytes));
-    CUDA_OK(cudaMalloc(&mma_out, out_bytes));
-    CUDA_OK(cudaMemcpy(x_data, activation.data(), activation.size() * sizeof(std::uint16_t),
-                       cudaMemcpyHostToDevice));
-
-    cudaStream_t stream;
-    CUDA_OK(cudaStreamCreate(&stream));
-    ninfer::DeviceArena arena(256);
-    for (const std::int32_t t : widths) {
-        Tensor x(x_data, DType::BF16, {k, t});
-        const bool fused = t <= 16 && n == 34816;
-        const int rows = fused ? n / 2 : n;
-        Tensor gemv(gemv_out, DType::BF16, {rows, t});
-        Tensor mma(mma_out, DType::BF16, {rows, t});
-        const double gemv_us = median_us(iters, stream, [&] {
+    const bool fused = t <= 16 && n == 34816;
+    const int rows = fused ? n / 2 : n;
+    Tensor gemv(gemv_out, DType::BF16, {rows, t});
+    Tensor mma(mma_out, DType::BF16, {rows, t});
+    const double gemv_us =
+        median_us(iters, stream, [&] {
           if (fused)
             ops::linear_swiglu(x, weight, gemv, ops::LinearPolicy::A16Only,
                                arena, stream);
@@ -122,38 +142,39 @@ void bench_shape(std::int32_t n, std::int32_t k, const std::vector<std::int32_t>
             ops::detail::nvfp4_dispatch(
                 x, weight, gemv, ops::LinearPolicy::A16Only, nullptr, stream);
         });
-        const double mma_us = median_us(iters, stream, [&] {
-          if (t <= 16)
-            ignis_dflash2_small_mma(x, weight, mma, fused, stream);
-          else
-            ignis_nvfp4_a16_mma(x, weight, mma, stream);
-        });
+    const double mma_us = median_us(iters, stream, [&] {
+      if (t <= 16)
+        ignis_dflash2_small_mma(x, weight, mma, fused, stream);
+      else
+        ignis_nvfp4_a16_mma(x, weight, mma, stream);
+    });
 
-        std::vector<std::uint16_t> gemv_host(static_cast<std::size_t>(rows) *
-                                             t);
-        std::vector<std::uint16_t> mma_host(gemv_host.size());
-        CUDA_OK(cudaMemcpy(gemv_host.data(), gemv_out, gemv_host.size() * 2,
-                           cudaMemcpyDeviceToHost));
-        CUDA_OK(cudaMemcpy(mma_host.data(), mma_out, mma_host.size() * 2,
-                           cudaMemcpyDeviceToHost));
-        double max_diff = 0.0;
-        double max_abs  = 0.0;
-        for (std::size_t i = 0; i < gemv_host.size(); ++i) {
-            const double gemv = bf16_to_float(gemv_host[i]);
-            max_diff          = std::max(max_diff, std::fabs(gemv - bf16_to_float(mma_host[i])));
-            max_abs           = std::max(max_abs, std::fabs(gemv));
-        }
-        const double flops = 2.0 * n * k * t;
-        std::printf("[%5d,%5d] T=%5d  gemv %9.1f us %6.1f TF/s   mma %8.1f us %6.1f TF/s   "
-                    "x%5.2f   max|diff| %.3g (max|y| %.3g)\n",
-                    n, k, t, gemv_us, flops / gemv_us * 1e-6, mma_us, flops / mma_us * 1e-6,
-                    gemv_us / mma_us, max_diff, max_abs);
+    std::vector<std::uint16_t> gemv_host(static_cast<std::size_t>(rows) * t);
+    std::vector<std::uint16_t> mma_host(gemv_host.size());
+    CUDA_OK(cudaMemcpy(gemv_host.data(), gemv_out, gemv_host.size() * 2,
+                       cudaMemcpyDeviceToHost));
+    CUDA_OK(cudaMemcpy(mma_host.data(), mma_out, mma_host.size() * 2,
+                       cudaMemcpyDeviceToHost));
+    double max_diff = 0.0;
+    double max_abs = 0.0;
+    for (std::size_t i = 0; i < gemv_host.size(); ++i) {
+      const double gemv = bf16_to_float(gemv_host[i]);
+      max_diff =
+          std::max(max_diff, std::fabs(gemv - bf16_to_float(mma_host[i])));
+      max_abs = std::max(max_abs, std::fabs(gemv));
     }
-    CUDA_OK(cudaStreamDestroy(stream));
-    CUDA_OK(cudaFree(x_data));
-    CUDA_OK(cudaFree(gemv_out));
-    CUDA_OK(cudaFree(mma_out));
-    CUDA_OK(cudaFree(weight_payload));
+    const double flops = 2.0 * n * k * t;
+    std::printf(
+        "[%5d,%5d] T=%5d  gemv %9.1f us %6.1f TF/s   mma %8.1f us %6.1f TF/s   "
+        "x%5.2f   max|diff| %.3g (max|y| %.3g)\n",
+        n, k, t, gemv_us, flops / gemv_us * 1e-6, mma_us, flops / mma_us * 1e-6,
+        gemv_us / mma_us, max_diff, max_abs);
+  }
+  CUDA_OK(cudaStreamDestroy(stream));
+  CUDA_OK(cudaFree(x_data));
+  CUDA_OK(cudaFree(gemv_out));
+  CUDA_OK(cudaFree(mma_out));
+  CUDA_OK(cudaFree(weight_payload));
 }
 
 } // namespace
@@ -164,6 +185,10 @@ int main(int argc, char** argv) {
     bool drafter = false;
     bool narrow  = false;
     for (int i = 1; i < argc; ++i) {
+      if (std::strcmp(argv[i], "--kv") == 0) {
+        bench_shape(6144, 5120, {64, 96, 128}, iters, true);
+        return 0;
+      }
       if (std::strcmp(argv[i], "--small") == 0) {
         for (auto shape : {std::pair{5120, 17408}, std::pair{34816, 5120},
                            std::pair{6144, 5120}, std::pair{5120, 4096}})

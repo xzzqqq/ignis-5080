@@ -1,6 +1,3 @@
-#include <algorithm>
-#include <array>
-#include <utility>
 // ignis kernel leaf: A16 NVFP4 linear on BF16 tensor-core MMA, ours (see
 // kernel/include/ignis_nvfp4_a16_mma.h for why it exists and which
 // numerical contract it keeps).
@@ -27,9 +24,15 @@
 
 #include "core/device.h"
 #include "core/tensor.h"
+#include "ignis_model.h"
 #include "ops/common/mma.cuh"
 #include "ops/linear/nvfp4/nvfp4_codec.cuh"
 #include "ops/linear/nvfp4/nvfp4_config.h"
+#include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/nvfp4/nvfp4_small_t.cuh"
+#include <algorithm>
+#include <array>
+#include <utility>
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -376,8 +379,6 @@ void ignis_nvfp4_a16_mma(const ninfer::Tensor &x, const ninfer::Weight &w, ninfe
   throw std::logic_error("ignis_nvfp4_a16_mma: unreachable NVFP4 problem");
 }
 
-#include "ops/linear/nvfp4/nvfp4_small_t.cuh"
-
 namespace {
 using namespace ninfer::ops::detail;
 using KvGeometry = Nvfp4GemvGeometry<1024, 5120>;
@@ -493,11 +494,35 @@ void launch_small(const ninfer::Tensor &x, const ninfer::Weight &w,
       1.f / w.weight_scale_divisor, static_cast<__nv_bfloat16 *>(out.data), x.ne[1]);
   CUDA_CHECK(cudaGetLastError());
 }
+void require_matrix(const ninfer::Tensor &a, int rows, int tokens) {
+  if (a.data == nullptr || reinterpret_cast<uintptr_t>(a.data) % 16 ||
+      a.dtype != ninfer::DType::BF16 || !a.is_contiguous() || tokens < 1 ||
+      a.ne[0] != rows || a.ne[1] != tokens || a.ne[2] != 1 || a.ne[3] != 1)
+    throw std::invalid_argument(
+        "DFlash2 projection requires aligned contiguous BF16 matrices");
+}
+
+void require_projection(const ninfer::Tensor &x, const ninfer::Weight &w,
+                        const ninfer::Tensor &out, bool fused, bool packed) {
+  const auto expected_layout =
+      packed ? IGNIS_LAYOUT_NVFP4_MMA16 : IGNIS_LAYOUT_BLOCKSCALE_K16_M128X4;
+  if (static_cast<int>(w.layout) != expected_layout)
+    throw std::invalid_argument("DFlash2 NVFP4 projection layout mismatch");
+  // Both layouts have identical plane sizes, offsets and divisor semantics.
+  auto planes = w;
+  planes.layout = ninfer::QuantLayout::BlockScaleK16M128x4;
+  validate_nvfp4_weight(planes, "DFlash2 projection");
+  require_matrix(x, w.k, x.ne[1]);
+  require_matrix(out, fused ? w.n / 2 : w.n, x.ne[1]);
+}
 } // namespace
 
 void ignis_dflash2_small_mma(const ninfer::Tensor &x, const ninfer::Weight &w,
                              ninfer::Tensor &out, bool swiglu,
                              cudaStream_t stream) {
+  if (x.ne[1] != 8 && x.ne[1] != 16)
+    throw std::invalid_argument("small MMA requires T=8 or 16");
+  require_projection(x, w, out, swiglu, false);
   if (swiglu)
     (x.ne[1] == 8 ? launch_small<8, true> : launch_small<16, true>)(x, w, out,
                                                                     stream);
@@ -507,6 +532,7 @@ void ignis_dflash2_small_mma(const ninfer::Tensor &x, const ninfer::Weight &w,
 }
 
 void ignis_dflash2_packed_swiglu(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &out, cudaStream_t stream) {
+  require_projection(x, w, out, true, true);
   if (x.ne[1] >= 1 && x.ne[1] <= 8) launch_small<8,true,true>(x,w,out,stream);
   else if (x.ne[1] > 8 && x.ne[1] <= 16) launch_small<16,true,true>(x,w,out,stream);
   else throw std::invalid_argument("packed SwiGLU requires an 8- or 16-column tile");
@@ -515,14 +541,21 @@ void ignis_dflash2_packed_swiglu(const ninfer::Tensor &x, const ninfer::Weight &
 void ignis_dflash2_project_kv(const ninfer::Tensor &x, const ninfer::Weight &w,
                               ninfer::Tensor &key, ninfer::Tensor &value,
                               cudaStream_t stream) {
+  if (w.n != 6144 || w.k != 5120)
+    throw std::invalid_argument("expected DFlash2 QKV [6144,5120]");
+  validate_nvfp4_weight(w, "DFlash2 KV");
+  require_matrix(x, w.k, x.ne[1]);
+  require_matrix(key, 1024, x.ne[1]);
+  require_matrix(value, 1024, x.ne[1]);
   static constexpr auto launch = kv_launchers(std::make_index_sequence<32>{});
   for (int half = 0; half < 2; ++half) {
     const int row = 4096 + half * 1024;
     auto slice = w;
+    slice.n = 1024;
     slice.qdata = static_cast<const uint8_t *>(w.qdata) + row * (w.k / 2);
     slice.scales = static_cast<const uint8_t *>(w.scales) + row * (w.k / 16);
     auto &out = half == 0 ? key : value;
-    if (x.ne[1] >= 64) {
+    if (x.ne[1] >= kMinTokensNarrow) {
       launch_geometry<KvGeometry>(x, slice, out, stream);
     } else {
       for (int first = 0; first < x.ne[1]; first += 32) {

@@ -989,6 +989,7 @@ mod tests {
         assert_eq!(layout_code(StorageLayout::RowSplitK128V1), 0);
         assert_eq!(layout_code(StorageLayout::ContiguousLeV1), 1);
         assert_eq!(layout_code(StorageLayout::BlockScaleK16M128x4V1), 2);
+        assert_eq!(layout_code(StorageLayout::Nvfp4Mma16V1), 65);
         assert_eq!(layout_code(StorageLayout::RowScaleV1), 3);
         assert_eq!(layout_code(StorageLayout::TrellisTile16V1), 64, "IGNIS_LAYOUT_TRELLIS_TILE16");
         assert_eq!(layout_code(StorageLayout::RowInterleavedV1), -1, "Flash-Next's, no 27B code");

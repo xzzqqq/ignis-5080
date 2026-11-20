@@ -26,7 +26,7 @@ pub struct Nvfp4View {
     /// Code plane (packed NVFP4, 2 values per byte).
     pub code: *const u8,
     pub code_bytes: u64,
-    /// Scale plane (E4M3FN, swizzled).
+    /// Scale plane (E4M3FN, ordered according to layout).
     pub scale: *const u8,
     pub scale_bytes: u64,
     /// Offset of the scale plane relative to `code`.
