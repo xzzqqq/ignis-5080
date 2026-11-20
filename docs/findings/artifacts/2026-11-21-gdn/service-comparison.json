@@ -1,0 +1,135 @@
+{
+  "results": [
+    {
+      "request": "astropy__astropy-12907",
+      "medians_tps": {
+        "A1": 241.4822567945581,
+        "B1": 242.1762591520162,
+        "A2": 240.28458051587555,
+        "B2": 241.957520297651
+      },
+      "paired_gains_percent": [
+        0.28739269156679015,
+        0.6962326830060261
+      ],
+      "all_responses_equal_except_tool_ids": true,
+      "token_and_speculative_counts_equal": true,
+      "counts": [
+        19954,
+        889,
+        "tool_calls",
+        {
+          "accepted": 710,
+          "accepted_at": [
+            163,
+            135,
+            112,
+            92,
+            77,
+            69,
+            62
+          ],
+          "drafted": 1260,
+          "drafted_at": [
+            180,
+            180,
+            180,
+            180,
+            180,
+            180,
+            180
+          ],
+          "rounds": 180
+        }
+      ]
+    },
+    {
+      "request": "django__django-10097",
+      "medians_tps": {
+        "A1": 224.0817972357372,
+        "B1": 225.2277880457339,
+        "A2": 223.57391981397961,
+        "B2": 225.05858333809036
+      },
+      "paired_gains_percent": [
+        0.511416288218669,
+        0.6640593524262606
+      ],
+      "all_responses_equal_except_tool_ids": true,
+      "token_and_speculative_counts_equal": true,
+      "counts": [
+        22420,
+        4166,
+        "tool_calls",
+        {
+          "accepted": 3277,
+          "accepted_at": [
+            795,
+            659,
+            535,
+            429,
+            349,
+            283,
+            227
+          ],
+          "drafted": 6230,
+          "drafted_at": [
+            890,
+            890,
+            890,
+            890,
+            890,
+            890,
+            890
+          ],
+          "rounds": 890
+        }
+      ]
+    },
+    {
+      "request": "sympy__sympy-11618",
+      "medians_tps": {
+        "A1": 229.58381330129413,
+        "B1": 231.286075276177,
+        "A2": 229.47772805008972,
+        "B2": 231.23244582283078
+      },
+      "paired_gains_percent": [
+        0.7414555714556847,
+        0.7646571140699221
+      ],
+      "all_responses_equal_except_tool_ids": true,
+      "token_and_speculative_counts_equal": true,
+      "counts": [
+        16717,
+        470,
+        "tool_calls",
+        {
+          "accepted": 370,
+          "accepted_at": [
+            85,
+            77,
+            62,
+            49,
+            38,
+            31,
+            28
+          ],
+          "drafted": 707,
+          "drafted_at": [
+            101,
+            101,
+            101,
+            101,
+            101,
+            101,
+            101
+          ],
+          "rounds": 101
+        }
+      ]
+    }
+  ],
+  "requests": 48,
+  "all_passed": true
+}

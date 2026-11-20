@@ -15,12 +15,17 @@
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_kernels.cu"
 #include "ops/linear_attention/gated_delta_net/recurrent.cuh"
 #undef ninfer
+#include "trellis_decode_helpers.cuh"
 
 namespace ignis_lab_gdn_private {
 void cuda_check(cudaError_t rc,const char *,const char *,int) {
   if(rc!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(rc));
 }
 }
+
+extern "C" int32_t ignis_gdn_joint_projection(const ignis_trellis_weight *,const ignis_trellis_weight *,const void *,void *,void *,const ignis_trellis_workspace *,const ignis_trellis_workspace *,void *);
+extern "C" int32_t ignis_gdn_rotation_params(const ignis_trellis_weight *,const ignis_trellis_workspace *,ignis_tl::RotateParams *);
+extern "C" int32_t ignis_gdn_output_from(const ignis_trellis_weight *,const void *,const void *,void *,const ignis_trellis_workspace *,void *);
 namespace {
 namespace n=ignis_lab_gdn_private;
 thread_local std::string error;
@@ -54,13 +59,14 @@ struct Layout {
   void *take(uint64_t bytes){auto offset=used;used+=align256(bytes);return base?static_cast<char *>(base)+offset:nullptr;}
 };
 struct Buffers {
-  ignis_trellis_workspace trellis;
-  n::Tensor h,q,k,v,z,g,beta,recurrent,gated;
+  ignis_trellis_workspace trellis,second;
+  n::Tensor h,q,k,v,z,g,beta,recurrent;
   void *partial;
   uint64_t bytes;
-  explicit Buffers(void *base):trellis{},h{},q{},k{},v{},z{},g{},beta{},recurrent{},gated{} {
+  explicit Buffers(void *base):trellis{},h{},q{},k{},v{},z{},g{},beta{},recurrent{} {
     Layout l(base);
     trellis.bytes=trellis_bytes();trellis.base=l.take(trellis.bytes);
+    second.bytes=trellis.bytes;second.base=l.take(second.bytes);
     h=tensor(l.take(5120*8*2),n::DType::BF16,{5120,8});
     q=tensor(l.take(2048*8*2),n::DType::BF16,{2048,8,1});
     k=tensor(l.take(2048*8*2),n::DType::BF16,{2048,8,1});
@@ -69,19 +75,43 @@ struct Buffers {
     g=tensor(l.take(48*8*4),n::DType::FP32,{48,8});
     beta=tensor(l.take(48*8*4),n::DType::FP32,{48,8});
     recurrent=tensor(l.take(6144*8*2),n::DType::BF16,{128,48,8,1});
-    gated=tensor(l.take(6144*8*2),n::DType::BF16,{128,48,8,1});
     partial=l.take(10*8*96*4);bytes=l.used;
   }
 };
-void linear(const ignis_trellis_weight &w,const void *x,void *y,uint32_t ldy,
-    uint32_t epilogue,const ignis_trellis_workspace &ws,void *stream){
-  if(ignis_trellis_linear(&w,x,8,y,ldy,epilogue,&ws,stream))
-    throw std::runtime_error(ignis_trellis_last_error());
+__global__ void __launch_bounds__(64) gated_rotation(const __nv_bfloat162 *x,const __nv_bfloat162 *weight,
+    const __nv_bfloat162 *z,float eps,const __grid_constant__ ignis_tl::RotateParams rotation){
+  n::pdl::sync();
+  const int lane=threadIdx.x&31,row=int(blockIdx.x)*2+(threadIdx.x>>5);
+  if(row>=48*8)return;
+  float a[4],w[4],gate[4],sum=0.0f;
+#pragma unroll
+  for(int k=0;k<2;++k){
+    const int pair=lane+k*32;
+    const float2 v=__bfloat1622float2(x[row*64+pair]);
+    const float2 wt=__bfloat1622float2(weight[pair]),g=__bfloat1622float2(z[row*64+pair]);
+    a[2*k]=v.x;a[2*k+1]=v.y;w[2*k]=wt.x;w[2*k+1]=wt.y;gate[2*k]=g.x;gate[2*k+1]=g.y;
+    sum+=v.x*v.x+v.y*v.y;
+  }
+  sum=n::ops::warp_reduce_sum(sum);
+  float inv=lane==0?rsqrtf(sum/128.0f+eps):0.0f;inv=__shfl_sync(0xffffffffu,inv,0);
+#pragma unroll
+  for(int q=0;q<4;++q)a[q]=n::ops::rmsnorm_epilogue<n::ops::RmsEpilogue::Gated>(a[q],inv,w[q],gate[q]);
+  float v[4];
+#pragma unroll
+  for(int q=0;q<4;++q){
+    const int source=(2*lane+(q>>1))&31;
+    const float lo=__shfl_sync(0xffffffffu,a[q&1],source);
+    const float hi=__shfl_sync(0xffffffffu,a[2+(q&1)],source);
+    v[q]=lane<16?lo:hi;
+  }
+  ignis_tl::rotate_bf16_block(rotation,v,row%48,row/48);
+  n::pdl::publish();
 }
+
 template<bool Masked>
 void recurrence(const ignis_gdn_segment_call &c,Buffers &b,cudaStream_t stream){
   namespace r=n::ops::detail::gated_delta_net;
-  const r::RecordAccess<Masked> access{
+  r::RecordAccess<Masked> access{
     static_cast<const __nv_bfloat16 *>(b.q.data),static_cast<const __nv_bfloat16 *>(b.k.data),
     static_cast<const __nv_bfloat16 *>(b.v.data),static_cast<const float *>(b.g.data),
     static_cast<const float *>(b.beta.data),static_cast<const float *>(c.recurrent_states),
@@ -124,44 +154,45 @@ extern "C" int32_t ignis_lab_gdn_segment_run(const ignis_gdn_segment_call *c,voi
        c->z_weight.out!=6144 || c->output_weight.in!=6144 || c->output_weight.out!=5120)
       throw std::runtime_error("invalid C1/T8 verify GDN segment invocation");
     const auto stream=static_cast<cudaStream_t>(raw_stream);Buffers b(workspace);
+    n::Weight a{},bw{};a.qdata=c->ab_projection;a.n=48;a.k=5120;a.shape[0]=48;a.shape[1]=5120;
+    bw=a;bw.qdata=static_cast<const char *>(c->ab_projection)+48*5120*2;
+    const auto alog=input(c->a_log,n::DType::FP32,{48}),bias=input(c->dt_bias,n::DType::FP32,{48});
     using n::ops::RmsEpilogue;
     ck(n::pdl::launch_dependent({dim3(8),dim3(512),0,stream},
         n::ops::rmsnorm_cta_bf16x2_kernel<RmsEpilogue::Offset,512,8,true>,
         static_cast<const __nv_bfloat162 *>(c->residual_in),static_cast<const __nv_bfloat162 *>(c->input_norm),
         static_cast<const __nv_bfloat162 *>(nullptr),static_cast<__nv_bfloat162 *>(b.h.data),5120,int64_t(8),c->profile.rms_eps));
-    linear(c->qkv_weight,b.h.data,c->conv_record,10240,IGNIS_TRELLIS_STORE,b.trellis,raw_stream);
-    linear(c->z_weight,b.h.data,b.z.data,6144,IGNIS_TRELLIS_STORE,b.trellis,raw_stream);
+    if(ignis_gdn_joint_projection(&c->qkv_weight,&c->z_weight,b.h.data,c->conv_record,b.z.data,
+        &b.trellis,&b.second,stream))throw std::runtime_error(ignis_trellis_last_error());
     const auto conv=input(c->conv_record,n::DType::BF16,{10240,8,1});
     const auto conv_weight=input(c->convolution,n::DType::BF16,{10240,4});
     const auto states=input(c->conv_states,n::DType::BF16,{10240,3,int(c->profile.slots)});
     const auto valid=input(c->valid_columns,n::DType::I32,{1});
     const auto slots=input(c->lane_slots,n::DType::I32,{1});
     n::ops::detail::gdn_projected_conv_record_launch(conv,conv_weight,states,valid,slots,b.q,b.k,b.v,stream);
-    n::Weight a{},bw{};a.qdata=c->ab_projection;a.n=48;a.k=5120;a.shape[0]=48;a.shape[1]=5120;
-    bw=a;bw.qdata=static_cast<const char *>(c->ab_projection)+48*5120*2;
-    const auto alog=input(c->a_log,n::DType::FP32,{48}),bias=input(c->dt_bias,n::DType::FP32,{48});
     n::ops::detail::bf16_gdn_gating_proj_small_t_split10_launch(b.h,a,bw,alog,bias,b.partial,10*8*96*4,b.g,b.beta,stream);
     if(c->valid_columns)recurrence<true>(*c,b,stream);else recurrence<false>(*c,b,stream);
-    ck(n::pdl::launch_dependent({dim3(24),dim3(512),0,stream},
-        n::ops::rmsnorm_warp_bf16x2_kernel<RmsEpilogue::Gated,512,true>,
-        static_cast<const __nv_bfloat162 *>(b.recurrent.data),static_cast<const __nv_bfloat162 *>(c->gdn_norm),
-        static_cast<const __nv_bfloat162 *>(b.z.data),static_cast<__nv_bfloat162 *>(b.gated.data),128,int64_t(48*8),c->profile.rms_eps));
-    if(c->residual_out!=c->residual_in)
-      ck(cudaMemcpyAsync(c->residual_out,c->residual_in,5120*8*2,cudaMemcpyDeviceToDevice,stream));
-    linear(c->output_weight,b.gated.data,c->residual_out,5120,IGNIS_TRELLIS_ADD,b.trellis,raw_stream);
+    ignis_tl::RotateParams rotation{};
+    if(ignis_gdn_rotation_params(&c->output_weight,&b.trellis,&rotation))throw std::runtime_error(ignis_trellis_last_error());
+    ck(n::pdl::launch_dependent({dim3(192),dim3(64),0,stream},gated_rotation,
+      static_cast<const __nv_bfloat162 *>(b.recurrent.data),static_cast<const __nv_bfloat162 *>(c->gdn_norm),
+      static_cast<const __nv_bfloat162 *>(b.z.data),c->profile.rms_eps,rotation));
+    if(ignis_gdn_output_from(&c->output_weight,nullptr,c->residual_in,c->residual_out,&b.trellis,stream))
+      throw std::runtime_error(ignis_trellis_last_error());
     ck(cudaGetLastError());return 0;
   }catch(const std::exception &e){error=e.what();return -1;}
 }
 
 extern "C" IGNIS_LAB_DIAGNOSTIC_EXPORT int32_t ignis_lab_gdn_segment_tensors_v1(const ignis_segment_profile *p,
     const void *workspace,uint64_t bytes,ignis_lab_segment_tensor *out,uint32_t capacity){
-  if(!p || !workspace || !ignis_lab_gdn_segment_workspace(p) || bytes<ignis_lab_gdn_segment_workspace(p) || !out || capacity<9)return -1;
+  if(!p || !workspace || !ignis_lab_gdn_segment_workspace(p) || bytes<ignis_lab_gdn_segment_workspace(p) || !out || capacity<8)return -1;
   Buffers b(const_cast<void *>(workspace));
-  const char *names[]={"normalized_input","query","key","value","z","g","beta","recurrent","gated"};
-  const n::Tensor values[]={b.h,b.q,b.k,b.v,b.z,b.g,b.beta,b.recurrent,b.gated};
-  for(uint32_t i=0;i<9;++i){const auto &t=values[i];
+  const char *names[]={"normalized_input","query","key","value","z","g","beta","recurrent"};
+  const n::Tensor values[]={b.h,b.q,b.k,b.v,b.z,b.g,b.beta,b.recurrent};
+  const uint32_t count=8;
+  for(uint32_t i=0;i<count;++i){const auto &t=values[i];
     const uint64_t size=uint64_t(t.ne[0])*t.ne[1]*t.ne[2]*t.ne[3]*(t.dtype==n::DType::BF16?2:4);
     out[i]={names[i],t.data,size,t.dtype==n::DType::BF16?0u:3u,{t.ne[0],t.ne[1],t.ne[2],t.ne[3]}};
   }
-  return 9;
+  return count;
 }

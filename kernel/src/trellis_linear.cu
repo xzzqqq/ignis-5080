@@ -270,7 +270,7 @@ int32_t rotate(const char *op, const void *x, const ignis_trellis_weight *const 
 
 int32_t run(const char *op, const DeviceState &st, const ignis_trellis_weight *gate, const ignis_trellis_weight *up,
             const void *x, uint32_t tokens, void *y, uint32_t ldy, int epilogue, const ignis_trellis_workspace *ws,
-            void *stream_ptr, int fixed_splits = 0) {
+            void *stream_ptr, int fixed_splits = 0, bool prepared=false, const void *residual_in=nullptr) {
   const cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
   const int weights = up == nullptr ? 1 : 2;
   const uint32_t in = gate->in, out = gate->out;
@@ -290,8 +290,9 @@ int32_t run(const char *op, const DeviceState &st, const ignis_trellis_weight *g
   uint32_t *counters = reinterpret_cast<uint32_t *>(base);
   const ignis_trellis_weight *ws_list[2] = {gate, up};
   if (tokens <= static_cast<uint32_t>(kDecodeMaxTokens)) {
-    if (rotate(op, x, ws_list, weights, tokens, true, l, ws, stream) != 0) return -1;
+    if (!prepared && rotate(op, x, ws_list, weights, tokens, true, l, ws, stream) != 0) return -1;
     DecodeParams p{};
+    p.residual_in=static_cast<const __nv_bfloat16 *>(residual_in);
     p.w[0] = device_weight(*gate);
     if (up != nullptr) p.w[1] = device_weight(*up);
     p.weights = weights;
@@ -514,3 +515,45 @@ extern "C" int32_t ignis_trellis_reconstruct(const ignis_trellis_weight *w, void
 }
 
 extern "C" const char *ignis_trellis_last_error(void) { return g_last_error.c_str(); }
+
+extern "C" int32_t ignis_gdn_joint_projection(const ignis_trellis_weight *qkv,const ignis_trellis_weight *z,
+    const void *x,void *conv,void *zout,const ignis_trellis_workspace *a,
+    const ignis_trellis_workspace *b,void *raw_stream){
+  DeviceState st;if(require_prepared("gdn_joint",&st))return -1;
+  if(st.cap || wide_call(qkv,z)){
+    if(ignis_trellis_linear(qkv,x,8,conv,qkv->out,IGNIS_TRELLIS_STORE,a,raw_stream))return -1;
+    return ignis_trellis_linear(z,x,8,zout,z->out,IGNIS_TRELLIS_STORE,b,raw_stream);
+  }
+  JointDecodeParams params{};
+  const ignis_trellis_weight *weights[]={qkv,z};
+  const ignis_trellis_workspace *spaces[]={a,b};void *outputs[]={conv,zout};
+  auto stream=static_cast<cudaStream_t>(raw_stream);
+  for(int i=0;i<2;++i){
+    const auto *w=weights[i];const auto *ws=spaces[i];
+    auto l=layout(w->in,w->out,1,8,decode_resident(st,8,false));
+    if(ws->bytes<l.bytes)return fail("gdn_joint workspace too small");
+    if(rotate("gdn_joint",x,&w,1,8,true,l,ws,stream))return -1;
+    auto &p=params.calls[i];auto *base=static_cast<char *>(ws->base);
+    p.w[0]=device_weight(*w);p.weights=1;p.tokens=8;p.in=w->in;p.out=w->out;p.nb=w->in/128;
+    p.splits=l.splits;p.units=(w->out/128)*l.splits;p.epilogue=kStore;
+    p.xr=reinterpret_cast<__half *>(base+l.xr);p.inv=reinterpret_cast<float *>(base+l.inv);
+    p.partials=reinterpret_cast<float *>(base+l.partials);p.counters=reinterpret_cast<uint32_t *>(base);
+    p.arrivals=reinterpret_cast<uint32_t *>(static_cast<char *>(a->base)+l.arrivals)+(i?qkv->out/128:0);p.y=static_cast<__nv_bfloat16 *>(outputs[i]);p.ldy=w->out;
+  }
+  return launch_joint_decode(params,stream);
+}
+
+extern "C" int32_t ignis_gdn_rotation_params(const ignis_trellis_weight *w,
+    const ignis_trellis_workspace *ws,RotateParams *r){
+  DeviceState st;if(require_prepared("lab_rotation",&st))return -1;
+  const auto l=layout(w->in,w->out,1,8,decode_resident(st,8,wide_call(w,nullptr)));
+  if(ws->bytes<l.bytes)return fail("lab_rotation workspace too small");
+  *r={};r->suh[0]=static_cast<const __half *>(w->suh);r->tokens=8;r->weights=1;r->in=w->in;
+  r->scale_exp=kScaleExp;r->frag_order=1;auto *base=static_cast<char *>(ws->base);
+  r->xr=reinterpret_cast<__half *>(base+l.xr);r->inv=reinterpret_cast<float *>(base+l.inv);return 0;
+}
+extern "C" int32_t ignis_gdn_output_from(const ignis_trellis_weight *w,const void *x,const void *residual,
+    void *out,const ignis_trellis_workspace *ws,void *stream){
+  DeviceState st;if(require_prepared("lab_add_from",&st))return -1;
+  return run("lab_add_from",st,w,nullptr,x,8,out,w->out,kAdd,ws,stream,0,true,residual);
+}

@@ -144,6 +144,7 @@ struct RotateParams {
 };
 
 struct DecodeParams {
+  const __nv_bfloat16 *residual_in=nullptr;
   Weight w[2];
   int weights;
   int tokens;
@@ -163,6 +164,10 @@ struct DecodeParams {
   int capped;
   uint32_t admit[kMaxSmIds / 32];
 };
+
+struct JointDecodeParams { DecodeParams calls[2]; };
+int32_t prepare_joint_decode();
+int32_t launch_joint_decode(const JointDecodeParams &,cudaStream_t);
 
 struct PrefillParams {
   Weight w;
@@ -237,10 +242,10 @@ __device__ __forceinline__ void mma_f16acc(uint32_t (&d)[2], const uint32_t (&a)
 __device__ __forceinline__ uint32_t load_stream(const uint32_t *p) { return __ldcs(p); }
 
 // Four BF16 values at y (8-byte aligned), with the residual add when `add`.
-__device__ __forceinline__ void store_bf16x4(__nv_bfloat16 *y, const float (&v)[4], bool add) {
+__device__ __forceinline__ void store_bf16x4(__nv_bfloat16 *y, const float (&v)[4], bool add, const __nv_bfloat16 *residual_in=nullptr) {
   float o[4] = {v[0], v[1], v[2], v[3]};
   if (add) {
-    const uint2 r = *reinterpret_cast<const uint2 *>(y);
+    const uint2 r = *reinterpret_cast<const uint2 *>(residual_in?residual_in:y);
     const __nv_bfloat162 r0 = *reinterpret_cast<const __nv_bfloat162 *>(&r.x);
     const __nv_bfloat162 r1 = *reinterpret_cast<const __nv_bfloat162 *>(&r.y);
     o[0] += __low2float(r0);

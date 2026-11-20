@@ -199,6 +199,29 @@ __device__ __forceinline__ void rotate_out(float (&v)[4], const __half *svh, int
   for (int q = 0; q < 4; ++q) v[q] *= s[q];
 }
 
+// Preserve the existing BF16 boundary while avoiding its global round trip.
+__device__ __forceinline__ void rotate_bf16_block(const RotateParams &p, float (&v)[4], int cb, int t) {
+  const int lane=threadIdx.x&31;
+  float s[4]; load_half4(p.suh[0]+cb*128+4*lane,s);
+#pragma unroll
+  for(int q=0;q<4;++q) v[q]=__bfloat162float(__float2bfloat16_rn(v[q]))*s[q];
+  warp_hadamard128(v);
+  float m=fmaxf(fmaxf(fabsf(v[0]),fabsf(v[1])),fmaxf(fabsf(v[2]),fabsf(v[3])));
+  m=ignis_moe::warp_max(m);
+  int e=0;if(m>0.0f && m<=3.0e38f)frexpf(m,&e);
+  int shift=p.scale_exp-e;if(m==0.0f || !(m<=3.0e38f))shift=0;shift=min(shift,126);
+  const float scale=ldexpf(1.0f,shift);
+  __half h[4];
+#pragma unroll
+  for(int q=0;q<4;++q)h[q]=__float2half_rn(v[q]*scale);
+  const int item=cb*p.tokens+t;
+  auto pos=[](int k){const int j=k&15;return ((j&7)>>1)*32+(k>>4)*4+(j>>3)*2+(j&1);};
+  auto *dst=p.xr+size_t(item)*128;
+  *reinterpret_cast<__half2 *>(dst+pos(4*lane))=__halves2half2(h[0],h[1]);
+  *reinterpret_cast<__half2 *>(dst+pos(4*lane+2))=__halves2half2(h[2],h[3]);
+  if(lane==0)p.inv[item]=ldexpf(1.0f,-shift);
+}
+
 // Token t's sums of weight `wsel`, block cb, lane's four columns: every split in split order.
 __device__ __forceinline__ void sum_splits(const DecodeParams &p, int t, int wsel, int cb, float (&v)[4]) {
   const size_t outw = static_cast<size_t>(p.weights) * p.out;
@@ -230,7 +253,7 @@ __device__ void reduce_block(const DecodeParams &p, int cb) {
 #pragma unroll
       for (int q = 0; q < 4; ++q) g[q] = ignis_moe::silu(g[q]) * u[q];
     }
-    store_bf16x4(p.y + static_cast<size_t>(t) * p.ldy + cb * 128 + 4 * lane, g, p.epilogue == kAdd);
+    store_bf16x4(p.y + static_cast<size_t>(t) * p.ldy + cb * 128 + 4 * lane, g, p.epilogue == kAdd, p.residual_in?p.residual_in+static_cast<size_t>(t)*p.ldy+cb*128+4*lane:nullptr);
     if (p.epilogue == kPairStore) {
       // Both weights have arrived, as for SwiGLU, but remain independent.
       float u[4];
@@ -272,7 +295,7 @@ __device__ __forceinline__ void finish(const DecodeParams &p, const Smem &s, con
       const int output_weight = p.epilogue == kPairStore ? wsel : 0;
       rotate_out(v, p.w[output_weight].svh, cb);
       const size_t plane = static_cast<size_t>(output_weight) * tokens * p.ldy;
-      store_bf16x4(p.y + plane + static_cast<size_t>(t) * p.ldy + cb * 128 + 4 * lane, v, p.epilogue == kAdd);
+      store_bf16x4(p.y + plane + static_cast<size_t>(t) * p.ldy + cb * 128 + 4 * lane, v, p.epilogue == kAdd, p.residual_in?p.residual_in+static_cast<size_t>(t)*p.ldy+cb*128+4*lane:nullptr);
     }
     __syncthreads();
     return;
