@@ -4,3 +4,6 @@
 
 #[path = "../examples/support/replay_shape.rs"]
 mod replay_shape;
+
+#[path = "../examples/support/replay_identity.rs"]
+mod replay_identity;

@@ -252,6 +252,9 @@ struct KVCacheList<true> {
       kvCachePageList;  // shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
   SeqLenDataType const* seqLenList;  // shape: [batchSize][beamWidth] (for compatibility)
   uint32_t maxNbPagesPerSeq;
+  ignis::nv4::Window window{};
+  const int *slot{};
+  const uint2 *schedule{};
 };
 
 template <>

@@ -84,9 +84,39 @@ __global__ void append(Cache c, const __nv_bfloat16 *k, const __nv_bfloat16 *v,
   }
   bump(stats, 2, unsigned(fabsf(nx) > 6.0f) + unsigned(fabsf(ny) > 6.0f));
 }
+nv4::Window window(const ninfer::PagedKVBatchLayerView &c, const ninfer::Tensor &k,
+                   const ninfer::Tensor &v, int lane) {
+  const auto off = std::int64_t(lane) * k.ne[2] * Heads * D;
+  return {static_cast<__nv_bfloat16 *>(c.residual_k.data),
+          static_cast<__nv_bfloat16 *>(c.residual_v.data),
+          static_cast<std::uint32_t *>(c.ring_valid.data),
+          static_cast<const __nv_bfloat16 *>(k.data) + off,
+          static_cast<const __nv_bfloat16 *>(v.data) + off};
+}
+
+__global__ void store_window(nv4::Window side, const int *positions, const int *valid,
+                             const int *rows, int tokens, bool publish) {
+  const int lane = blockIdx.y, t = blockIdx.x;
+  const int n = count(valid, lane, tokens);
+  if (t >= n) return;
+  const int pos = positions[lane * tokens + t];
+  if (pos >= nv4::Sink && t < n - nv4::Recent) return;
+  const int slot = rows[lane];
+  const int dst = (slot * nv4::Rows + nv4::Window::side_row(pos)) * Heads * D;
+  const int src = (lane * tokens + t) * Heads * D;
+  const int i = threadIdx.x * 8;
+  *reinterpret_cast<int4 *>(side.k + dst + i) = *reinterpret_cast<const int4 *>(side.fresh_k + src + i);
+  *reinterpret_cast<int4 *>(side.v + dst + i) = *reinterpret_cast<const int4 *>(side.fresh_v + src + i);
+  // All layers share validity. Publish only after the final GQA layer has read
+  // the preceding window, so an earlier layer cannot resurrect a rejected row.
+  if (publish && threadIdx.x == 0 && pos >= nv4::Sink) {
+    const int bit = pos % nv4::Recent;
+    atomicOr(side.valid + slot * (nv4::Recent / 32) + bit / 32, 1u << (bit % 32));
+  }
+}
 __global__ void decode_band(Cache c, const std::int32_t *rows, const std::int32_t *positions,
                              const std::int32_t *valid, int lane, int tokens,
-                             int begin, int span, __nv_bfloat16 *k, __nv_bfloat16 *v) {
+                             int begin, int span, __nv_bfloat16 *k, __nv_bfloat16 *v, nv4::Window side = {}) {
   const int flat = blockIdx.x * blockDim.x + threadIdx.x;
   if (flat >= Heads * span * (D / 8)) return;
   const int d = (flat % 32) * 8, token = (flat / 32) % span, head = flat / (32 * span);
@@ -102,6 +132,12 @@ __global__ void decode_band(Cache c, const std::int32_t *rows, const std::int32_
   }
   const int row = rows[lane];
   if (row < 0 || row >= c.rows || absolute / Page >= c.stride) asm volatile("trap;");
+  if (const auto *exact = side.exact(false, row, head, absolute, positions[lane * tokens], window)) {
+    const auto *value = side.exact(true, row, head, absolute, positions[lane * tokens], window);
+    *reinterpret_cast<int4 *>(ko) = *reinterpret_cast<const int4 *>(exact + d);
+    *reinterpret_cast<int4 *>(vo) = *reinterpret_cast<const int4 *>(value + d);
+    return;
+  }
   const int physical = c.tables[row * c.stride + absolute / Page];
   if (physical < 0 || physical >= c.pages) asm volatile("trap;");
   const auto src = (std::int64_t(physical) * Heads + head) * Page + absolute % Page;
@@ -166,6 +202,15 @@ std::size_t nvfp4_attention_workspace_bytes(std::uint32_t max_keys, int tokens, 
   // width9 fallback query must still cover the width8 XQA below it.
   return std::max(fallback, aligned(ignis_nv4_xqa_workspace(max_keys)));
 }
+void nvfp4_store_window(const ninfer::Tensor &k, const ninfer::Tensor &v,
+                        const ninfer::Tensor &positions, const ninfer::Tensor &valid,
+                        const ninfer::Tensor &rows, ninfer::PagedKVBatchLayerView cache,
+                        bool publish, cudaStream_t stream) {
+  store_window<<<dim3(k.ne[2], k.ne[3]), Heads * D / 8, 0, stream>>>(window(cache,k,v,0),
+      static_cast<const int *>(positions.data), static_cast<const int *>(valid.data),
+      static_cast<const int *>(rows.data), int(k.ne[2]), publish);
+  CUDA_CHECK(cudaGetLastError());
+}
 void nvfp4_prepare() { ignis_nv4_xqa_prepare(); ignis_nv4_prefill_prepare(); }
 void nvfp4_attention(const ninfer::Tensor &q, const ninfer::Tensor &k,
                      const ninfer::Tensor &v, const ninfer::Tensor &positions,
@@ -205,7 +250,7 @@ void nvfp4_attention(const ninfer::Tensor &q, const ninfer::Tensor &k,
         static_cast<const std::int32_t *>(positions.data)+lane*tokens,
         valid.data ? static_cast<const std::int32_t *>(valid.data)+lane : nullptr,
         std::uint32_t(cache.block_tables.ne[0]),std::uint32_t(cache.block_tables.ne[1]),
-        std::uint32_t(cache.k_pages.ne[3]),envelope.max_visible_keys,std::uint32_t(tokens),scale};
+        std::uint32_t(cache.k_pages.ne[3]),envelope.max_visible_keys,std::uint32_t(tokens),scale,window(cache,k,v,lane)};
       ignis_nv4_xqa_run(call,ws.data,ws.bytes,stream);
     }
   } else {
@@ -218,9 +263,10 @@ void nvfp4_attention(const ninfer::Tensor &q, const ninfer::Tensor &k,
     const auto cl = workspace.alloc(ninfer::DType::FP32, {tokens, QHeads});
     for (int lane = 0; lane < batch; ++lane) {
       for (std::uint32_t begin = 0; begin < envelope.max_visible_keys; begin += span) {
-        nvfp4_decode_band(cache, static_cast<const std::int32_t *>(rows.data),
+        decode_band<<<(Heads * span * 32 + 255) / 256, 256, 0, stream>>>(device_cache(cache), static_cast<const std::int32_t *>(rows.data),
             static_cast<const std::int32_t *>(positions.data), static_cast<const std::int32_t *>(valid.data),
-            lane, tokens, int(begin), span, kb.data, vb.data, stream);
+            lane, tokens, int(begin), span, static_cast<__nv_bfloat16 *>(kb.data), static_cast<__nv_bfloat16 *>(vb.data), window(cache,k,v,lane));
+        CUDA_CHECK(cudaGetLastError());
         const IgnisNv4PrefillBand call{static_cast<const __nv_bfloat16 *>(q.data) +
             std::int64_t(lane) * tokens * QHeads * D, kb.data, vb.data,
             static_cast<const std::int32_t *>(positions.data) + lane * tokens,

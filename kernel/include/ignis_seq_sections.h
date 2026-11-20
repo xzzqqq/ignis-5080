@@ -186,7 +186,7 @@ inline std::size_t ignis_seq_section_count(const ignis_seq_pool &pool) {
  * #303): the 27B's, or Flash-Next's own numbering. */
 inline std::uint32_t ignis_seq_snapshot_format_version_of(const ignis_seq_pool &pool) {
   return pool.has_flash_next_sections() ? kIgnisSeqSnapshotFormatVersionFlashNext
-                                        : kIgnisSeqSnapshotFormatVersion;
+                                        : ignis_seq_snapshot_format_version_for_kv(pool.kv_format);
 }
 
 /* The progress scalars, as the IGNIS_SEQ_SECTION_PROGRESS payload. Fixed

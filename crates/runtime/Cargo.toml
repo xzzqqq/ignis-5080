@@ -21,6 +21,8 @@ crc32fast = "1.5"
 ignis-logging = { path = "../logging" }
 tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
+# Replay example manifest identities; already pinned transitively by ignis-artifact.
+sha2 = "0.10"
 
 [features]
 # The safe wrapper itself is leaf-agnostic; this forwards the production

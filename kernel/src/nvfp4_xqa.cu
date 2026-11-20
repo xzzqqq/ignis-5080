@@ -19,7 +19,41 @@ std::uint32_t multiprocessors = 0;
 std::size_t align256(std::size_t n) { return (n + 255) & ~std::size_t(255); }
 struct Metadata {
   std::uint32_t seq_len, cu[2], mask[8];
+  uint2 schedule[SplitCapacity];
 };
+static_assert(sizeof(Metadata) <= 256);
+
+// One warp prepares ordinary-block quotas in the same launch as the page
+// table. Special blocks occupy distinct splits (sink on 0, hot tail on 1..4).
+// Long runs of identical ordinary blocks can be assigned in whole rounds.
+__device__ void plan_window(int window, int width, uint2 *range) {
+  constexpr int splits = SplitCapacity, block = 256;
+  const int blocks = (window + block - 1) / block;
+  if (blocks <= splits) return;
+  const int recent = window - width - ignis::nv4::Recent;
+  const int hot = recent / block;
+  const int ordinary = hot - 1;
+  const int lane = threadIdx.x;
+  const int tail = hot + lane - 1;
+  int load = lane == 0 ? 17 : 0;
+  if (lane > 0 && tail < blocks)
+    load = tail * block < recent ? 17 : 20;
+  const int rounds = max(0, ordinary / splits - 2);
+  int quota = rounds;
+  // Pick the lightest split, breaking ties by split ID. Every lane keeps
+  // its own load in registers; only the warp reduction communicates.
+  for (int i = rounds * splits; i < ordinary; ++i) {
+    const int winner = __reduce_min_sync(0xffffffffu,
+        lane < splits ? load * 32 + lane : 0x7fffffff) & 31;
+    if (lane == winner) { load += 10; ++quota; }
+  }
+  int end = lane < splits ? quota : 0;
+  for (int step = 1; step < 32; step *= 2) {
+    const int previous = __shfl_up_sync(0xffffffffu, end, step);
+    if (lane >= step) end += previous;
+  }
+  if (lane < splits) range[lane] = make_uint2(1 + end - quota, 1 + end);
+}
 __global__ void metadata(IgnisNv4XqaCall call, Metadata *m, std::int32_t *table) {
   const int valid = call.valid ? max(0, min(int(call.tokens), call.valid[0])) : int(call.tokens);
   const int row = valid ? call.table_rows[0] : 0;
@@ -27,6 +61,7 @@ __global__ void metadata(IgnisNv4XqaCall call, Metadata *m, std::int32_t *table)
   const int window = valid ? call.positions[valid - 1] + 1 : 0;
   if (window < valid || window > call.max_keys) asm volatile("trap;");
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (call.window.k && i < 32) plan_window(window, valid, m->schedule);
   if (i < 8) {
     if (i < valid && call.positions[i] != window - valid + i) asm volatile("trap;");
     m->mask[i] = (1u << (i + 1)) - 1;
@@ -94,6 +129,6 @@ void ignis_nv4_xqa_run(const IgnisNv4XqaCall &c, void *workspace, std::size_t by
       reinterpret_cast<const KVCachePageIndex *>(table), ((c.max_keys + 63) / 64) * 64,
       &m->seq_len, 1, 1.0f, nullptr, 8, m->cu, m->mask, sem, scratch, false,
       64ull * 4 * 128, 128, 64ull * 128,
-      64ull * 4 * 16, 16, 64ull * 16, c.max_keys, stream);
+      64ull * 4 * 16, 16, 64ull * 16, c.max_keys, stream, c.window, c.table_rows, c.window.k ? m->schedule : nullptr);
   CUDA_CHECK(cudaGetLastError());
 }

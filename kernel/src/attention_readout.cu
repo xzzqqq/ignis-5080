@@ -52,9 +52,23 @@ __device__ __forceinline__ void fetch_span_rows(const IgnisHqPromptKeys &keys, i
 // NVFP4 keeps normal-frame keys. Reuse the production decoder, staging one
 // complete row per warp; neither Q nor K takes an HQ transform here.
 __device__ __forceinline__ void fetch_nv4_row(
-    const __nv_bfloat16 *codes, const std::uint8_t *scales,
+    const IgnisHqPromptKeys &keys, const __nv_bfloat16 *codes, const std::uint8_t *scales,
     const std::int32_t *table, int head, std::int64_t position,
     __nv_bfloat16 *out, int lane) {
+  if (keys.residual_k) {
+    auto source = ignis_hq_prompt::key_source(keys, position);
+    const auto *raw = static_cast<const __nv_bfloat16 *>(keys.new_k);
+    const auto *side = static_cast<const __nv_bfloat16 *>(keys.residual_k);
+    const __nv_bfloat16 *p = nullptr;
+    if (source == ignis_hq_prompt::KeySource::Fresh)
+      p = raw + ((position - keys.start) * kKvHeads + head) * kHeadDim;
+    if (source == ignis_hq_prompt::KeySource::Side)
+      p = ninfer::ops::hq_residual_row<ignis_hq_prompt::Geometry>(side, 0, head, position);
+    if (p) {
+      reinterpret_cast<int4 *>(out)[lane] = reinterpret_cast<const int4 *>(p)[lane];
+      return;
+    }
+  }
   const auto code_offset = ninfer::ops::paged_kv_element_offset<128, kKvHeads>(
       table, head, static_cast<std::int32_t>(position), 0);
   const auto scale_offset = ninfer::ops::paged_kv_element_offset<16, kKvHeads>(
@@ -105,7 +119,7 @@ __global__ void attention_readout_kernel(const __nv_bfloat16 *query, const Ignis
     if (kHq) {
       fetch_span_rows(keys, kv_head, key_begin, key_count, k0, stage, warp);
     } else if constexpr (kNv4) {
-      fetch_nv4_row(k_pages, k_scales, block_table, kv_head, key_begin + k0,
+      fetch_nv4_row(keys, k_pages, k_scales, block_table, kv_head, key_begin + k0,
                     stage.rows[warp][0], lane);
       __syncwarp();
     }
@@ -235,7 +249,7 @@ __global__ void neighbour_gather_kernel(const NeighbourGatherArgs args) {
     }
     __syncthreads();
   } else if constexpr (kNv4) {
-    if (t < 32) fetch_nv4_row(args.k_pages, args.k_scales, args.block_table, kv_head,
+    if (t < 32) fetch_nv4_row(args.keys, args.k_pages, args.k_scales, args.block_table, kv_head,
                                position, stage.rows[0][0], t);
     __syncthreads();
   }
@@ -360,7 +374,7 @@ __global__ void attention_set_readout_kernel(const SetReadoutArgs args) {
     if (kHq) {
       fetch_span_rows(args.keys, kv_head, args.key_begin, args.key_count, k0, stage, warp);
     } else if constexpr (kNv4) {
-      fetch_nv4_row(args.k_pages, args.k_scales, args.block_table, kv_head,
+      fetch_nv4_row(args.keys, args.k_pages, args.k_scales, args.block_table, kv_head,
                     args.key_begin + k0, stage.rows[warp][0], lane);
       __syncwarp();
     }
@@ -476,7 +490,7 @@ int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
   if (hq && hq_keys == nullptr) {
     return 0;
   }
-  const IgnisHqPromptKeys keys = hq ? *hq_keys : IgnisHqPromptKeys{};
+  const IgnisHqPromptKeys keys = hq_keys ? *hq_keys : IgnisHqPromptKeys{};
   const auto *last_column = static_cast<const __nv_bfloat16 *>(rotated_query) +
                             (static_cast<std::int64_t>(tokens) - 1) * q_heads * kHeadDim;
   const std::int64_t wanted_blocks = (target.key_count + kWarpsPerBlock - 1) / kWarpsPerBlock;

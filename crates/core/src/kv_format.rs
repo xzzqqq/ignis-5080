@@ -464,8 +464,8 @@ mod tests {
         assert_eq!(plan.token_capacity, 232_960);
         assert_eq!(plan.page_count, 3_640);
         let model = crate::compute::ModelConfig::qwen38_27b();
-        assert_eq!(model.state_image(KvFormat::Nvfp4).hq_residual_window, 0);
-        assert_eq!(model.state_image(KvFormat::Nvfp4), model.state_image(KvFormat::Bf16));
+        assert_eq!(model.state_image(KvFormat::Nvfp4).hq_residual_window, 34 * 1024 * 1024 + 64);
+        assert_eq!(model.state_image(KvFormat::Nvfp4), model.state_image(KvFormat::HqE8_2b));
         assert!(plan_kv_pool_for_context(KvFormat::Nvfp4, QWEN, DEFAULT_KV_POOL_BYTES, 131_072).is_ok());
         assert!(plan_kv_pool_for_context(KvFormat::Nvfp4, QWEN, DEFAULT_KV_POOL_BYTES, 262_144).is_err());
     }

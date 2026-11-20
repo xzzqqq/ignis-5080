@@ -44,8 +44,8 @@
       "sha256": "fac9c9a116be125b800257c455ee3abe2a2a620b2816a3c254792d3a5033ace4",
       "patch": {
         "diff": "patches/csrc/xqa/mha.cu.diff",
-        "sha256": "625f91fd7247c21fa9f370d4bd30c47633cbca559bb49200675f1b81eeee6ff1",
-        "reason": "Measured NVFP4 KV attention bottleneck: M48 Kpart32/Vtile32 reduces real W19962 full-chain median 69.696/94.272us to65.856/89.600us warm/eviction with identical output. Preserve M48 Q-copy/barrier participants and4B paired SF transfer; production graph uses device actual-length active splits and fixed21 capacity. Explicit prepare removes CUDA work from global initialization."
+        "sha256": "187d8eb7b8820a3eca9191ca3f6d74e4958546227c572b730e7757ecf90c8095",
+        "reason": "Measured NVFP4 KV attention bottleneck: M48 Kpart32/Vtile32 reduces real W19962 full-chain median 69.696/94.272us to65.856/89.600us warm/eviction with identical output. Preserve M48 Q-copy/barrier participants and4B paired SF transfer; production graph uses device actual-length active splits and fixed21 capacity. Explicit prepare removes CUDA work from global initialization. Select exact BF16 sink, recent and fresh operands for NVFP4 attention. Stage BF16 V slices in shared memory and reuse K/V fragments across query groups. Use a recent-only K fast path and weighted per-split ranges for mixed-window M48."
       }
     },
     {
@@ -54,7 +54,12 @@
     },
     {
       "path": "csrc/xqa/mhaUtils.cuh",
-      "sha256": "9a62daf9bc47e03d68eb4ea8e650d4f72b29ad50538a07404f3a0793d5a1ade8"
+      "sha256": "9a62daf9bc47e03d68eb4ea8e650d4f72b29ad50538a07404f3a0793d5a1ade8",
+      "patch": {
+        "diff": "patches/csrc/xqa/mhaUtils.cuh.diff",
+        "sha256": "1cf927eb00cbd939d59376e83fb91d0ebb0b930d2dccefd669690d586f662be9",
+        "reason": "Select exact BF16 sink, recent and fresh operands for NVFP4 attention. Use a recent-only K fast path and weighted per-split ranges for mixed-window M48."
+      }
     },
     {
       "path": "csrc/xqa/mha_components.cuh",

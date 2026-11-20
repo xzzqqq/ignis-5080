@@ -31,7 +31,7 @@ use ignis_core::model_load::{self, Model};
 use ignis_core::seq::{SeqPool, SeqPoolBudget};
 use ignis_core::step::capture_decode_graphs;
 use ignis_core::{
-    plan_vram, ExceptionWeights, KvFormat, KvGeometry, ModelConfig, PrefillAttention, Residency, VramRequest,
+    plan_vram, ExceptionWeights, KvGeometry, ModelConfig, PrefillAttention, Residency, VramRequest,
 };
 use ignis_runtime::CudaLeafConfig;
 
@@ -42,7 +42,7 @@ use crate::replay_shape::LoadShape;
 fn leaf_config(shape: &LoadShape, kv_pool_bytes: u64) -> CudaLeafConfig {
     CudaLeafConfig {
         max_context_tokens: shape.max_context,
-        kv_format: KvFormat::HqE8_2b,
+        kv_format: shape.kv_format,
         kv_pool_bytes,
         slot_count: shape.lanes,
         retained_device_slots: 0,

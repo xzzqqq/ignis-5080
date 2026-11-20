@@ -413,8 +413,8 @@ impl ModelConfig {
         let gdn_layers = self.gdn_layer_count() as u64;
         let attention_layers = self.attention_layer_count() as u64;
         let hq_residual_window = match kv_format {
-            KvFormat::Bf16 | KvFormat::Nvfp4 => 0,
-            KvFormat::HqE8_2b => {
+            KvFormat::Bf16 => 0,
+            KvFormat::HqE8_2b | KvFormat::Nvfp4 => {
                 2 * attention_layers * (SINK_KEYS + RECENT_KEYS) * self.num_kv_heads * self.head_dim * 2
                     + RING_WORDS as u64 * 4
             }

@@ -349,6 +349,7 @@ struct alignas(128) SharedMem {
               (grpLoadV ? headElems : warpTile.x) / CacheElemConverter::QuantVectorSize>;
 #endif
 
+  alignas(16) __nv_bfloat16 windowV[ctaShapeInWarps.x][16][warpTile.x];
   QSmemBuffer q[ctaShapeInWarps.y][nbQBuffers];
   KSmemBuffer k[ctaShapeInWarps.x][nbKBuffers];
   XSmemBuffer x[ctaShapeInWarps.y][ctaShapeInWarps.x];
@@ -993,16 +994,38 @@ loadMatrix(Warp const& warp, Array2D<LdGrain, srcRows, srcCols> const& src, uint
   return dst;
 }
 
+// A complete 64-row tile in the exact recent ring, starting at a page boundary.
+__device__ inline void exactRecentQK(Warp const& warp, WarpAcc& acc,
+    SharedMem::QSmemBuffer const& q, uint32_t qColBeg, const __nv_bfloat16* tileK) {
+  static_assert(warpTile.x == 64 && kHeadPartBytes == 32);
+#pragma unroll
+  for (int part = 0; part < 2; ++part) {
+    const auto a = loadMatrix<2, 2, warpTile.y / 16, 1, false, false, false, false>(
+        warp, q, 0, qColBeg + 2 * part);
+#pragma unroll
+    for (int n = 0; n < 8; ++n) {
+      const int row = n * 8 + laneId() / 4;
+      const int col = qColBeg * inputElemsPerGrain + 16 * part + 4 * (laneId() % 4);
+      const auto words = *reinterpret_cast<const uint2*>(tileK + row * 4 * 256 + col);
+      const uint32_t b[2][1] = {{words.x}, {words.y}};
+#pragma unroll
+      for (int i = 0; i < warpTile.y / 16; ++i)
+        mma<InputElem>(acc(i,n).data, a(i,0).data, b);
+    }
+  }
+}
+
 // acc is used as both input and output
 // qColBeg is in the unit of LdGrain
 // using KElemType = int8_t;
-template <typename KElemType>
+template <typename KElemType, bool Exact>
 __device__ inline void smemQKPartGemm(Warp const& warp, WarpAcc& acc,
                                       SharedMem::QSmemBuffer const& q, uint32_t qColBeg,
                                       SharedMem::KSmemBuffer const& k
 #if ENABLE_4BIT_KV_CACHE
                                       ,
-                                      SharedMem::KSfSmemBuffer const& kSf, uint32_t kSfHighHalf
+                                      SharedMem::KSfSmemBuffer const& kSf, uint32_t kSfHighHalf, ignis::nv4::Window side,
+                                      int slot, int head, int tile, int start, int end
 #endif
 ) {
   assert(qColBeg % (SharedMem::KSmemBuffer::cols) == 0);
@@ -1090,7 +1113,7 @@ __device__ inline void smemQKPartGemm(Warp const& warp, WarpAcc& acc,
     Array2D<InstInMat<mnExK, kExK>, kSliceRows, kSliceCols> const kSliceOrig =
         loadMatrix<kExK, mnExK, kSliceRows, kSliceCols, false, true, false, true>(
             warp, k, 0, kExK * kSliceCols * s);
-    auto const kSlice = [&]() -> Array2D<InstInMat<mnExK, kEx>, kSliceRows, kSliceCols> {
+    auto kSlice = [&]() -> Array2D<InstInMat<mnExK, kEx>, kSliceRows, kSliceCols> {
       if constexpr (mha::is_same_v<InputElem, KElemType>) {
         return kSliceOrig;
       } else {
@@ -1121,6 +1144,23 @@ __device__ inline void smemQKPartGemm(Warp const& warp, WarpAcc& acc,
         return ret;
       }
     }();
+    // Reuse each window operand across the three query-row groups.
+    if constexpr (Exact) {
+#pragma unroll
+      for (uint32_t j = 0; j < kSliceRows; ++j) {
+#pragma unroll
+        for (uint32_t n = 0; n < mnExK; ++n) {
+          const int key = tile + (j * mnExK + n) * 8 + laneId() / 4;
+          if (const auto *row = side.exact(false, slot, head, key, start, end)) {
+            // Q and the PV weights both permute each 16-wide reduction group
+            // into even then odd BF16 pairs to match packed FP4 fragments.
+            const int d = qColBeg * inputElemsPerGrain + s * 16 + (laneId() % 4) * 4;
+            kSlice(j, 0).data[n][0] = *reinterpret_cast<const uint32_t *>(row + d);
+            kSlice(j, 0).data[n][1] = *reinterpret_cast<const uint32_t *>(row + d + 2);
+          }
+        }
+      }
+    }
 // compute
 #pragma unroll
     for (uint32_t i = 0; i < qSliceRows; i++) {
@@ -1130,7 +1170,7 @@ __device__ inline void smemQKPartGemm(Warp const& warp, WarpAcc& acc,
         InstInMat<mnExK, kEx> const matrixB = kSlice(j, 0);
 #pragma unroll
         for (uint32_t n = 0; n < mnExK; n++) {
-          uint32_t const b[2][1] = {matrixB.data[n][0], matrixB.data[n][1]};
+          uint32_t b[2][1] = {matrixB.data[n][0], matrixB.data[n][1]};
           mma<InputElem>(acc(i, j * mnExK + n).data, matrixA.data, b);
         }
       }
@@ -1140,13 +1180,15 @@ __device__ inline void smemQKPartGemm(Warp const& warp, WarpAcc& acc,
 
 // acc is used as both input and output
 // v needs transpose
-template <typename VElemType>
+template <typename VElemType, bool Exact>
 __device__ inline void smemXVPartGemm(Warp const& warp, WarpAcc& acc, bool skipXRowRescale,
                                       UniformRescaleMask xRowNeedRescaleMask,
                                       ThrdRegRowMax xRowScales, SharedMem::XSmemBuffer const& x,
                                       uint32_t idxVTilePerXTile, SharedMem::VSmemBuffer const& vt,
 #if ENABLE_4BIT_KV_CACHE
-                                      SharedMem::VSfSmemBuffer const& vSf,
+                                      SharedMem::VSfSmemBuffer const& vSf, ignis::nv4::Window side,
+                                      int slot, int head, int tile, int start, int end,
+                                      __nv_bfloat16 (*windowV)[warpTile.x],
 #endif
                                       uint32_t idxNSplit) {
   static_assert(mha::is_same_v<InputElem, half> || mha::is_same_v<InputElem, __nv_bfloat16>,
@@ -1306,7 +1348,7 @@ __device__ inline void smemXVPartGemm(Warp const& warp, WarpAcc& acc, bool skipX
     }
 #endif
 
-    Array2D<InstInMat<mnExV, kEx>, vSliceCols, vSliceRows> const vSlice = [&]() {
+    Array2D<InstInMat<mnExV, kEx>, vSliceCols, vSliceRows> vSlice = [&]() {
       if constexpr (mha::is_same_v<InputElem, VElemType>) {
         return vSliceOrig;
       } else {
@@ -1356,6 +1398,41 @@ __device__ inline void smemXVPartGemm(Warp const& warp, WarpAcc& acc, bool skipX
         return ret;
       }
     }();
+    // Stage this warp's 16 x 64 V slice in row-major order. Four groups
+    // of eight lanes each issue contiguous 16-byte reads of a BF16 row.
+    if constexpr (Exact) {
+      const int lane = laneId();
+      const auto *row = side.exact(true, slot, head, tile + 16 * s + lane, start, end);
+      const unsigned present = __ballot_sync(0xffffffffu, lane < 16 && row);
+#pragma unroll
+      for (int base = 0; base < 16; base += 4) {
+        const int r = base + lane / 8;
+        const auto addr = __shfl_sync(0xffffffffu, reinterpret_cast<unsigned long long>(row), r);
+        if (addr) {
+          const int col = (lane % 8) * 8;
+          const auto *src = reinterpret_cast<const __nv_bfloat16 *>(addr) + idxNSplit * warpTile.x;
+          *reinterpret_cast<int4 *>(&windowV[r][col]) = *reinterpret_cast<const int4 *>(src + col);
+        }
+      }
+      __syncwarp();
+#pragma unroll
+      for (uint32_t j = 0; j < vSliceCols; ++j) {
+#pragma unroll
+        for (uint32_t n = 0; n < mnExV; ++n) {
+          const int col = (j * mnExV + n) * 8 + lane / 4;
+#pragma unroll
+          for (int r = 0; r < 2; ++r) {
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+              const int key = (lane % 4) * 4 + 2 * r + e;
+              if (present & (1u << key))
+                reinterpret_cast<__nv_bfloat16 *>(&vSlice(j, 0).data[n][r])[e] = windowV[key][col];
+            }
+          }
+        }
+      }
+      __syncwarp();
+    }
 // compute
 #pragma unroll
     for (uint32_t i = 0; i < xSliceRows; i++) {
@@ -1364,8 +1441,8 @@ __device__ inline void smemXVPartGemm(Warp const& warp, WarpAcc& acc, bool skipX
         auto const& vInMat = vSlice(j, 0);
 #pragma unroll
         for (uint32_t n = 0; n < mnExV; n++) {
-          mma<InputElem>(acc(i, j * mnExV + n).data, xSlice(i, 0).data,
-                         reinterpret_cast<uint32_t const(&)[2][1]>(vInMat.data[n]));
+          uint32_t b[2][1] = {vInMat.data[n][0], vInMat.data[n][1]};
+          mma<InputElem>(acc(i, j * mnExV + n).data, xSlice(i, 0).data, b);
         }
       }
     }
@@ -1804,7 +1881,20 @@ CUBIN_EXPORT __global__
 
   uint32_t const seqStrideIters = nbSubSeqPerSeq;
   constexpr bool isKVCacheQuantized = (cacheElemSize < 2);
-  uint32_t const seqIterInit = nbSkipLeadingTiles + idxSubSeqInSeq;
+  // Each split owns a contiguous ordinary range and at most one special
+  // block. Visit sink first and recent/fresh last to retain causal order.
+  const bool weighted = cacheList.schedule && nbSeqIters > nbSubSeqPerSeq;
+  const uint2 range = weighted ? cacheList.schedule[idxSubSeqInSeq] : uint2{};
+  const unsigned hotBegin = static_cast<unsigned>(mha::max(0, int(cacheSeqLen - actualQSeqLen) - 512)) / ctaTile.x;
+  const unsigned hot = idxSubSeqInSeq > 0 ? mha::min(nbSeqIters, hotBegin + idxSubSeqInSeq - 1) : nbSeqIters;
+  const unsigned firstColdOrHot = range.x < range.y ? range.x : hot;
+  const unsigned seqIterInit = weighted ? (idxSubSeqInSeq == 0 ? 0 : firstColdOrHot) : idxSubSeqInSeq;
+  auto nextTile = [&](unsigned tile) -> unsigned {
+    if (!weighted) return tile + seqStrideIters;
+    if (tile == 0) return firstColdOrHot;
+    if (tile + 1 < range.y) return tile + 1;
+    return tile < hot ? hot : nbSeqIters;
+  };
 #if BEAM_WIDTH > 1
   uint32_t const nbCtxCtaTiles = beamSearchParams.ctxLenList[idxReq * beamWidth] / ctaTile.x;
 #endif
@@ -1852,9 +1942,21 @@ CUBIN_EXPORT __global__
     };
     uint32_t idxPageBeg = nbPagesPerCtaTile * seqIterInit + warpIdx.x * warpTile.x / tokensPerPage;
     loadPages(idxPageBeg);
-    auto loadKTilePart = [&](uint32_t seqIter, uint32_t idxBeam, uint32_t idxPart) mutable {
+    auto recentTile = [&](uint32_t iter) -> const __nv_bfloat16* {
+      const int tile = ctaTile.x * iter + warpTile.x * warpIdx.x;
+      const int start = int(actualWindow - actualQSeqLen);
+      if (!cacheList.window.k || tile < ignis::nv4::Sink || tile < start - ignis::nv4::Recent ||
+          tile + int(warpTile.x) > start) return nullptr;
+      const int slot = *cacheList.slot;
+      const int ring = tile % ignis::nv4::Recent;
+      const uint32_t* words = cacheList.window.valid + slot * 16 + ring / 32;
+      if ((words[0] & words[1]) != 0xffffffffu) return nullptr;
+      return cacheList.window.k + ((slot * ignis::nv4::Rows + ignis::nv4::Sink + ring) * 4 + idxHeadGrp) * 256;
+    };
+    const auto *currentRecent = recentTile(seqIterInit);
+    auto loadKTilePart = [&](uint32_t seqIter, uint32_t idxBeam, uint32_t idxPart, bool skipPacked) mutable {
       assert(idxBeam < beamWidth);
-      assert(seqIter % nbSubSeqPerSeq == seqIterInit % nbSubSeqPerSeq);
+      assert(weighted || seqIter % nbSubSeqPerSeq == seqIterInit % nbSubSeqPerSeq);
       auto const idxNextSMemKBuf = idxCurrSMemKBuf.next();
       auto& dst = getSMemKTile(idxNextSMemKBuf);
 #if ENABLE_4BIT_KV_CACHE
@@ -1900,6 +2002,7 @@ CUBIN_EXPORT __global__
       //     }
       //     printf("}\n");
       // }
+      if (!skipPacked) {
       bool const isFullTile = (seqIter + 1 < nbSeqIters);
       if (isFullTile) {
         copyPartialHeadsAsync<PaddedCacheHead, warpTile.x, nbPartsPerCacheKHead, grainBytes,
@@ -1921,6 +2024,7 @@ CUBIN_EXPORT __global__
                             grainBytesSf, false, true>(warp, dstSf, dstHeadOffset, srcSf, idxPart/2);
 #endif
 
+      }
 #if BEAM_WIDTH > 1
       // to make sure all threads has finished usage of cache indir and pages
       __syncwarp();
@@ -1928,7 +2032,7 @@ CUBIN_EXPORT __global__
       if (idxPart + 1 == nbPartsPerCacheKHead) {
         bool const isForNextSeqIter = isConvergedTile(seqIter) || idxBeam == beamWidth - 1;
         if (isForNextSeqIter) {
-          idxPageBeg += nbPagesPerCtaTile * nbSubSeqPerSeq;
+          idxPageBeg = nbPagesPerCtaTile * nextTile(seqIter) + warpIdx.x * warpTile.x / tokensPerPage;
           loadPages(idxPageBeg);
         }
 #if BEAM_WIDTH > 1
@@ -1947,7 +2051,7 @@ CUBIN_EXPORT __global__
     ldgsts::waitGroup<0>();
     __syncwarp();
 #endif
-    loadKTilePart(seqIterInit, 0, 0);
+    loadKTilePart(seqIterInit, 0, 0, currentRecent != nullptr);
     ldgsts::commitGroup();  // @fixme: do prefetch for next iter tile if last part
     idxCurrSMemKBuf++;
 
@@ -1971,12 +2075,13 @@ CUBIN_EXPORT __global__
     ThrdRegRowMax initRowMax;
     initRowMax.fill(safeInitRowMax);
 #endif
-    for (uint32_t seqIter = seqIterInit; seqIter < nbSeqIters; seqIter += seqStrideIters) {
+    for (uint32_t seqIter = seqIterInit; seqIter < nbSeqIters; seqIter = nextTile(seqIter)) {
 #if SHORT_SEQ_OPT
       if (ctaTile.x * seqIter + warpTile.x * warpIdx.x >= cacheSeqLen) {
         break;
       }
 #endif
+      const auto *nextRecent = recentTile(nextTile(seqIter));
       auto runGemm0 = [&](auto elemK, uint32_t idxBeam) {
         assert(idxBeam < (isConvergedTile(seqIter) ? 1U : beamWidth));
         using KElemType = mha::decay_t<decltype(elemK)>;
@@ -2001,7 +2106,7 @@ CUBIN_EXPORT __global__
               isConvergedTile(seqIter) ? carryLE<nbPartsPerKHead, 1U>(p + 1, idxBeam, 0U)
                                        : carryLE<nbPartsPerKHead, beamWidth>(p + 1, idxBeam, 0U);
 
-          loadKTilePart(seqIter + seqStrideIters * nNextBias, idxBeamNext, idxPartNext);
+          loadKTilePart((nNextBias ? nextTile(seqIter) : seqIter), idxBeamNext, idxPartNext, (nNextBias ? nextRecent : currentRecent) != nullptr);
           ldgsts::commitGroup();
           // @fixme: do L2 cache prefetch for next iter tile if last part
 
@@ -2029,12 +2134,18 @@ CUBIN_EXPORT __global__
           //                     }
           // #endif
           // do computation.
-          smemQKPartGemm<KElemType>(warp, acc, smemQ, smemQOffset, smemKPart
-#if ENABLE_4BIT_KV_CACHE
-                                    ,
-                                    smemKSfPart, p%2
-#endif
-          );
+          const int tile = ctaTile.x * seqIter + warpTile.x * warpIdx.x;
+          auto multiply = [&]<bool exact>() {
+            smemQKPartGemm<KElemType, exact>(warp, acc, smemQ, smemQOffset, smemKPart,
+                smemKSfPart, p % 2, cacheList.window, cacheList.slot ? *cacheList.slot : 0,
+                idxHeadGrp, tile, actualWindow - actualQSeqLen, actualWindow);
+          };
+          if (currentRecent)
+            exactRecentQK(warp, acc, smemQ, smemQOffset, currentRecent);
+          else if (cacheList.window.overlaps(tile, warpTile.x, actualWindow - actualQSeqLen))
+            multiply.template operator()<true>();
+          else
+            multiply.template operator()<false>();
           idxCurrSMemKBuf++;
         }
         return acc;
@@ -2073,6 +2184,7 @@ CUBIN_EXPORT __global__
       // load hint
       QuadRegRowMax initRowMaxQuad = smem.ctaRowMax[warpIdx.y].loadToRegForQuad<true>(warp);
 #endif
+      currentRecent = nextRecent;
       // masking
       uint32_t const warpTileTokenBeg = ctaTile.x * seqIter + warpTile.x * warpIdx.x;
 #if SPEC_DEC
@@ -2208,7 +2320,7 @@ CUBIN_EXPORT __global__
               ? carryLE<1, nbXItersPerCtaTile>(idxBeam + isNextBeam, xIter, 0)
               : carryLE<beamWidth, nbXItersPerCtaTile>(idxBeam + isNextBeam, xIter, 0);
 
-      uint32_t const seqIterNext = seqIter + seqStrideIters * nNextBias;
+      uint32_t const seqIterNext = (nNextBias ? nextTile(seqIter) : seqIter);
       return mha::tuple<uint32_t, uint32_t, uint32_t, uint32_t>(seqIterNext, xIterNext, vIterNext,
                                                                 idxBeamNext);
     };
@@ -2216,7 +2328,7 @@ CUBIN_EXPORT __global__
                              uint32_t idxBeam) mutable {  // @fixme: merge three iteration
                                                           // parameters into idxVTileGlb.
       assert(idxBeam < beamWidth);
-      assert(seqIter % nbSubSeqPerSeq == seqIterInit % nbSubSeqPerSeq);
+      assert(weighted || seqIter % nbSubSeqPerSeq == seqIterInit % nbSubSeqPerSeq);
       auto const idxNextSMemVBuf = idxCurrSMemVBuf.next();
       auto& dst = getSmemVTile(idxNextSMemVBuf);
 #if ENABLE_4BIT_KV_CACHE
@@ -2309,51 +2421,13 @@ CUBIN_EXPORT __global__
       unused(arrive<grpLoadV>(pWarpGrpBar));
       wait_parity<grpLoadV>(pWarpGrpBar, getAndFlip<grpLoadV>(warpGrpBarParityNext));
 #endif
-      constexpr uint32_t xIterSeqStride = cacheVTileSeqStride * nbVItersPerXIter;
-      if constexpr (xIterSeqStride <= tokensPerPage) {
-        uint32_t const nbXItersPerPage = exactDiv(tokensPerPage, xIterSeqStride);
-        assert(nbXItersPerPage <= nbXItersPerCtaTile);
-        if (xIter % nbXItersPerPage == nbXItersPerPage - 1 && vIter == nbVItersPerXIter - 1 &&
-            (idxBeam == beamWidth - 1 || isConvergedTile(seqIter))) {
-          auto const step = 1;  // cacheVTileSeqLen * gemm1NbWarpGrps / tokensPerPage;
-          idxPageBeg += (idxPageBeg % nbPagesPerCtaTile == nbPagesPerCtaTile - 1
-                             ? nbPagesPerCtaTile * (nbSubSeqPerSeq - 1) + step
-                             : step);
-          assert(beamWidth == 1 ||
-                 cacheVTileSeqStride <= tokensPerPage &&
-                     "todo: need to substrate from idxPageBeg for beam switching");
-          loadPages(idxPageBeg);
-        }
-      } else if constexpr (cacheVTileSeqStride % tokensPerPage != 0) {
-        // Neither "an xIter fits in one page" nor "a vIter advances whole pages" holds
-        // (e.g. cacheVTileSeqLen 16 with page size 32). Incremental stepping cannot be
-        // exact here, so derive the next tile's first page directly from its absolute
-        // sequence offset (nextStep already accounts for the multi-block sub-sequence
-        // stride via seqIter).
-        uint32_t seqIterN, xIterN, vIterN, idxBeamN;
-        mha::tie(seqIterN, xIterN, vIterN, idxBeamN) = nextStep(seqIter, xIter, vIter, idxBeam);
-        unused(idxBeamN);
-        uint32_t const seqOffsetNext = ctaTile.x * seqIterN +
-                                       warpTile.x * nbXTilesPerXIter * xIterN +
-                                       cacheVTileSeqStride * vIterN + cacheVTileSeqLen * warpGrpIdx;
-        idxPageBeg = seqOffsetNext / tokensPerPage;
-        loadPages(idxPageBeg);
-      } else {
-        constexpr auto step_per_viter = exactDiv(cacheVTileSeqStride, tokensPerPage);
-        bool const isLastVIter = (vIter == nbVItersPerXIter - 1);
-        bool const isLastBeam = (idxBeam == beamWidth - 1 || isConvergedTile(seqIter));
-        if (isLastVIter && isLastBeam) {
-          idxPageBeg += (idxPageBeg % nbPagesPerCtaTile + step_per_viter >= nbPagesPerCtaTile
-                             ? nbPagesPerCtaTile * (nbSubSeqPerSeq - 1) + step_per_viter
-                             : step_per_viter);
-          loadPages(idxPageBeg);
-        } else if (isLastVIter) {
-          idxPageBeg -= step_per_viter * (nbVItersPerXIter - 1);
-          loadPages(idxPageBeg);
-        } else {
-          idxPageBeg += step_per_viter;
-          loadPages(idxPageBeg);
-        }
+      uint32_t sn, xn, vn, bn;
+      mha::tie(sn,xn,vn,bn) = nextStep(seqIter,xIter,vIter,idxBeam);
+      const unsigned nextPage = (ctaTile.x * sn + warpTile.x * nbXTilesPerXIter * xn +
+          cacheVTileSeqStride * vn + cacheVTileSeqLen * warpGrpIdx) / tokensPerPage;
+      if (nextPage != idxPageBeg) {
+        idxPageBeg = nextPage;
+        loadPages(nextPage);
       }
 #if BEAM_WIDTH > 1
       uint32_t seqIterNext, xIterNext, vIterNext, idxBeamNext;
@@ -2411,7 +2485,7 @@ CUBIN_EXPORT __global__
       unused(pWarpGrpBar->arrive());
     }
     bool xBarProducedParityNext = false;
-    for (uint32_t seqIter = seqIterInit; seqIter < nbSeqIters; seqIter += seqStrideIters) {
+    for (uint32_t seqIter = seqIterInit; seqIter < nbSeqIters; seqIter = nextTile(seqIter)) {
 #pragma unroll
       for (uint32_t xIter = 0; xIter < nbXItersPerCtaTile; xIter++) {
         uint32_t const idxXTile = xIter * nbXTilesPerXIter + warpGrpIdx / nbCacheVTilesPerXTile;
@@ -2549,18 +2623,27 @@ CUBIN_EXPORT __global__
             for (uint32_t hs = 0; hs < nbHeadSplits; hs++) {
               uint32_t const idxNSplit = grpLoadV ? (warpIdxInGrp + gemm1WarpsPerGrp * hs) : 0;
 #if BEAM_WIDTH == 1
-              smemXVPartGemm<CacheElem>(warp, accs[hs], skipXRowRescale, xRowNeedRescaleMask,
-                                        xRowScales, smemXTile, idxVTile, smemVTile,
-#if ENABLE_4BIT_KV_CACHE
-                                        smemVSfPart,
-#endif
-                                        idxNSplit);
+              const int tile = ctaTile.x * seqIter + warpTile.x * nbXTilesPerXIter * xIter +
+                               cacheVTileSeqStride * vIter + cacheVTileSeqLen * warpGrpIdx;
+              auto multiply = [&]<bool exact>() {
+                smemXVPartGemm<CacheElem, exact>(warp, accs[hs], skipXRowRescale, xRowNeedRescaleMask,
+                    xRowScales, smemXTile, idxVTile, smemVTile, smemVSfPart, cacheList.window,
+                    cacheList.slot ? *cacheList.slot : 0, idxHeadGrp, tile,
+                    actualWindow - actualQSeqLen, actualWindow, smem.windowV[warpIdx.x], idxNSplit);
+              };
+              if (cacheList.window.overlaps(tile, cacheVTileSeqLen, actualWindow - actualQSeqLen))
+                multiply.template operator()<true>();
+              else
+                multiply.template operator()<false>();
 #else
               WarpAcc tmpAcc{};
               smemXVPartGemm<CacheElem>(warp, tmpAcc, skipXRowRescale, xRowNeedRescaleMask,
                                         xRowScales, smemXTile, idxVTile, smemVTile,
 #if ENABLE_4BIT_KV_CACHE
-                                        smemVSfPart,
+                                        smemVSfPart, cacheList.window, cacheList.slot ? *cacheList.slot : 0,
+                                        idxHeadGrp, ctaTile.x * seqIter + warpTile.x * nbXTilesPerXIter * xIter +
+                                        cacheVTileSeqStride * vIter + cacheVTileSeqLen * warpGrpIdx,
+                                        actualWindow - actualQSeqLen, actualWindow,
 #endif
                                         idxNSplit);
               pickAccRowsForBeamSearch(warp, accs[hs], tmpAcc, isConvergedTile(seqIter), idxBeam,
@@ -3124,7 +3207,7 @@ void launchMHAFlashInfer(uint32_t multiProcessorCount, uint32_t nbKHeads, uint32
 #if ENABLE_4BIT_KV_CACHE
                          uint64_t sf_stride_page, uint64_t sf_stride_token, uint64_t sf_stride_head,
 #endif
-                         uint32_t actualWindow, cudaStream_t stream) {
+                         uint32_t actualWindow, cudaStream_t stream, ignis::nv4::Window window, const int *slot, const uint2 *schedule) {
   uint32_t const nbSubSeqPerSeq = 21;
 #if SPEC_DEC
   const uint32_t nbTokenBlocksPerGrp = divUp(qSeqLen * headGrpSize, rowsPerBlock);
@@ -3139,7 +3222,7 @@ void launchMHAFlashInfer(uint32_t multiProcessorCount, uint32_t nbKHeads, uint32
 #if ENABLE_4BIT_KV_CACHE
                                     kSfCacheVLLM,    vSfCacheVLLM,
 #endif
-                                    kvCachePageList, seqLen,       maxNbPagesPerSeq};
+                                    kvCachePageList, seqLen,       maxNbPagesPerSeq, window, slot, schedule};
   // Convert stride from elements to Heads
   uint32_t const container_elems_per_head =
       validElemsPerHead / CacheElemConverter::ElemsPerContainer;

@@ -891,6 +891,7 @@ dependencies = [
  "ignis-core",
  "ignis-logging",
  "serde_json",
+ "sha2",
  "tracing",
  "tracing-subscriber",
 ]

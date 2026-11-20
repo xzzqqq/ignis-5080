@@ -1,5 +1,6 @@
 #pragma once
 #include <cuda_runtime.h>
+#include "nvfp4_window.cuh"
 #include <cstddef>
 #include <cstdint>
 struct IgnisNv4XqaCall {
@@ -9,6 +10,7 @@ struct IgnisNv4XqaCall {
   const std::int32_t *tables, *table_rows, *positions, *valid;
   std::uint32_t table_stride, table_count, physical_pages, max_keys, tokens;
   float scale;
+  ignis::nv4::Window window{};
 };
 std::size_t ignis_nv4_xqa_workspace(std::uint32_t max_keys);
 void ignis_nv4_xqa_prepare();

@@ -871,7 +871,7 @@ PoolLayout plan_pool_layout(const struct ignis_seq_pool_spec &spec) {
   // 0030): its bytes come off the KV pool's budget, never out of a request.
   // Each (layer, slot) plane is 1.06 MiB at 4 KV heads, a multiple of the
   // 256-byte alignment, so the three regions pack without padding.
-  if (spec.kv_format == IGNIS_KV_FORMAT_HQ_E8_2B) {
+  if (spec.kv_format == IGNIS_KV_FORMAT_HQ_E8_2B || spec.kv_format == IGNIS_KV_FORMAT_NVFP4) {
     out.hq_residual_plane_bytes = static_cast<std::size_t>(kIgnisHqHeadDim) * spec.num_kv_heads *
                                   kIgnisHqResidualRows * sizeof(std::uint16_t);
     const std::size_t planes = static_cast<std::size_t>(spec.kv_num_layers) * state_slots;
@@ -1818,6 +1818,11 @@ extern "C" int32_t ignis_seq_pool_fence_wait(struct ignis_seq_pool *pool, uint64
 
 extern "C" uint32_t ignis_seq_snapshot_format_version(void) {
   return kIgnisSeqSnapshotFormatVersion;
+}
+
+extern "C" uint32_t ignis_seq_snapshot_format_version_for_kv(int32_t kv_format) {
+  // Previous NVFP4 images have no BF16 residual planes or validity words.
+  return kv_format == IGNIS_KV_FORMAT_NVFP4 ? 6 : kIgnisSeqSnapshotFormatVersion;
 }
 
 extern "C" uint32_t ignis_seq_pool_snapshot_format_version(const struct ignis_seq_pool *pool) {

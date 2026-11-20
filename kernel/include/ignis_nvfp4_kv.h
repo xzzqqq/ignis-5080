@@ -12,6 +12,10 @@ bool nvfp4_cache(const ninfer::PagedKVBatchLayerView &cache);
 std::size_t nvfp4_attention_workspace_bytes(std::uint32_t max_keys, std::int32_t tokens,
                                             std::int32_t batch = 1);
 void nvfp4_prepare();
+void nvfp4_store_window(const ninfer::Tensor &k, const ninfer::Tensor &v,
+                        const ninfer::Tensor &positions, const ninfer::Tensor &valid,
+                        const ninfer::Tensor &rows, ninfer::PagedKVBatchLayerView cache,
+                        bool publish, cudaStream_t stream);
 // T<=8 uses variable-valid M48 per lane; wider calls use FP32-carry bands.
 void nvfp4_attention(const ninfer::Tensor &q, const ninfer::Tensor &k,
                      const ninfer::Tensor &v, const ninfer::Tensor &positions,

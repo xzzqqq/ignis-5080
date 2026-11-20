@@ -257,6 +257,7 @@ pub(crate) mod ffi {
         pub fn ignis_seq_pending_token(seq: *const IgnisSeq) -> i32;
 
         pub fn ignis_seq_snapshot_format_version() -> u32;
+        pub fn ignis_seq_snapshot_format_version_for_kv(format: i32) -> u32;
         pub fn ignis_seq_pool_snapshot_format_version(pool: *const IgnisSeqPool) -> u32;
 
         pub fn ignis_seq_snapshot_size(
@@ -496,6 +497,11 @@ pub const NO_HOST_ROOM: i32 = crate::scheduler::NO_HOST_ROOM;
 /// reinterpreted.
 pub fn snapshot_format_version() -> u32 {
     unsafe { ffi::ignis_seq_snapshot_format_version() }
+}
+
+/// Snapshot layout for the 27B model under the selected KV format.
+pub fn snapshot_format_version_for_kv(format: KvFormat) -> u32 {
+    unsafe { ffi::ignis_seq_snapshot_format_version_for_kv(format.abi_code()) }
 }
 
 /// A refused or failed state transfer: the leaf's return code plus the

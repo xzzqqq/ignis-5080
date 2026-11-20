@@ -37,6 +37,37 @@ as a run's successor only after a stop (all 200 of the 2026-09-24 turns end at o
 | `tree.py` | Lever 3: a best-first token tree of N nodes from the drafter's own lattice, its expected accepted length along the recorded chain. |
 | `lever1.py` | Lever 1: adaptive extent at 8 lanes from `per_round.npz` and the width-cost curve (`crates/runtime/examples/verify_width_cost.rs`). |
 
+## Explicit KV comparisons and archived inputs
+
+The historical defaults stay HQ KV, context 262,144 and the historical body-specific
+lane/chunk limits above. They no longer track the current server profile.
+Both examples additionally accept `--kv-format bf16|hq-e8-2b|nvfp4` and
+`--max-context N`. These flags change only the example load: they do not change
+product defaults, the 9,520-byte record format or forced-round arithmetic. A job
+plus its final full verify window must fit the explicit context; oversized jobs
+are refused rather than truncated. A plan that does not fit VRAM is still refused.
+
+Use a separate output directory for every arm. Before loading CUDA,
+`dflash2_replay` writes or checks `run-config.json`, containing the existing
+`Reader::content_hash` artifact-directory identity, SHA-256 of the complete input
+manifest, and the actual KV/context/lane/chunk/window/RoPE/budget shape. The
+artifact identity is **structural**, not a new hash of multi-GB weight payloads.
+A different identity, corrupt identity, or legacy nonempty directory without an
+identity is refused; preserve historical output and use a fresh directory.
+Resuming another `FIRST_JOB`/`LAST_JOB` selection under the same complete manifest
+and shape remains supported. Pin/hash the recovered `.tok`/`.cat` inputs separately
+and keep them immutable: a manifest hash alone does not authenticate external files
+whose hashes were never recorded in that manifest.
+
+The September/October token streams, exact quality windows and prompt bodies are
+untracked archives. The presence of these tools or a historical finding does not
+mean those datasets are present on a new checkout. The 2026-11-20 bounded inventory
+found no original replay or standard quality dataset in the local checkout or
+known remote scratch roots. Restoring and pinning an accessible original archive
+is required before calling a new run a reproduction of the historical 200 turns.
+`select.py` still requires the original copy-drafting source dataset; it cannot
+recreate private recorded traffic from repository text.
+
 ## Running it
 
 ```sh

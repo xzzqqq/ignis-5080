@@ -366,7 +366,19 @@ int32_t run_gqa_layer(ignis_model *model, ignis_seq_pool *pool, ignis_seq *seq,
           rotated_query_heads, rotated_key_heads, value_heads, positions,
           ninfer::Tensor{}, kv_table_rows, gate.view({kHeadDim,kQHeads,tokens,1}),
           attention_scale, batch_cache, envelope, attention_workspace, attention_heads, stream));
-      readout(nullptr);
+      if (attention_readout) {
+        IgnisHqPromptKeys keys{};
+        keys.start = start_position;
+        keys.width = tokens;
+        keys.new_k = rotated_key_heads.data;
+        keys.residual_k = batch_cache.residual_k.data;
+        keys.ring_valid = static_cast<const std::uint32_t *>(batch_cache.ring_valid.data);
+        readout_failed = ignis_attention_readout_run(*attention_readout, rotated_query.data,
+            kQHeads, kKvHeads, tokens, envelope.max_visible_keys, batch_cache, &keys,
+            attention_scale, stream, &readout_error) != 0;
+      }
+      ignis::nvfp4_store_window(rotated_key_heads, value_heads, positions, {}, kv_table_rows,
+          batch_cache, gqa_layer + 1 == pool->kv_num_layers, stream);
     } else if (hq_prompt) {
       IgnisHqPromptOptions options;
       options.precision = model->prefill_attention == IGNIS_PREFILL_ATTENTION_FP16
@@ -663,6 +675,9 @@ int32_t run_gqa_layer_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t l
         rotated_query_heads, rotated_key_heads, value_heads, positions_rows, valid_columns,
         kv_table_rows, gate.view({kHeadDim, kQHeads, lane_tokens, batch}), attention_scale,
         batch_cache, envelope, attention_workspace, attention_heads, stream));
+    if (pool->kv_format == IGNIS_KV_FORMAT_NVFP4)
+      ignis::nvfp4_store_window(rotated_key_heads, value_heads, positions_rows, valid_columns,
+          kv_table_rows, batch_cache, gqa_layer + 1 == pool->kv_num_layers, stream);
     ignis::lab_gqa_after(*model, lab_ticket, attention_heads, stream);
 
     ninfer::Tensor residual(out_residual, ninfer::DType::BF16, {hidden, columns, 1, 1});

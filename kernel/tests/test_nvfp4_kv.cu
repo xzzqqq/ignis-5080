@@ -1,8 +1,8 @@
 // Ignis-owned NVFP4 format and route regression. No model/artifact is required.
 // The codec oracle below uses scalar host tables, not CUDA FP4/FP8 conversion.
-// Numeric route cases use exactly representable decoded BF16 K/V and QK=0:
-// causal attention is an analytic prefix mean. Its tolerance follows the
-// BF16 normalized-split rounding bound, not BF16-vs-quantized model agreement.
+// Numeric route cases use exactly representable decoded BF16 K/V: analytic
+// prefix means and signed two-class softmax cover zero and dense nonzero QK.
+// Tolerances budget arithmetic rounding, not BF16-vs-quantized model agreement.
 // Missing GPU, launch errors and nonfinite results fail; no skip path.
 #include "ignis_nvfp4_kv.h"
 #include "../src/nvfp4_xqa.h"
@@ -454,6 +454,178 @@ void all_scale_groups_have_analytic_scores(cudaStream_t stream) {
   MOE_CUDA(cudaStreamSynchronize(stream));verify("band all16SF/same Q/new maximum");
 }
 
+// Dense K/Q exercises every K32 part and both SF halfwords. V uses a distinct
+// E4M3 scale for each (head,class,G16), and permuted signed E2M1 codes across
+// all16 coordinates. E2M1 has only15 numerical values (signed zero aliases), so
+// coordinate identity is checked by its pair of A/B values, not one class alone.
+void heterogeneous_values_and_dense_scores(cudaStream_t stream) {
+  constexpr int keys=20000,tokens=8,span=16384;
+  const auto second=[](int position){return position>=16384 && (position&1);};
+  using Row=std::array<std::uint16_t,D>;
+  std::array<std::array<Row,H>,2> key_rows{},value_rows{};
+  const auto kscale=[](int g,int h){return std::ldexp(1.f,((g*5+h*3)&15)-7);};
+  for(int b=0;b<2;++b)for(int h=0;h<H;++h) {
+    std::array<bool,127> seen{};
+    for(int g=0;g<16;++g) {
+      const int sf=8+(g*7+h*23+b*41)%118;
+      check(!seen[sf],"heterogeneous V: distinct SF in all16 groups");seen[sf]=true;
+      for(int r=0;r<16;++r) {
+        const int d=g*16+r,kc=1+(r+3*g+h)%7;
+        const float sign=((r+g+h)&1)?-1.f:1.f;
+        key_rows[b][h][d]=f32_to_bf16((b?1.f:-1.f)*sign*levels[kc]*kscale(g,h));
+        const int vc=((r*5+g*3+h)+(b?3:0))&15;
+        value_rows[b][h][d]=f32_to_bf16((vc&8?-1.f:1.f)*levels[vc&7]*sf_value(sf));
+      }
+    }
+    const auto ek=encode(key_rows[b][h].data()),ev=encode(value_rows[b][h].data());
+    for(int d=0;d<D;++d) {
+      check(decoded(ek,d)==key_rows[b][h][d],"dense K: independent codec exactness");
+      check(decoded(ev,d)==value_rows[b][h][d],"heterogeneous V: independent codec exactness");
+    }
+  }
+  for(int h=0;h<H;++h)for(int g=0;g<16;++g)for(int r=0;r<16;++r)for(int j=0;j<r;++j)
+    check(bf16_to_f32(value_rows[0][h][g*16+r])!=bf16_to_f32(value_rows[0][h][g*16+j]) ||
+          bf16_to_f32(value_rows[1][h][g*16+r])!=bf16_to_f32(value_rows[1][h][g*16+j]),
+          "A/B V pair distinguishes every intra-group coordinate including signed zeros");
+  Cache cache(keys);
+  std::vector<std::uint16_t> history_k(std::size_t(keys)*H*D),history_v(history_k.size());
+  std::vector<std::int32_t> positions(keys);std::iota(positions.begin(),positions.end(),0);
+  for(int t=0;t<keys;++t)for(int h=0;h<H;++h) {
+    const int b=second(t);const auto at=(std::size_t(t)*H+h)*D;
+    std::copy(key_rows[b][h].begin(),key_rows[b][h].end(),history_k.begin()+at);
+    std::copy(value_rows[b][h].begin(),value_rows[b][h].end(),history_v.begin()+at);
+  }
+  DeviceBytes hk(history_k.size()*2),hv(history_v.size()*2),hp(positions.size()*4),hr(4);
+  upload(hk,history_k);upload(hv,history_v);upload(hp,positions);upload(hr,std::vector<std::int32_t>{1});
+  ignis::nvfp4_append(ninfer::Tensor(hk.p,ninfer::DType::BF16,{D,H,keys,1}),
+      ninfer::Tensor(hv.p,ninfer::DType::BF16,{D,H,keys,1}),ninfer::Tensor(hp.p,ninfer::DType::I32,{keys,1}),
+      ninfer::Tensor{},ninfer::Tensor(hr.p,ninfer::DType::I32,{1}),cache.view,stream);
+  MOE_CUDA(cudaStreamSynchronize(stream));
+  Inputs input(tokens,1);std::vector<std::uint16_t> q(tokens*QH*D);
+  std::array<std::array<std::array<double,2>,QH>,tokens> scores{};
+  for(int t=0;t<tokens;++t)for(int h=0;h<QH;++h)for(int g=0;g<16;++g)for(int r=0;r<16;++r) {
+    const int d=g*16+r,tag=1+(r+3*t+h+5*g)%16;
+    float sign=std::signbit(bf16_to_f32(key_rows[1][h/6][d]))?-1.f:1.f;
+    if((r+2*g+t+h)%4==0)sign=-sign;
+    const auto at=(t*QH+h)*D+d;
+    q[at]=f32_to_bf16(sign*tag/(256.f*kscale(g,h/6)));
+    check(bf16_to_f32(q[at])!=0,"all256 Q dimensions are active");
+    // Scalar logical-coordinate F64 dot; no GPU lane/part/SF-address mapping.
+    for(int b=0;b<2;++b)scores[t][h][b]+=double(bf16_to_f32(q[at]))*bf16_to_f32(key_rows[b][h/6][d])*.0625;
+  }
+  for(const auto &row:scores)for(const auto &head:row)
+    check(head[1]>0 && head[1]<1 && head[0]==-head[1],"moderate signed dense logits/new band maximum");
+  upload(input.q,q);upload(input.k,std::vector<std::uint16_t>(history_k.end()-tokens*H*D,history_k.end()));
+  upload(input.v,std::vector<std::uint16_t>(history_v.end()-tokens*H*D,history_v.end()));
+  upload(input.positions,std::vector<std::int32_t>(positions.end()-tokens,positions.end()));
+  upload(input.valid,std::vector<std::int32_t>{tokens});upload(input.rows,std::vector<std::int32_t>{1});
+  const auto verify=[&](const char *label){
+    const auto actual=download<std::uint16_t>(input.out.p,input.out.bytes/2);std::size_t wrong=0;double maximum=0;
+    constexpr double uBF=1./256,uF=1./16777216;
+    for(int t=0;t<tokens;++t)for(int h=0;h<QH;++h) {
+      const int count=keys-tokens+t+1,b=std::max(0,count/2-8192),a=count-b;
+      const double wa=std::exp(scores[t][h][0]-scores[t][h][1]),wb=1.,z=a*wa+b*wb;
+      const double steps=4.*count+200.,gamma=steps*uF/(1.-steps*uF);
+      // Signed columns may cancel. Bound absolute error by their weighted
+      // absolute magnitude, rather than relative error to a near-zero answer.
+      // BF16 P perturbation (numerator + denominator), split/final BF16 stores,
+      // and conservative FP32 summation are budgeted before observing the GPU.
+      const double budget=(1.+2.*uBF/(1.-uBF))*std::pow(1.+uBF,2)*(1.+gamma)-1.;
+      for(int d=0;d<D;++d) {
+        const double va=bf16_to_f32(value_rows[0][h/6][d]),vb=bf16_to_f32(value_rows[1][h/6][d]);
+        const double expected=(a*wa*va+b*wb*vb)/z;
+        const double magnitude=(a*wa*std::abs(va)+b*wb*std::abs(vb))/z;
+        const double observed=bf16_to_f32(actual[(t*QH+h)*D+d]),error=std::abs(observed-expected);
+        maximum=std::max(maximum,error);wrong+=!std::isfinite(observed)||error>budget*magnitude;
+      }
+    }
+    std::printf("%s: max_abs %.9g, wrong %zu\n",label,maximum,wrong);
+    check(wrong==0,std::string(label)+": independent signed two-class F64 reference");
+  };
+  ninfer::DeviceArena arena(ignis::nvfp4_attention_workspace_bytes(keys,tokens,1));
+  input.run(cache,arena,keys,stream);MOE_CUDA(cudaStreamSynchronize(stream));verify("XQA heterogeneous V/dense signed QK");
+  // Run the same decoded cache and identical Q through the independent band
+  // consumer, carrying FP32 state over the16K boundary, against the same formula.
+  arena.reset();const auto kb=arena.alloc(ninfer::DType::BF16,{D,span,H}),vb=arena.alloc(ninfer::DType::BF16,{D,span,H});
+  const auto ca=arena.alloc(ninfer::DType::FP32,{D,QH,tokens}),cm=arena.alloc(ninfer::DType::FP32,{tokens,QH}),cl=arena.alloc(ninfer::DType::FP32,{tokens,QH});
+  MOE_CUDA(cudaMemsetAsync(ca.data,0xFF,ca.bytes(),stream));MOE_CUDA(cudaMemsetAsync(cm.data,0xFF,cm.bytes(),stream));MOE_CUDA(cudaMemsetAsync(cl.data,0xFF,cl.bytes(),stream));
+  for(int begin=0;begin<keys;begin+=span) {
+    ignis::nvfp4_decode_band(cache.view,input.rows.as<std::int32_t>(),input.positions.as<std::int32_t>(),input.valid.as<std::int32_t>(),0,tokens,begin,span,kb.data,vb.data,stream);
+    const IgnisNv4PrefillBand band{input.q.p,kb.data,vb.data,input.positions.as<std::int32_t>(),input.valid.as<std::int32_t>(),input.out.p,
+      static_cast<float*>(ca.data),static_cast<float*>(cm.data),static_cast<float*>(cl.data),tokens,begin,std::min(begin+span,keys),span,begin+span<keys,.0625f};
+    ignis_nv4_prefill_band(band,stream);
+  }
+  MOE_CUDA(cudaStreamSynchronize(stream));verify("band heterogeneous V/dense signed QK");
+}
+
+// Zero-coded pages and distinct BF16 rows expose accidental codec reads,
+// stale ring aliases and MMA lane/fragment swaps. Slot 0 stays poisoned.
+void mixed_window(cudaStream_t stream) {
+  constexpr int start = 647, capacity = 704, rows = 544;
+  Cache cache(capacity);
+  for (auto *p : {&cache.k, &cache.v, &cache.ks, &cache.vs})
+    MOE_CUDA(cudaMemsetAsync(p->p, 0, p->bytes, stream));
+  DeviceBytes sk(2 * rows * H * D * 2), sv(sk.bytes), bits(2 * 16 * 4);
+  cache.view.residual_k = ninfer::Tensor(sk.p, ninfer::DType::BF16, {D,H,rows,2});
+  cache.view.residual_v = ninfer::Tensor(sv.p, ninfer::DType::BF16, {D,H,rows,2});
+  cache.view.ring_valid = ninfer::Tensor(bits.p, ninfer::DType::I32, {16,2});
+  MOE_CUDA(cudaMemsetAsync(sk.p, 0xff, sk.bytes, stream));
+  MOE_CUDA(cudaMemsetAsync(sv.p, 0xff, sv.bytes, stream));
+  MOE_CUDA(cudaMemsetAsync(bits.p, 0, bits.bytes, stream));
+  auto coordinate = [](int pos, int h, int d, bool value) {
+    const int tag = value ? (d * 7 + pos * 11 + h) % 31 : (d * 3 + pos * 5 + h) % 17;
+    return float(tag + 1) / 16;
+  };
+  auto fill = [&](Inputs &x, int begin) {
+    std::vector<std::uint16_t> k(x.k.bytes/2), v(k.size());
+    for (int t=0; t<x.tokens; ++t) for (int h=0; h<H; ++h) for (int d=0; d<D; ++d) {
+      auto at = (t*H+h)*D+d;
+      k[at]=f32_to_bf16(coordinate(begin+t,h,d,false));
+      v[at]=f32_to_bf16(coordinate(begin+t,h,d,true));
+    }
+    x.update({begin+x.tokens},{x.tokens});
+    upload(x.k,k); upload(x.v,v);
+  };
+  Inputs history(start,1);
+  fill(history,0);
+  ignis::nvfp4_store_window({history.k.p,ninfer::DType::BF16,{D,H,start,1}},
+      {history.v.p,ninfer::DType::BF16,{D,H,start,1}},
+      {history.positions.p,ninfer::DType::I32,{start,1}}, {},
+      {history.rows.p,ninfer::DType::I32,{1}},cache.view,true,stream);
+  MOE_CUDA(cudaStreamSynchronize(stream));
+  // Invalidate 32 recent positions as after a speculative reject.
+  MOE_CUDA(cudaMemsetAsync(bits.as<std::uint32_t>()+16+6,0,4,stream));
+  for (int tokens : {8,9}) {
+    Inputs x(tokens,1);
+    fill(x,start);
+    std::vector<std::uint16_t> q(x.q.bytes/2,0);
+    for(int t=0;t<tokens;++t) for(int h=0;h<QH;++h)
+      q[(t*QH+h)*D+(t*29+h*7)%D]=f32_to_bf16(32.f);
+    upload(x.q,q);
+    ninfer::DeviceArena arena(ignis::nvfp4_attention_workspace_bytes(capacity,tokens,1));
+    x.run(cache,arena,capacity,stream);
+    MOE_CUDA(cudaStreamSynchronize(stream));
+    const auto actual=download<std::uint16_t>(x.out.p,x.out.bytes/2);
+    double worst=0;
+    for(int t=0;t<tokens;++t) for(int h=0;h<QH;++h) {
+      double sum=0;
+      std::array<double,D> accum{};
+      for(int pos=0;pos<=start+t;++pos) {
+        const bool exact=pos<32 || pos>=start ||
+            (pos>=start-512 && (pos%512)/32!=6);
+        const double weight=exact?std::exp(2.*coordinate(pos,h/6,(t*29+h*7)%D,false)):1.;
+        sum+=weight;
+        if(exact) for(int d=0;d<D;++d) accum[d]+=weight*coordinate(pos,h/6,d,true);
+      }
+      for(int d=0;d<D;++d) {
+        const double got=bf16_to_f32(actual[(t*QH+h)*D+d]);
+        worst=std::max(worst,std::isfinite(got)?std::abs(got-accum[d]/sum):1e9);
+      }
+    }
+    std::printf("mixed window T%d max absolute error %g\n",tokens,worst);
+    check(worst<.012,"mixed window FP64 reference");
+  }
+}
 void checkpoint_four_plane_copy() {
   ignis_seq_pool_spec spec{};spec.num_kv_heads=4;spec.head_dim=256;spec.kv_format=IGNIS_KV_FORMAT_NVFP4;
   spec.kv_page_group_count=16;spec.max_context_tokens=192;spec.slot_count=3;
@@ -470,9 +642,17 @@ void checkpoint_four_plane_copy() {
     const auto &plane=pool->kv_pool.plane(i);std::vector<std::uint8_t> pattern(plane.nb[3],std::uint8_t(31+i));
     MOE_CUDA(cudaMemcpy(static_cast<char*>(plane.data)+page*plane.nb[3],pattern.data(),pattern.size(),cudaMemcpyHostToDevice));before.push_back(pattern);
   }
+  const std::size_t residual_bytes = pool->hq_residual_plane_bytes();
+  const std::vector<std::uint8_t> side(residual_bytes, 0x37);
+  MOE_CUDA(cudaMemcpy(pool->hq_residual_plane(true,0,source->slot),side.data(),side.size(),cudaMemcpyHostToDevice));
+  MOE_CUDA(cudaMemset(pool->hq_ring_words(source->slot), 0xad, 64));
   ok(ignis_seq_checkpoint_capture(pool,source,65,0,&checkpoint),"NV4 checkpoint capture");
   for(std::size_t i=0;i<pool->kv_pool.plane_count();++i){const auto &p=pool->kv_pool.plane(i);MOE_CUDA(cudaMemset(static_cast<char*>(p.data)+page*p.nb[3],0xEE,p.nb[3]));}
   ok(ignis_seq_alloc_from_checkpoint(pool,192,checkpoint,&claim),"NV4 checkpoint claim");
+  check(download<std::uint8_t>(pool->hq_residual_plane(true,0,claim->slot),side.size())==side,
+        "NV4 checkpoint restores BF16 side plane");
+  check(download<std::uint8_t>(pool->hq_ring_words(claim->slot),64)==std::vector<std::uint8_t>(64,0xad),
+        "NV4 checkpoint restores validity");
   const auto restored=claim->kv.page_ids()[0];
   check(restored!=page,"checkpoint tail is physically distinct");
   for(std::size_t i=0;i<pool->kv_pool.plane_count();++i){const auto &p=pool->kv_pool.plane(i);check(download<std::uint8_t>(static_cast<char*>(p.data)+restored*p.nb[3],p.nb[3])==before[i],"NV4 checkpoint copies all code/scale planes");}
@@ -482,7 +662,7 @@ void checkpoint_four_plane_copy() {
 int main() {
   try {
     MOE_CUDA(cudaSetDevice(0));cudaStream_t stream=nullptr;MOE_CUDA(cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking));
-    codec_scatter_and_unselected_bytes(stream);dynamic_graph_and_bands(stream);nonuniform_score_scale_and_rescale(stream);all_scale_groups_have_analytic_scores(stream);checkpoint_four_plane_copy();
+    codec_scatter_and_unselected_bytes(stream);dynamic_graph_and_bands(stream);nonuniform_score_scale_and_rescale(stream);all_scale_groups_have_analytic_scores(stream);heterogeneous_values_and_dense_scores(stream);mixed_window(stream);checkpoint_four_plane_copy();
     MOE_CUDA(cudaStreamDestroy(stream));
   }catch(const std::exception &error){std::fprintf(stderr,"FATAL NV4 regression: %s\n",error.what());return 1;}
   std::printf("nvfp4 KV regression: %s\n",g_failed?"FAILED":"ok");return g_failed?1:0;

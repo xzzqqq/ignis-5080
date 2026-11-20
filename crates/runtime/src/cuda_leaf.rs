@@ -28,7 +28,7 @@ use ignis_core::model_load::{self, Model as CoreModel};
 use ignis_core::seq::{
     HostPinnedPool, PinnedAllocError, PinnedBuffer, Seq, SeqCheckpoint, SeqPool, SeqPoolBudget,
     SeqPrefix, Window,
-    snapshot_format_version,
+    snapshot_format_version_for_kv,
 };
 use ignis_core::step;
 use ignis_core::{
@@ -826,7 +826,7 @@ impl StepLeaf for CudaLeaf {
     fn blob_identity(&self) -> BlobIdentity {
         self.config.blob_identity(
             ArtifactHash::from_bytes(self.reader.content_hash()),
-            snapshot_format_version(),
+            snapshot_format_version_for_kv(self.config.kv_format),
         )
     }
 
