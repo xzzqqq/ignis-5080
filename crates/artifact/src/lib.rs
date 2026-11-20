@@ -259,6 +259,7 @@ pub enum StorageLayout {
     ContiguousLeV1,
     RowSplitK128V1,
     BlockScaleK16M128x4V1,
+    Nvfp4Mma16V1,
     RowScaleV1,
     /// One Flash-Next expert projection: trellis plane, `suh`, `svh`, zero
     /// padding to 4096 ([`trellis_geometry`]).
@@ -274,6 +275,7 @@ impl StorageLayout {
             Self::ContiguousLeV1 => "contiguous-le-v1",
             Self::RowSplitK128V1 => "row-split-k128-v1",
             Self::BlockScaleK16M128x4V1 => "blockscale-k16-m128x4-v1",
+            Self::Nvfp4Mma16V1 => "nvfp4-mma16-v1",
             Self::RowScaleV1 => "row-scale-v1",
             Self::TrellisTile16V1 => "trellis-tile16-v1",
             Self::RowInterleavedV1 => "row-interleaved-v1",
@@ -285,6 +287,7 @@ impl StorageLayout {
             "contiguous-le-v1" => Self::ContiguousLeV1,
             "row-split-k128-v1" => Self::RowSplitK128V1,
             "blockscale-k16-m128x4-v1" => Self::BlockScaleK16M128x4V1,
+            "nvfp4-mma16-v1" => Self::Nvfp4Mma16V1,
             "row-scale-v1" => Self::RowScaleV1,
             "trellis-tile16-v1" => Self::TrellisTile16V1,
             "row-interleaved-v1" => Self::RowInterleavedV1,
@@ -322,6 +325,7 @@ pub fn tensor_alignment(layout: StorageLayout) -> u64 {
         StorageLayout::TrellisTile16V1 | StorageLayout::RowInterleavedV1 => DIRECT_IO_ALIGNMENT,
         StorageLayout::ContiguousLeV1
         | StorageLayout::RowSplitK128V1
+        | StorageLayout::Nvfp4Mma16V1
         | StorageLayout::BlockScaleK16M128x4V1
         | StorageLayout::RowScaleV1 => TENSOR_ALIGNMENT,
     }
@@ -474,7 +478,7 @@ pub fn tensor_encoded_size(
             require_rank2("row-split-k128-v1", shape)?;
             Ok(row_split_geometry(format, shape)?.encoded_bytes)
         }
-        StorageLayout::BlockScaleK16M128x4V1 => {
+        StorageLayout::Nvfp4Mma16V1 | StorageLayout::BlockScaleK16M128x4V1 => {
             Ok(block_scale_geometry(format, shape)?.encoded_bytes)
         }
         StorageLayout::RowScaleV1 => {
@@ -593,13 +597,13 @@ pub fn row_split_geometry(format: NumericFormat, shape: &[u64]) -> Result<RowSpl
 /// E4M3FN scale plane, and a trailing little-endian FP32 weight divisor.
 pub fn block_scale_geometry(format: NumericFormat, shape: &[u64]) -> Result<BlockScaleGeometry> {
     if format != NumericFormat::Nvfp4 {
-        return Err(fail("blockscale-k16-m128x4-v1 requires NVFP4"));
+        return Err(fail("NVFP4 plane geometry requires NVFP4 format"));
     }
-    require_rank2("blockscale-k16-m128x4-v1", shape)?;
+    require_rank2("NVFP4 plane geometry", shape)?;
     let (rows, columns) = (shape[0], shape[1]);
     if rows % 128 != 0 || columns % 64 != 0 {
         return Err(fail(
-            "blockscale-k16-m128x4-v1 requires N divisible by 128 and K divisible by 64",
+            "NVFP4 plane geometry requires N divisible by 128 and K divisible by 64",
         ));
     }
     let groups_per_row = columns / 16;

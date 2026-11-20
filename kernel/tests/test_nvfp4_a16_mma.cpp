@@ -37,6 +37,7 @@
 // ADR 0006 / docs/agents/testing.md: no SKIP_RETURN_CODE, so a missing or
 // busy GPU fails this test rather than skipping it.
 
+#include "ignis_model.h"
 #include "ignis_nvfp4_a16_mma.h"
 
 #include "ninfer/ops/linear.h"
@@ -177,8 +178,140 @@ int check_dispatch(std::int32_t n, std::int32_t k, std::int32_t t, bool expect_m
     return failures;
 }
 
+// Use an independent host traversal of logical rows to encode the same weight
+// in both layouts. Compare every active output and the first inactive column.
+int check_packed_swiglu() {
+  constexpr int rows = 128, k = 128;
+  auto weight = make_nvfp4_weight(2 * rows, k, 8123U);
+  auto packed = weight.payload;
+  for (int row = 0; row < 2 * rows; ++row) {
+    for (int g = 0; g < k / 16; ++g) {
+      const int tile = row / 16 * (k / 16) + g;
+      for (int b = 0; b < 8; ++b) {
+        const int lane = (row % 8) * 4 + b % 4;
+        packed[tile * 128 + lane * 4 + 2 * (b / 4) + row % 16 / 8] =
+            weight.payload[row * k / 2 + g * 8 + b];
+      }
+      const int source = (row / 128 * (k / 64) + g / 4) * 512 +
+                         (row % 32) * 16 + row % 128 / 32 * 4 + g % 4;
+      packed[weight.scale_plane_offset + tile * 16 + row % 16] =
+          weight.payload[weight.scale_plane_offset + source];
+    }
+  }
+  DeviceBytes original(weight.payload.size()), tiled(packed.size()),
+      input(k * 16 * 2);
+  cuda_ok(cudaMemcpy(original.p, weight.payload.data(), weight.payload.size(),
+                     cudaMemcpyHostToDevice),
+          "weight");
+  cuda_ok(
+      cudaMemcpy(tiled.p, packed.data(), packed.size(), cudaMemcpyHostToDevice),
+      "packed weight");
+  std::vector<uint16_t> x(k * 16);
+  for (size_t i = 0; i < x.size(); ++i)
+    x[i] = 0x3c00 + (i * 71 % 1024);
+  cuda_ok(cudaMemcpy(input.p, x.data(), x.size() * 2, cudaMemcpyHostToDevice),
+          "input");
+  auto src = weight.device_weight(original.p),
+       dst = weight.device_weight(tiled.p);
+  dst.layout = static_cast<QuantLayout>(IGNIS_LAYOUT_NVFP4_MMA16);
+  DeviceBytes reference(rows * 16 * 2), actual(rows * 17 * 2);
+  for (int t : {1, 7, 8, 9, 15, 16}) {
+    int padded = t <= 8 ? 8 : 16;
+    Tensor full(input.p, DType::BF16, {k, padded}),
+        ref(reference.p, DType::BF16, {rows, padded});
+    Tensor active(input.p, DType::BF16, {k, t}),
+        out(actual.p, DType::BF16, {rows, t});
+    ignis_dflash2_small_mma(full, src, ref, true, nullptr);
+    cuda_ok(cudaMemset(actual.p, 0xa5, rows * 17 * 2), "guard");
+    ignis_dflash2_packed_swiglu(active, dst, out, nullptr);
+    std::vector<uint16_t> expected(rows * (t + 1), 0xa5a5),
+        got(expected.size());
+    cuda_ok(cudaMemcpy(expected.data(), reference.p, rows * t * 2,
+                       cudaMemcpyDeviceToHost),
+            "reference");
+    cuda_ok(cudaMemcpy(got.data(), actual.p, got.size() * 2,
+                       cudaMemcpyDeviceToHost),
+            "packed output");
+    if (expected != got)
+      throw std::runtime_error("packed SwiGLU or tail guard differs at T=" +
+                               std::to_string(t));
+    if (t == 7) {
+      try {
+        ignis_dflash2_small_mma(active, src, out, true, nullptr);
+      } catch (const std::invalid_argument &) {
+        continue;
+      }
+      throw std::runtime_error("small MMA accepted T=7");
+    }
+  }
+  return 0;
+}
+
+int check_kv_rows() {
+  constexpr int n = 6144, k = 5120;
+  auto host = make_nvfp4_weight(n, k, 505U);
+  DeviceBytes weights(host.payload.size()), x(k * 128 * 2), full(n * 128 * 2),
+      key(1024 * 128 * 2), value(1024 * 128 * 2);
+  cuda_ok(cudaMemcpy(weights.p, host.payload.data(), host.payload.size(),
+                     cudaMemcpyHostToDevice),
+          "weight");
+  auto w = host.device_weight(weights.p);
+  std::vector<uint16_t> inputs(k * 128);
+  for (size_t i = 0; i < inputs.size(); ++i)
+    inputs[i] = 0x3d00 + (i * 79 % 850);
+  cuda_ok(
+      cudaMemcpy(x.p, inputs.data(), inputs.size() * 2, cudaMemcpyHostToDevice),
+      "input");
+  for (int t : {1, 7, 8, 16, 33, 64, 128}) {
+    Tensor in(x.p, DType::BF16, {k, t}), all(full.p, DType::BF16, {n, t});
+    Tensor keys(key.p, DType::BF16, {1024, t}),
+        values(value.p, DType::BF16, {1024, t});
+    // Match the reduction order of the candidate, including its 32-column SIMT
+    // chunks.
+    if (t < 128)
+      ops::detail::nvfp4_dispatch(in, w, all, kPolicy, nullptr, nullptr);
+    else
+      ops::linear(in, w, all, nullptr);
+    ignis_dflash2_project_kv(in, w, keys, values, nullptr);
+    std::vector<uint16_t> qkv(n * t), kv(1024 * t);
+    cuda_ok(
+        cudaMemcpy(qkv.data(), full.p, qkv.size() * 2, cudaMemcpyDeviceToHost),
+        "reference");
+    if (t == 8 || t == 16) {
+      ignis_dflash2_small_mma(in, w, all, false, nullptr);
+      std::vector<uint16_t> got(n * t);
+      cuda_ok(cudaMemcpy(got.data(), full.p, got.size() * 2,
+                         cudaMemcpyDeviceToHost),
+              "small MMA output");
+      double error = 0, norm = 0;
+      for (size_t i = 0; i < got.size(); ++i) {
+        __nv_bfloat16 actual, expected;
+        std::memcpy(&actual, &got[i], 2);
+        std::memcpy(&expected, &qkv[i], 2);
+        double reference = __bfloat162float(expected);
+        double delta = __bfloat162float(actual) - reference;
+        error += delta * delta;
+        norm += reference * reference;
+      }
+      if (!(norm > 0 && error <= norm / 65536))
+        throw std::runtime_error("small MMA exceeds BF16 tolerance");
+    }
+    for (int h = 0; h < 2; ++h) {
+      cuda_ok(cudaMemcpy(kv.data(), h ? value.p : key.p, kv.size() * 2,
+                         cudaMemcpyDeviceToHost),
+              "KV");
+      for (int col = 0; col < t; ++col)
+        if (std::memcmp(kv.data() + col * 1024,
+                        qkv.data() + col * n + 4096 + h * 1024, 2048))
+          throw std::runtime_error("KV slice differs at T=" +
+                                   std::to_string(t));
+    }
+  }
+  return 0;
+}
+
 int run_nvfp4_a16_mma() {
-    int failures = check_route_selection();
+    int failures = check_route_selection() + check_kv_rows() + check_packed_swiglu();
 
     failures += check_dispatch(6144, 5120, 63, false);
     failures += check_dispatch(6144, 5120, 64, true);

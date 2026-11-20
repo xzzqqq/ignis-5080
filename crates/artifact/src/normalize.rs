@@ -5,7 +5,7 @@
 //! **The rule (mixed-quant materialization / normalization — NOT a blanket
 //! dequant):**
 //!
-//! - **NVFP4** (`blockscale-k16-m128x4-v1`): **preserved** — the packed E2M1
+//! - **NVFP4** (`blockscale-k16-m128x4-v1` or `nvfp4-mma16-v1`): **preserved** — the packed E2M1
 //!   code plane, the E4M3FN scale plane, and the trailing FP32
 //!   `weight_divisor` (the dequant scale; the reference applies it to the
 //!   group scales as `coeff = e4m3_scale * 1/divisor`). The `ignis_nvfp4_*`
@@ -47,13 +47,15 @@ use crate::{
 /// normalization result, spec 04).
 #[derive(Debug, Clone)]
 pub enum NormalizedTensor {
-    /// NVFP4 (preserved): the packed E2M1 codes (`[m][k/2]` bytes, 2 codes
-    /// per byte), the E4M3FN group scales (`[m][k/16]` bytes, one per
+    /// NVFP4 (preserved): the packed E2M1 codes (`m*k/2` bytes, 2 codes
+    /// per byte), the E4M3FN group scales (`m*k/16` bytes, one per
     /// 16-element group), and the per-tensor FP32 `weight_divisor` (the
     /// dequant scale; the kernel applies it to the group scales as
     /// `coeff = e4m3_scale * 1/divisor`). `m` = output rows, `k` = input
     /// dim (the payload's rank-two shape).
     Nvfp4 {
+        /// Physical ordering of the preserved code and scale planes.
+        layout: StorageLayout,
         m: u64,
         k: u64,
         codes: Vec<u8>,
@@ -125,13 +127,14 @@ pub fn normalize_tensor(
 
     match (layout, format) {
         // ── NVFP4: preserved (codes + scales + weight divisor) ───────────
-        (StorageLayout::BlockScaleK16M128x4V1, NumericFormat::Nvfp4) => {
+        (StorageLayout::Nvfp4Mma16V1 | StorageLayout::BlockScaleK16M128x4V1, NumericFormat::Nvfp4) => {
             let g = block_scale_geometry(format, shape)?;
             let code_end = g.code_plane_bytes as usize;
             let scale_start = g.scale_plane_offset as usize;
             let scale_end = scale_start + g.scale_plane_bytes as usize;
             let divisor_start = g.weight_divisor_offset as usize;
             Ok(NormalizedTensor::Nvfp4 {
+                layout,
                 m: shape[0],
                 k: shape[1],
                 codes: payload[..code_end].to_vec(),
@@ -471,7 +474,8 @@ mod tests {
         )
         .expect("nvfp4 normalizes");
         match &n {
-            NormalizedTensor::Nvfp4 { m, k, codes, scales, divisor } => {
+            NormalizedTensor::Nvfp4 { layout, m, k, codes, scales, divisor } => {
+                assert_eq!(*layout, StorageLayout::BlockScaleK16M128x4V1);
                 assert_eq!((*m, *k), (128, 64));
                 // The planes are copied verbatim (the payload's exact bytes).
                 assert_eq!(codes, &payload[0..4096], "the code plane is verbatim");
@@ -484,6 +488,9 @@ mod tests {
             other => panic!("NVFP4 must normalize to its preserved planes, got {other:?}"),
         }
         assert_eq!(n.element_count(), 128 * 64);
+        let layout = StorageLayout::parse("nvfp4-mma16-v1").unwrap();
+        let packed = normalize_tensor(&[128, 64], NumericFormat::Nvfp4, layout, span(&reader, "w/nvfp4")).unwrap();
+        assert!(matches!(packed, NormalizedTensor::Nvfp4 { layout: StorageLayout::Nvfp4Mma16V1, .. }));
     }
 
     /// BF16 / FP32 / I32 (contiguous-le-v1) are preserved as-is: the raw

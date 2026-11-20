@@ -58,4 +58,12 @@ bool ignis_nvfp4_a16_mma_applies(std::int32_t output_rows, std::int32_t input_ro
 void ignis_nvfp4_a16_mma(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &out,
                          cudaStream_t stream);
 
+void ignis_dflash2_packed_swiglu(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &out, cudaStream_t stream);
+void ignis_dflash2_project_kv(const ninfer::Tensor &x, const ninfer::Weight &w,
+                              ninfer::Tensor &key, ninfer::Tensor &value,
+                              cudaStream_t stream);
+void ignis_dflash2_small_mma(const ninfer::Tensor &x, const ninfer::Weight &w,
+                             ninfer::Tensor &out, bool swiglu,
+                             cudaStream_t stream);
+
 #endif /* IGNIS_NVFP4_A16_MMA_H */

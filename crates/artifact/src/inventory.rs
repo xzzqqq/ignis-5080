@@ -534,7 +534,15 @@ pub fn model_scope_27b_of(reader: &Reader, scope: ModelScope) -> Result<Vec<Inve
             _ => None,
         })?,
     };
-    Ok(with_modules(text, scope))
+    let mut entries = with_modules(text, scope);
+    for entry in &mut entries {
+        if entry.name.starts_with("dflash2/layers/") && entry.name.ends_with("/mlp/gate_up")
+            && matches!(reader.find(entry.name), Some(Object::Tensor(t)) if t.layout == StorageLayout::Nvfp4Mma16V1)
+        {
+            entry.layout = StorageLayout::Nvfp4Mma16V1;
+        }
+    }
+    Ok(entries)
 }
 
 /// The FP8 row blocks of a BF16 exception tensor's name, or None.
@@ -1241,6 +1249,24 @@ mod tests {
         let artifact = crate::fixture::write_fixture(&objects, &vec![0u8; bytes as usize], tag).unwrap();
         let reader = Reader::open(&artifact.path).unwrap();
         (artifact, reader)
+    }
+
+    #[test]
+    fn packed_layout_is_selected_only_for_the_declared_drafter_gate_up() {
+        let name = "dflash2/layers/0/mlp/gate_up";
+        let neighbor = "dflash2/layers/0/mlp/down";
+        let objects = [name, neighbor].into_iter().enumerate().map(|(i, name)|
+            crate::fixture::FixtureObject::Tensor {
+                name, shape: vec![128,64], format: "NVFP4", layout: "nvfp4-mma16-v1",
+                offset: i as u64 * 4864, bytes: 4612,
+            }).collect::<Vec<_>>();
+        let file = crate::fixture::write_fixture(&objects, &vec![0; 4864+4612], "packed-scope").unwrap();
+        let reader = Reader::open(&file.path).unwrap();
+        let scope = ModelScope { draft: Some(DraftModule::Dflash2), ..Default::default() };
+        let entries = model_scope_27b_of(&reader, scope).unwrap();
+        let layout = |name| entries.iter().find(|e| e.name == name).unwrap().layout;
+        assert_eq!(layout(name), StorageLayout::Nvfp4Mma16V1);
+        assert_eq!(layout(neighbor), StorageLayout::BlockScaleK16M128x4V1);
     }
 
     /// GitHub #339: the body is the artifact's, read off its head's format;

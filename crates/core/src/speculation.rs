@@ -393,8 +393,7 @@ impl Speculation {
     /// What a `prefill_chunk_tokens`-wide chunk adds to the leaf's prefill
     /// scratch under this backend (`dflash2_prefill_scratch_bytes`,
     /// `kernel/src/model.cu`): the feature taps, their projection and
-    /// normalization, and one drafter layer's query/key/value parent with the
-    /// key and value rows kept from it — each at most one window of columns
+    /// normalization, and one drafter layer’s raw key, normalized key and value — each at most one window of columns
     /// wide, each rounded to the arena's alignment.
     pub fn prefill_scratch_bytes(&self, prefill_chunk_tokens: u32) -> u64 {
         // No drafter bound, nothing tapped (P5-04, GitHub #153).
@@ -411,7 +410,6 @@ impl Speculation {
             + i32(1)
             + bf16(HIDDEN * columns)
             + bf16(HIDDEN * columns)
-            + bf16((DFLASH2_QUERY_SIZE + 2 * kv_width) * columns)
             + 3 * bf16(kv_width * columns)
     }
 
@@ -464,8 +462,10 @@ impl Speculation {
                     + bf16(DFLASH2_SELECTOR_RANK * drafts)
                     + wide(DFLASH2_SELECTOR_RANK * drafts)
                     + wide(DFLASH2_SELECTOR_TOP_K * DFLASH2_SELECTOR_TOP_K * drafts);
-                let append = 2 * hidden_columns
-                    + bf16((DFLASH2_QUERY_SIZE + 2 * kv_width) * columns)
+                let packed = if lanes > 1 {
+                    bf16(DFLASH2_FEATURE_TAPS * HIDDEN * (columns - lanes)) + wide(columns - lanes)
+                } else { 0 };
+                let append = 2 * hidden_columns + packed
                     + 3 * bf16(kv_width * columns);
 
                 let features = DFLASH2_FEATURE_TAPS * HIDDEN * columns * 2;
@@ -686,9 +686,9 @@ mod tests {
     fn the_dflash2_prefill_scratch_is_bounded_by_the_window() {
         let spec = Speculation::new(SpeculativeBackend::Dflash2, 7).unwrap();
         // 128 columns, worked by hand: taps 6,553,600 + positions 512 + two
-        // scalars 256 each + projected and context 1,310,720 each + qkv
-        // 1,572,864 + key_raw, key, value 262,144 each.
-        assert_eq!(spec.prefill_scratch_bytes(128), 11_535_360);
+        // scalars 256 each + projected and context 1,310,720 each
+        // + key_raw, key, value 262,144 each.
+        assert_eq!(spec.prefill_scratch_bytes(128), 9_962_496);
         // A chunk wider than the window taps at most the window.
         assert_eq!(spec.prefill_scratch_bytes(4096), spec.prefill_scratch_bytes(2048));
         assert!(spec.prefill_scratch_bytes(1024) < spec.prefill_scratch_bytes(2048));
@@ -707,7 +707,7 @@ mod tests {
         // proposal 1,146,880; logits 27,811,840; ids 3,584 + values 1,792;
         // top-k partials 874,496 (122 row splits x 56 x 16 x 8 bytes);
         // unary 3,584 + predecessors 3,584; hidden_proj 28,672 + its FP32
-        // 57,344; scores 57,344). The append (2,490,368) is smaller. Taps
+        // 57,344; scores 57,344). The append, including cropped feature and position buffers, is smaller. Taps
         // 3,276,800, counts 32, allowance 33,554,432.
         assert_eq!(spec.round_scratch_bytes(8), 78_027_552);
         // A narrower window reserves less; the window pool does not change.

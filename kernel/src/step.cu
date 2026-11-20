@@ -2182,7 +2182,9 @@ int32_t run_verify_round(ignis_model *model, ignis_seq_pool *pool,
       if (!stage(*verify.append_counts, append_counts.data(), lane_bytes, "drafter append counts")) {
         return -1;
       }
-      ignis_dflash2_append_round(model, pool, static_cast<std::uint32_t>(batch_size));
+      ignis_dflash2_append_round(
+          model, pool, static_cast<std::uint32_t>(batch_size),
+          *std::max_element(append_counts.begin(), append_counts.end()));
       const std::size_t column_bytes =
           kDflash2TapLayers.size() * static_cast<std::size_t>(hidden) * sizeof(std::uint16_t);
       for (uint64_t i = 0; i < batch_size; ++i) {
