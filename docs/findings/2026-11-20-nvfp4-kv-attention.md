@@ -8,6 +8,16 @@
 - Related: [prior HQ block integration](2026-11-19-gqa-uniform-fp32.md), [adapted kernels](../adr/0051-kernel-code-is-ours-adapted-or-vendored.md)
 - Superseded by: none
 
+## Why we restored a BF16 window
+
+The first NVFP4 implementation quantized every K/V row before attention consumed it, including the current call’s newly computed rows. On the fixed Django request, all three measured runs repeated a 472-token reasoning block and reached the 8,192-token limit without a tool call. HQ completed a tool call on the same request. A separate BF16 KV run also completed, and enabling the product’s Rewind guard on NVFP4 still reached the limit. [Earlier service measurements](artifacts/2026-11-20-nvfp4/service-summary.json).
+
+We checked the codec and attention separately on a captured layer-3 call with 19,962 visible keys. The GPU's four encoded planes and decoded BF16 values matched an independent CPU codec. Relative to FP64 attention over those decoded values, M48's pre-gate output error was 0.185%; against the original BF16 K/V it was 4.083%. On this input, quantization accounted for most of the discrepancy. Restoring only the eight fresh rows in the CPU reference reduced error from 4.080% to 3.668%; restoring sink 32, previous 512 and fresh 8 together reduced it to 3.634%.
+
+We then changed only wide prefill to consume fresh BF16 rows directly. Historical KV remained NVFP4 and small-width decode still used M48. Django reached the same bash tool call after 3,563 tokens with both a 4,096 and an 8,192 output cap. This isolated a change in prefill precision that was sufficient to escape the observed loop on this request.
+
+To check the complete policy before building ring storage, we used a full BF16 shadow and a common band-attention kernel for both arms. The mixed window reduced measured pre-gate error from 4.082% to 3.638%. Both arms completed Django with tool calls (1,473 tokens with all NVFP4, 873 with the mixed window). Changing the attention kernel could therefore also change this greedy trajectory. The experiments support protecting fresh rows and retaining the established sink/recent policy; they do not isolate sink or recent as individually necessary to prevent repetition. The bounded implementation and its final 873-token Django result follow below.
+
 ## Final window and scheduling revision (R3)
 
 R3 keeps the first 32 sink positions and the preceding 512 positions in BF16, and consumes the current call’s fresh BF16 K/V directly. Other history uses the NVFP4 pages. Two lanes reserve 71,303,296 bytes for the window, including validity bits. Attention reads the previous window before overwriting its rows. Validity becomes visible after the last GQA layer, and rejected positions fall back to their quantized pages. The window and its validity travel with the sequence checkpoint. NVFP4 uses snapshot layout 6.
