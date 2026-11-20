@@ -8,6 +8,34 @@
 - Related: [prior HQ block integration](2026-11-19-gqa-uniform-fp32.md), [adapted kernels](../adr/0051-kernel-code-is-ours-adapted-or-vendored.md)
 - Superseded by: none
 
+## Final window and scheduling revision (R3)
+
+R3 keeps the first 32 sink positions and the preceding 512 positions in BF16, and consumes the current call’s fresh BF16 K/V directly. Other history uses the NVFP4 pages. Two lanes reserve 71,303,296 bytes for the window, including validity bits. Attention reads the previous window before overwriting its rows. Validity becomes visible after the last GQA layer, and rejected positions fall back to their quantized pages. The window and its validity travel with the sequence checkpoint. NVFP4 uses snapshot layout 6.
+
+For small query widths the M48 kernel stages BF16 V fragments through shared memory and reuses K/V operands across query rows. Complete valid recent K tiles bypass packed K and scale loads. The V-only bypass failed to improve the combined path. The scheduler assigns 256-key blocks to up to 21 splits using estimated costs 1.0 (ordinary), 1.7 (sink or boundary), and 2.0 (recent/final). At most 21 blocks need no rebalancing. A CUDA-graph replay computes the ranges using the live sequence length in the existing metadata launch.
+
+At the captured layer-3 C1/T8 window of 19,962 keys, weighted scheduling reduced hot attention time from 86.1 to 77.8 µs, versus 73.5 µs for fully quantized KV in the final binary. These measurements exclude the separate BF16 window write. The final output differed from round-robin by 0.21% relative L2. Earlier same-input tests measured 4.083% relative L2 against an original-BF16 FP64 attention reference with full NVFP4, and 3.638% with the mixed window before weighting. On six derived lengths from 2,048 to 65,544, the weighted vs round-robin difference stayed below 0.23% relative L2. [Operator measurements](artifacts/2026-11-20-nvfp4/window-replay.json).
+
+### Final service and regression acceptance
+
+The fixed coding-agent benchmark used the final CUDA release, one warmup and three measured greedy responses per fixture, C1 with two lanes, prompt reuse disabled, seven drafts and an 8,192-token limit. All nine measured responses had zero cached tokens and issued parseable tool calls. Each task reproduced its output length and speculative counters in all three samples. The fixed v1 reference uses HQ at a different context capacity; the earlier PR HQ run matches the new context capacity. Both comparisons measure generated trajectories.
+
+| Request | Output tokens | Median tok/s | vs fixed v1 | vs earlier HQ | Prefill (s) | Decode ms/round | Accepted / drafted | Tool |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Astropy | 1,104 | 255.7 | 1.231× (+23.1%) | +7.1% | 9.30 | 20.27 | 892 / 1491 | str_replace_editor |
+| Django | 873 | 247.2 | 1.337× (+33.7%) | +10.8% | 10.65 | 20.42 | 701 / 1211 | bash |
+| Sympy | 659 | 258.6 | 1.361× (+36.1%) | -2.4% | 7.75 | 20.23 | 534 / 882 | bash |
+
+Django reached a bash tool call after 873 tokens on all three measured requests with the guard off, and in a separate run with the default Rewind guard. The benchmark measures the next response and does not execute the tool. These results resolve the earlier truncation on this fixture; they do not establish a general loop rate.
+
+The final pool retained 155,200 tokens with two lanes and 1,200 MiB headroom. The separate capacity check computed all 131,072 input tokens without cache reuse (98.36 s prefill) and stopped on one output token. Four canaries passed sanity and determinism. Dropping a live SSE response allowed the next request to return 4. The capped Vision smoke described the fixture’s red square on white correctly. Both the R2 and R3 requests embedded exactly the tracked PNG. The earlier assessment of a rectangle was a fixture-reading error: the red pixels span 128 pixels on both axes. The detailed description stopped at the 96-token limit in both runs.
+
+Rust workspace: 3,084 passed, 6 ignored. Linux CUDA workspace all-targets passed. The serialized GPU regression runner passed all 132 CTest targets, four Trellis suites and the VRAM reload test. [Final acceptance and per-sample counters](artifacts/2026-11-20-nvfp4/weighted-acceptance.json).
+
+## Earlier experiments and R1/R2 acceptance
+
+The sections below record the original all-NVFP4 behavior, including the 8,192-token Django loop, and the subsequent small-T dispatch fix. They refer to earlier binaries.
+
 ## Question
 
 Can NVFP4 storage reduce attention latency while retaining a BF16 mathematical path, and which parts of the temporary kernel evidence transfer to a formal paged-cache implementation?
@@ -124,7 +152,7 @@ R2 addresses the small-token-width performance fallback by routing each lane at 
 
 The capacity fixture passed with **131,072 input tokens actually computed during prefill**, zero cached tokens and one prefill pass: 97.9916 seconds prefill, followed by a nonempty one-token response. This establishes the requested input-capacity operation within the 139,264-token total envelope; it is not a long-context answer-quality or multi-sequence-capacity result. The existing canary's four cases passed its bounded sanity and determinism checks. Consumer cancellation was observed after eight tokens and a following request generated a nonempty response.
 
-The Vision request completed the image/encoding/generation smoke path, but did **not** pass semantic review: the input is a red horizontal rectangle, while the answer calls it a perfect square. Color/background match and the 96-token response is length-truncated. No matched HQ semantic comparison was run, so this error is not attributed specifically to NVFP4. Neither this smoke nor canary criteria resolve the Django failure.
+The R2 Vision smoke described the red square on white and reached the 96-token cap. The R3 fixture audit above corrects the initial manual shape label.
 
 A final targeted scale-layout test passed in 2.151 seconds. It covers all 16 E4M3 scale positions, odd-half selection and HND addressing, using the same nonuniform Q for XQA and the band path; the checked maximum absolute difference was 0.00311851 with zero wrong cases. This is operator/layout validation, not a model-quality pass. The [sanitized service summary](artifacts/2026-11-20-nvfp4/service-summary.json) retains exact R1/R2 binary/source identities, request/response hashes, capacity/canary results and the failures above without raw private traces.
 
@@ -146,7 +174,7 @@ Keep graph capacity separate from active device work, preserve actual masks/page
 
 ## Limits and unknowns
 
-Fixed global 1 has bounded model evidence on the supplied histories above; task-solving quality beyond those histories is not established. Cumulative CUDA coverage and the stated R2 targeted/capacity/canary checks are complete. The Django service failure remains unresolved; Vision is only a path smoke with a wrong shape description and no HQ semantic control. Default adoption remains pending a user decision; no overall service speedup or comprehensive model-quality pass is claimed here. Earlier prefix-calibrated and synthetic measurements cannot close those gaps. Raw model data, corpora and profiler captures remain outside this finding.
+Fixed global 1 has bounded model evidence on the supplied histories above; task-solving quality beyond those histories is not established. Cumulative CUDA coverage and the stated R2 targeted/capacity/canary checks are complete. The Django service failure remains unresolved; Vision is a capped path smoke without a matched HQ semantic control. Default adoption remains pending a user decision; no overall service speedup or comprehensive model-quality pass is claimed here. Earlier prefix-calibrated and synthetic measurements cannot close those gaps. Raw model data, corpora and profiler captures remain outside this finding.
 
 ## Follow-ups
 

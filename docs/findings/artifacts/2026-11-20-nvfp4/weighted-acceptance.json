@@ -1,0 +1,291 @@
+{
+  "code_commit": "c9a4c251",
+  "server_sha256": "a73b3d21738b1000318943f62c951e121464accbfc68c3b9c44b584a5b3cd119",
+  "protocol": "C1, guard off, greedy, max reasoning, one warmup and three measured per fixture. No generated commands executed.",
+  "decode_passed": true,
+  "cases": [
+    {
+      "id": "astropy__astropy-12907",
+      "input": 19954,
+      "median_tps": 255.65123338472094,
+      "samples": [
+        {
+          "output_tokens": 1104,
+          "cached_tokens": 0,
+          "prefill_ms": 9276.896818000001,
+          "decode_ms": 4317.724501,
+          "finish_reason": "tool_calls",
+          "truncated": false,
+          "valid": true,
+          "rounds": 213,
+          "accepted": 892,
+          "drafted": 1491,
+          "ms_per_round": 20.271007046948355,
+          "tools": [
+            "str_replace_editor"
+          ],
+          "tool_json_valid": true
+        },
+        {
+          "output_tokens": 1104,
+          "cached_tokens": 0,
+          "prefill_ms": 9296.932166999999,
+          "decode_ms": 4318.383234,
+          "finish_reason": "tool_calls",
+          "truncated": false,
+          "valid": true,
+          "rounds": 213,
+          "accepted": 892,
+          "drafted": 1491,
+          "ms_per_round": 20.274099690140844,
+          "tools": [
+            "str_replace_editor"
+          ],
+          "tool_json_valid": true
+        },
+        {
+          "output_tokens": 1104,
+          "cached_tokens": 0,
+          "prefill_ms": 9308.436284000001,
+          "decode_ms": 4320.244253,
+          "finish_reason": "tool_calls",
+          "truncated": false,
+          "valid": true,
+          "rounds": 213,
+          "accepted": 892,
+          "drafted": 1491,
+          "ms_per_round": 20.2828368685446,
+          "tools": [
+            "str_replace_editor"
+          ],
+          "tool_json_valid": true
+        }
+      ],
+      "v1_rate_ratio": 1.2311181917951441,
+      "earlier_hq_rate_ratio": 1.0706596565472508
+    },
+    {
+      "id": "django__django-10097",
+      "input": 22420,
+      "median_tps": 247.18101477340446,
+      "samples": [
+        {
+          "output_tokens": 873,
+          "cached_tokens": 0,
+          "prefill_ms": 10640.591923,
+          "decode_ms": 3531.824646,
+          "finish_reason": "tool_calls",
+          "truncated": false,
+          "valid": true,
+          "rounds": 173,
+          "accepted": 701,
+          "drafted": 1211,
+          "ms_per_round": 20.41517136416185,
+          "tools": [
+            "bash"
+          ],
+          "tool_json_valid": true
+        },
+        {
+          "output_tokens": 873,
+          "cached_tokens": 0,
+          "prefill_ms": 10650.169084,
+          "decode_ms": 3531.6651220000003,
+          "finish_reason": "tool_calls",
+          "truncated": false,
+          "valid": true,
+          "rounds": 173,
+          "accepted": 701,
+          "drafted": 1211,
+          "ms_per_round": 20.414249260115607,
+          "tools": [
+            "bash"
+          ],
+          "tool_json_valid": true
+        },
+        {
+          "output_tokens": 873,
+          "cached_tokens": 0,
+          "prefill_ms": 10659.756456000001,
+          "decode_ms": 3532.808604,
+          "finish_reason": "tool_calls",
+          "truncated": false,
+          "valid": true,
+          "rounds": 173,
+          "accepted": 701,
+          "drafted": 1211,
+          "ms_per_round": 20.42085898265896,
+          "tools": [
+            "bash"
+          ],
+          "tool_json_valid": true
+        }
+      ],
+      "v1_rate_ratio": 1.3374408951119052,
+      "earlier_hq_rate_ratio": 1.1077003278078632
+    },
+    {
+      "id": "sympy__sympy-11618",
+      "input": 16717,
+      "median_tps": 258.5629043096197,
+      "samples": [
+        {
+          "output_tokens": 659,
+          "cached_tokens": 0,
+          "prefill_ms": 7740.575688,
+          "decode_ms": 2548.490143,
+          "finish_reason": "tool_calls",
+          "truncated": false,
+          "valid": true,
+          "rounds": 126,
+          "accepted": 534,
+          "drafted": 882,
+          "ms_per_round": 20.226112246031747,
+          "tools": [
+            "bash"
+          ],
+          "tool_json_valid": true
+        },
+        {
+          "output_tokens": 659,
+          "cached_tokens": 0,
+          "prefill_ms": 7746.112369,
+          "decode_ms": 2548.7028069999997,
+          "finish_reason": "tool_calls",
+          "truncated": false,
+          "valid": true,
+          "rounds": 126,
+          "accepted": 534,
+          "drafted": 882,
+          "ms_per_round": 20.22780005555555,
+          "tools": [
+            "bash"
+          ],
+          "tool_json_valid": true
+        },
+        {
+          "output_tokens": 659,
+          "cached_tokens": 0,
+          "prefill_ms": 7749.734423999999,
+          "decode_ms": 2549.970713,
+          "finish_reason": "tool_calls",
+          "truncated": false,
+          "valid": true,
+          "rounds": 126,
+          "accepted": 534,
+          "drafted": 882,
+          "ms_per_round": 20.2378628015873,
+          "tools": [
+            "bash"
+          ],
+          "tool_json_valid": true
+        }
+      ],
+      "v1_rate_ratio": 1.3612743665010698,
+      "earlier_hq_rate_ratio": 0.9762523235879973
+    }
+  ],
+  "capacity": {
+    "passed": true,
+    "input": 131072,
+    "details": {
+      "cached_tokens": 0,
+      "decode_ms": 24.713094,
+      "decode_tokens_per_s": 40.464378923982565,
+      "empty_output": false,
+      "finish_reason": "stop",
+      "input_tokens": 131072,
+      "output_tokens": 1,
+      "prefill_ms": 98356.949607,
+      "problems": [],
+      "request_total_ms": 98607.52250400001,
+      "response_file": "capacity.response.json",
+      "server_elapsed_ms": 98381.662701,
+      "speculative": {
+        "accepted": 1,
+        "accepted_at": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "drafted": 7,
+        "drafted_at": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "rounds": 1
+      },
+      "truncated": false,
+      "valid": true
+    }
+  },
+  "canary": [
+    {
+      "id": "rust-hello",
+      "sane": true,
+      "deterministic": true
+    },
+    {
+      "id": "rust-sort",
+      "sane": true,
+      "deterministic": true
+    },
+    {
+      "id": "math-greedy",
+      "sane": true,
+      "deterministic": true
+    },
+    {
+      "id": "explain-reverse",
+      "sane": true,
+      "deterministic": true
+    }
+  ],
+  "django-default-rewind": {
+    "finish": "tool_calls",
+    "output": 873,
+    "tools": [
+      "bash"
+    ]
+  },
+  "vision": {
+    "finish": "length",
+    "output": 96,
+    "tools": [],
+    "content": "Certainly! Here is a detailed description of the image:\n\nThe image displays a single, solid-colored square centered on a plain white background.\n\n- **Shape**: The primary object is a perfect square. All four sides are equal in length, and all four corners are right angles (90 degrees).\n- **Color**: The square is filled with a uniform, vibrant shade of red. There are no gradients, patterns, textures, or variations in color within the square \u2014",
+    "assessment": "The red object spans x=64..191 and y=64..191 in the 256x256 fixture. The shape, color and background match; the description reaches the 96-token cap.",
+    "fixture_sha256": "0d8d29b39fae5d9133836a9ae7fd5dfbfe4a1c1a2eb0bc2e9c989628c72556b9"
+  },
+  "after-cancel": {
+    "finish": "stop",
+    "output": 1,
+    "tools": [],
+    "content": "4"
+  },
+  "vram": {
+    "hq_residual_window_bytes": 71303296,
+    "kv_pool_pages": 2425,
+    "kv_pool_tokens": 155200,
+    "headroom_bytes": 1258291200,
+    "adapted": ""
+  },
+  "regression": {
+    "rust_workspace": {
+      "passed": 3084,
+      "ignored": 6
+    },
+    "cuda_workspace_all_targets": "passed",
+    "ctest": "132/132",
+    "trellis_gpu_suites": 4,
+    "vram_reload_gpu": "passed"
+  }
+}

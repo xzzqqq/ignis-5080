@@ -1,0 +1,122 @@
+{
+  "scope": "Layer 3 C1/T8 pregate, 10 warmup and 100 CUDA-event timed calls per mean. Includes NVFP4 append and excludes BF16 ring write. W19962 captured, other lengths derived by prefix/cyclic extension with original fresh suffix. Two runs per arm.",
+  "weights": {
+    "ordinary": 1.0,
+    "sink_or_boundary": 1.7,
+    "recent_and_final": 2.0
+  },
+  "measurements": [
+    {
+      "keys": 2048,
+      "round_robin_us": [
+        48.1997,
+        48.9165
+      ],
+      "weighted_us": [
+        48.5274,
+        48.425
+      ],
+      "all_nvfp4_us": [
+        34.8365,
+        34.8365
+      ],
+      "relative_l2_vs_round_robin": 0.0
+    },
+    {
+      "keys": 5384,
+      "round_robin_us": [
+        57.4669,
+        57.6
+      ],
+      "weighted_us": [
+        53.3402,
+        53.2582
+      ],
+      "all_nvfp4_us": [
+        44.5338,
+        44.1651
+      ],
+      "relative_l2_vs_round_robin": 0.0013669346912978735
+    },
+    {
+      "keys": 8216,
+      "round_robin_us": [
+        75.8579,
+        75.8374
+      ],
+      "weighted_us": [
+        69.8163,
+        69.4784
+      ],
+      "all_nvfp4_us": [
+        50.9645,
+        51.0054
+      ],
+      "relative_l2_vs_round_robin": 0.0022175659879377133
+    },
+    {
+      "keys": 16383,
+      "round_robin_us": [
+        99.7376,
+        99.4509
+      ],
+      "weighted_us": [
+        77.8957,
+        77.9366
+      ],
+      "all_nvfp4_us": [
+        75.3869,
+        75.2845
+      ],
+      "relative_l2_vs_round_robin": 0.002122539127953242
+    },
+    {
+      "keys": 19962,
+      "round_robin_us": [
+        86.0467,
+        86.1389
+      ],
+      "weighted_us": [
+        77.824,
+        77.8342
+      ],
+      "all_nvfp4_us": [
+        73.4515,
+        73.6051
+      ],
+      "relative_l2_vs_round_robin": 0.002094650276956438
+    },
+    {
+      "keys": 32775,
+      "round_robin_us": [
+        136.94,
+        136.663
+      ],
+      "weighted_us": [
+        115.19,
+        114.913
+      ],
+      "all_nvfp4_us": [
+        109.076,
+        109.025
+      ],
+      "relative_l2_vs_round_robin": 0.0019240809830743395
+    },
+    {
+      "keys": 65544,
+      "round_robin_us": [
+        223.007,
+        221.839
+      ],
+      "weighted_us": [
+        205.435,
+        205.517
+      ],
+      "all_nvfp4_us": [
+        187.72,
+        188.375
+      ],
+      "relative_l2_vs_round_robin": 0.0017817210288849643
+    }
+  ]
+}

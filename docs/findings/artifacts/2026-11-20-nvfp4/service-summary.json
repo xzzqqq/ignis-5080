@@ -877,8 +877,8 @@
       "reasoning_present": false,
       "request_total_s": 0.6620167199289426,
       "path_smoke_completed": true,
-      "semantic_answer_passed": false,
-      "manual_observation": "Input is a red horizontal rectangle on white. Output matches red/background but explicitly calls it a perfect square with equal sides. Output is also length-truncated.",
+      "shape_and_color_match": true,
+      "manual_observation": "Corrected on R3 fixture audit: the red region is 128 by 128 on a white 256 by 256 canvas. The reported square and colors match; the answer reaches the output cap.",
       "scope": "Image request encoding and generation smoke only;90 prompt tokens are not asserted to be90 image-only tokens."
     },
     "consumer_cancel": {
