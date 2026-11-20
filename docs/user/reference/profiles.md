@@ -19,7 +19,8 @@ Profiles set hardware-specific defaults. Flags, environment variables and config
 
 | Field | Model | Value |
 |---|---|---|
-| [`model.max_context`](configuration.md#modelmax_context) | Qwen3.8-27B | `262144` |
+| [`model.kv_format`](configuration.md#modelkv_format) | Qwen3.8-27B | `nvfp4` |
+| [`model.max_context`](configuration.md#modelmax_context) | Qwen3.8-27B | `139264` |
 | [`spec.backend`](configuration.md#specbackend) | Qwen3.8-27B | `dflash2` |
 | [`spec.decode_lanes`](configuration.md#specdecode_lanes) | Qwen3.8-27B | `2` |
 | [`spec.draft_head`](configuration.md#specdraft_head) | Qwen3.8-27B | `auto` |
@@ -27,4 +28,5 @@ Profiles set hardware-specific defaults. Flags, environment variables and config
 | [`vision.enabled`](configuration.md#visionenabled) | every model | `true` |
 | [`vision.max_tokens`](configuration.md#visionmax_tokens) | every model | `4096` |
 | [`vision.residency`](configuration.md#visionresidency) | every model | `host` |
+| [`vram.adapt_spare_tokens`](configuration.md#vramadapt_spare_tokens) | Qwen3.8-27B | `8192` |
 | [`vram.headroom_bytes`](configuration.md#vramheadroom_bytes) | Qwen3.8-27B | `1200M` |

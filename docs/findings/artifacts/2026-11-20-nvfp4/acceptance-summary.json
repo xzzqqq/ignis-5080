@@ -1,0 +1,352 @@
+{
+  "schema": "ignis.nvfp4.acceptance-summary.v1",
+  "status": "implementation_validated_service_behavior_mixed_default_adoption_pending",
+  "date": "2026-11-20",
+  "scope": {
+    "format": "nvfp4",
+    "restoration_global": 1,
+    "profile": "rtx50-16gb",
+    "model_family": "Qwen3.8-27B",
+    "max_context": 139264,
+    "adapt_spare_tokens": 8192,
+    "base_format_default": "hq-e8-2b",
+    "cpu_does_not_imply_cuda_coverage": true
+  },
+  "cpu_workspace": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--workspace"
+    ],
+    "environment": {
+      "CARGO_INCREMENTAL": "0"
+    },
+    "returncode": 0,
+    "seconds": 244.30224679224193,
+    "completed_test_targets": 253,
+    "passed": 3079,
+    "failed": 0,
+    "ignored": 6
+  },
+  "generated_docs": {
+    "regeneration": {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "ignis-server",
+        "--test",
+        "user_docs_reference",
+        "--quiet"
+      ],
+      "bless": true,
+      "returncode": 0,
+      "seconds": 15.631552665960044,
+      "preexisting_generated_reference_dirty": false
+    },
+    "verification_without_bless": {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "ignis-server",
+        "--test",
+        "user_docs_reference",
+        "--quiet"
+      ],
+      "returncode": 0,
+      "seconds": 0.3099575419910252
+    }
+  },
+  "prior_cpu_attempts": [
+    {
+      "result": "environment_failure",
+      "cause": "artifact keep-work tests require the existing 2 GiB free-disk margin; the volume had approximately 1.1 GiB free",
+      "remediation": "removed only this project's rebuildable Cargo incremental cache; did not weaken the margin"
+    },
+    {
+      "result": "test_expectation_failure",
+      "cause": "one server test still expected the previous profile context and spare-token values",
+      "remediation": "updated three test-only expectations; full workspace rerun passed"
+    }
+  ],
+  "pending": [
+    "Django_service_quality_failure_resolution",
+    "default_adoption_decision"
+  ],
+  "evidence_sha256": {
+    "workspace.json": "31b8b7c28ac6c8a0f2aaba4f0f0ac12d2d47b6479dc1566bc97ad7059edd267d",
+    "workspace.log": "37b703f45644779e9e8493cde907b1aa10aea11c7abda8fa184b7cb5c7f63166",
+    "generated-docs.json": "a4d6bfae970b215242bf54ea019a9631bb2391aa045d8dcff896d4fe499d5807",
+    "generated-docs-verify.json": "83632d32ba32fe732b88c41484ec3d01e942da3a4c7887b0af9944f59bc0f787",
+    "service-summary.json": "8a887b3f8a56b71a443c4ce6bf891482278a39c1695505aa9e5559df48a98d63",
+    "v1-rate-comparison.json": "1da5684d8a81656db018065d1185039409ff67b62253843b5bdc107bfa17ff9c"
+  },
+  "post_workspace_provenance_test": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "ignis-vendor",
+      "--test",
+      "repository_manifest"
+    ],
+    "environment": {
+      "CARGO_INCREMENTAL": "0"
+    },
+    "returncode": 0,
+    "passed": 3,
+    "failed": 0,
+    "ignored": 0,
+    "test_seconds": 0.05,
+    "source_sha256": "73e1a2c9c87a9e3df107e75c8200cd2217b2e5dcb715f4e9573a3059d8ef2b87",
+    "scope": "Committed kernel/vendor and independent XQA bytes/patches; no remote reference checkout required for XQA"
+  },
+  "cuda_acceptance": {
+    "status": "cumulative_coverage_complete",
+    "all_targets_check": {
+      "returncode": 0,
+      "seconds": 100.16309865401126,
+      "receipt": "final-validation/stages.json"
+    },
+    "initial_official_runner": {
+      "returncode": 1,
+      "ctest_passed": 131,
+      "ctest_total": 132,
+      "known_failure": "Existing host test treated ABI value 2 as unknown; NVFP4 now uses that value",
+      "additional_incomplete_stage": "Final reload test interrupted during NFS debug build",
+      "do_not_interpret_as_clean_single_runner_pass": true,
+      "seconds": 1564.1320134579437,
+      "receipt": "final-validation/stages.json"
+    },
+    "host_abi_test_after_fixture_update": {
+      "passed": 1,
+      "failed": 0,
+      "seconds": 0.001435459009371698,
+      "change": "Unknown-format fixture uses value 3; known NVFP4 fixture uses supported geometry",
+      "receipt": "targeted/model-format-fixed.json"
+    },
+    "trellis_gpu_suites": {
+      "suites_passed": 4,
+      "ignored": 0
+    },
+    "reload_release_rerun": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "gpu_seconds": 23.88,
+      "total_seconds": 93.66973643796518,
+      "cold_pages": 2486,
+      "reload_pages": 2479,
+      "page_counts_match_existing_test": true,
+      "receipt": "final-validation/reload-release.json"
+    },
+    "evidence_identity": "Raw small receipt hashes in gpu_receipt_sha256; stage-specific R1/R2 identities below. Historical targeted receipts without binary hashes are not retroactively assigned the final SF binary.",
+    "scope": "R1 cumulative checks; R2 small-token routing has a separate targeted regression, not an implied rerun of every R1 check"
+  },
+  "service_acceptance": {
+    "status": "unresolved_quality_failure",
+    "binary_scope": "R1; principal C1/T8 benchmark predates R2 small-token routing fix",
+    "loop_guard": "off (benchmark protocol); product default Rewind checked separately",
+    "own_decode_tps_median": {
+      "Astro": {
+        "hq": 238.779,
+        "nvfp4": 284.676
+      },
+      "Django": {
+        "hq": 223.148,
+        "nvfp4": 329.096
+      },
+      "Sympy": {
+        "hq": 264.853,
+        "nvfp4": 233.975
+      }
+    },
+    "django": {
+      "nvfp4": "all three samples hit 8192-token limit with repeated reasoning and no content/tool call",
+      "hq": "effective tool call at 1760 tokens",
+      "bf16_single_diagnostic": "effective tool call at 792 tokens",
+      "no_spec_2048_diagnostic": "insufficient to rule out stable-loop onset near token 2537"
+    },
+    "matched_projection_diagnostic": {
+      "layers": 16,
+      "q_gate_k_v_bit_differences": 0,
+      "scope": "first matched frame; excludes the specific projection-wiring suspicion, not later trajectory divergence"
+    },
+    "overall_service_speedup_claimed": false,
+    "adoption_decision": "pending quality investigation and remaining acceptance",
+    "evidence_identity": "service-summary.json provenance.R1/provenance.R2; retained below by content hash",
+    "product_default_Rewind": {
+      "output_tokens": 8192,
+      "finish_reason": "length",
+      "content_characters": 0,
+      "tool_count": 0,
+      "canonical_message_identical_to_R1_off": true,
+      "request_total_seconds": 35.2101006989833,
+      "selected_loop_guard_events": 0,
+      "actual_rewind_demonstrated": false
+    }
+  },
+  "r2_small_token_route": {
+    "status": "targeted_pass",
+    "tokens_per_lane_max": 8,
+    "consumer": "same M48 consumer per lane",
+    "strong_causal_and_redzone_seconds": 2.118224155041389,
+    "principal_r1_c1t8_math_unchanged": true,
+    "not_a_repeat_of_r1_service_benchmark": true,
+    "receipt": "targeted/small-t-window8.json",
+    "binary_sha256": null,
+    "identity_limit": "Historical targeted result not assigned a later test executable"
+  },
+  "r2_post_checks": {
+    "capacity": {
+      "runner_exit_code": 0,
+      "passed": true,
+      "input_tokens": 131072,
+      "computed_prefill_tokens": 131072,
+      "prefill_passes": 1,
+      "cached_tokens": 0,
+      "prefill_ms": 97991.631326,
+      "decode_wall_ms": 23.839281,
+      "server_elapsed_ms": 98015.470607,
+      "request_total_ms": 98242.660055,
+      "output_tokens": 1,
+      "finish_reason": "stop",
+      "response_sha256": "cf1c027491fc9e0145ea2223effbf433e411b6916897d6d9857b648c4460e5e8",
+      "loop_guard": "off, required by the capacity timing protocol",
+      "scope": "Real131072-token prefill and nonempty generation, not long-context answer quality or multi-sequence capacity."
+    },
+    "canary": {
+      "runner_exit_code": 0,
+      "cases": 4,
+      "all_existing_sanity_checks_true": true,
+      "all_existing_determinism_checks_true": true,
+      "report_sha256": "65d2508dad2b414caabcc984c9d88786b444af2292b3291be60406c78965638d",
+      "scope": "Existing bounded harness criteria, not complete-answer or general task-quality evaluation."
+    },
+    "vision": {
+      "request_sha256": "86dd46c3a78b511314d2f8797910167d9cd5089fce70fd2a861490a6f09903bd",
+      "response_sha256": "506f0fdcfd1892806d0c58a5ecb51b871ee94f16734488a32382b510f8d554a4",
+      "prompt_tokens": 90,
+      "output_tokens": 96,
+      "finish_reason": "length",
+      "enable_thinking": false,
+      "reasoning_present": false,
+      "request_total_s": 0.6620167199289426,
+      "path_smoke_completed": true,
+      "shape_and_color_match": true,
+      "manual_observation": "Corrected on R3 fixture audit: the red region is 128 by 128 on a white 256 by 256 canvas. The reported square and colors match; the answer reaches the output cap.",
+      "scope": "Image request encoding and generation smoke only;90 prompt tokens are not asserted to be90 image-only tokens."
+    },
+    "consumer_cancel": {
+      "observed_cause": "consumer",
+      "tokens_before_cancel": 8,
+      "duration_ms": 64,
+      "followup_prompt_tokens": 25,
+      "followup_output_tokens": 1,
+      "followup_finish_reason": "stop",
+      "followup_request_total_s": 0.05299507896415889,
+      "followup_response_sha256": "3f997333a5e3f66734daa21899528f452f49b69d618dda4f8290610508936ab1",
+      "scope": "Consumer cancellation then nonempty follow-up response; not a cancellation-fault matrix."
+    }
+  },
+  "runtime_provenance": {
+    "artifact_sha256": "2c4c9ee4d6b25c08da6c2d85840126e73d120564e230f926b6230b5b95ee8b3c",
+    "artifact_hash_method": "Earlier compatible Lab digest with unchanged file stat; no new per-leg model rehash.",
+    "runtime_revision_note": "R1 benchmarks and diagnostics retain R1 identity; R2 runtime changed only afterward. Frozen server identities are added from owner receipts when available.",
+    "R1": {
+      "runtime_sources_sha256": "94486531733c99a00f02dc49d68d7fdb63b1cf8d1ec53c460ef6624eb107f145",
+      "binary_sha256": {
+        "ignis-server": "965cd7f801a9e46ad053904dd2998ad4bffb4e11555207bd7628b595f7620260",
+        "ignis-bench": "bbe5b5696a353afe0e0bac8042e40a8add863d13f8c11485a6eb71f803cc857f"
+      },
+      "scope": "Frozen common R1 server/bench for both service legs. R1 default C1/T8 XQA; slow T1 fallback in the historical no-spec diagnostic."
+    },
+    "R2": {
+      "runtime_sources_sha256": "a59dd6176e8124c2b7853529d7418533ce2854269d484de2d670f9bb7993adcb",
+      "server_binary_sha256": "f225e193a235164fbaa51e33d06eb2a226b45c9fffed4349ad338509e7f7ce4d",
+      "scope": "Subsequent actualT<=8 per-lane M48 extension; not the binary of the R1 full coding-agent benchmark. No diagnostic symbols in rebuilt server.",
+      "no_diagnostic_symbols": true
+    }
+  },
+  "sf_layout_target": {
+    "returncode": 0,
+    "seconds": 2.1507860139245167,
+    "all_16_scale_positions": true,
+    "odd_half_and_HND_addressing": true,
+    "same_nonuniform_Q_XQA_and_band": true,
+    "max_abs_difference": 0.00311851,
+    "wrong_cases": 0,
+    "scope": "operator/layout validation, not model-quality acceptance",
+    "test_source_sha256": "d487aace561293a341be7159b8b3d7d63acccb8aa06221e8c278c2821d9c4fca",
+    "current_executable_sha256": "13834f5d2e1f62ed2b47c26c9617233c7bd1ae5989c1b0e8897c1cc5a5e00969",
+    "source_note": "current final SF test artifact; historical earlier targets retain their own logs, no retrospective binaryhash claimed",
+    "receipt": "targeted/sf16-receipt.json"
+  },
+  "gpu_receipt_sha256": {
+    "final-validation/stages.json": "de0daea7e4d0193c6bd0bd2be934560036d69505a88cf1bd49dc6b0b5bcbd9e8",
+    "final-validation/reload-release.json": "36f5e88f0f052589ef1873327a3f662a78f39e189cde9f7c82a440a1374fce25",
+    "targeted/workspace-redzone.json": "8d4088b0d924f6e2ba092dc928b40a65c3fde898cd12c187429be2b87bf84bf5",
+    "targeted/model-format-fixed.json": "9156597418add2fe1fbcf3c1cc7ffa003f5f56411b45f8cbf920ac140db4a252",
+    "targeted/small-t-window8.json": "9da3e2baede8b801c4878ca32432bf7eccee8312815372c3da3582f2e26f91f0",
+    "targeted/sf16.json": "661391b87bfe9ba0b183fe21d25bbe1fb3794a7f739f873e56b3279803e02537",
+    "targeted/sf16-receipt.json": "e4341ebd633407881203923a9a82f88a7dc5c6b31f30a7b10a884cdb43f97558",
+    "final-identities.json": "384f9b2bb7fd54e25ae84cfd7f76b7ed639d36ad8863a323cd5ce61ce8d06710",
+    "final-lab-ready.json": "c8080f2d3128d3c0c56686d919e4f4479b0e03fa03b3b8745b31753124ca9a3f"
+  },
+  "workspace_contract_target": {
+    "returncode": 0,
+    "seconds": 2.0677964640781283,
+    "receipt": "targeted/workspace-redzone.json",
+    "coverage": "maxkeys20000/32769 x baseoffset0/256 x same-graph S8/21 x valid8/7/0; exact query plus prefix/tail redzones",
+    "binary_sha256": null,
+    "identity_limit": "Historical result retains its own receipt; no later SF executable hash is backfilled"
+  },
+  "final_build_receipts": {
+    "r1": {
+      "runtime_sources_sha256": "94486531733c99a00f02dc49d68d7fdb63b1cf8d1ec53c460ef6624eb107f145",
+      "binaries": [
+        {
+          "name": "ignis-server",
+          "sha256": "965cd7f801a9e46ad053904dd2998ad4bffb4e11555207bd7628b595f7620260",
+          "bytes": 125757440
+        },
+        {
+          "name": "ignis-bench",
+          "sha256": "bbe5b5696a353afe0e0bac8042e40a8add863d13f8c11485a6eb71f803cc857f",
+          "bytes": 21631728
+        }
+      ]
+    },
+    "r2": {
+      "returncode": 0,
+      "seconds": 113.52220307593234,
+      "gqa_source_sha256": "67bf8e4d480763dc633f53c844b535109a5ad74753e730f8182a741eb91dc31b",
+      "forced_object_unlink": true,
+      "sha256": "f225e193a235164fbaa51e33d06eb2a226b45c9fffed4349ad338509e7f7ce4d",
+      "object_sha256": "37ce3957e545bb950fc1311bfa15fd9b0f237409526c1348f46aea7844b201ca",
+      "no_diagnostic_symbols": true,
+      "runtime_sources_sha256": "a59dd6176e8124c2b7853529d7418533ce2854269d484de2d670f9bb7993adcb"
+    }
+  },
+  "lab_restore_snapshot": {
+    "status_from_saved_receipt": "ready",
+    "active_operation_from_saved_receipt": null,
+    "profiling_enabled": true,
+    "settings": {
+      "max_context": 65536,
+      "prefill_chunk": 1024,
+      "lanes": 2,
+      "kv_format": "nvfp4",
+      "speculation": "dflash2"
+    },
+    "runtime_sources_sha256": "a59dd6176e8124c2b7853529d7418533ce2854269d484de2d670f9bb7993adcb",
+    "gqa_source_sha256": "67bf8e4d480763dc633f53c844b535109a5ad74753e730f8182a741eb91dc31b",
+    "no_diagnostic_source": true,
+    "scope": "Saved final-lab-ready.json facts, not a new liveness probe; no analyst GPU execution"
+  }
+}

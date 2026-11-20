@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo run --release -p ignis-runtime --features cuda --example verify_width_cost -- \
-//!     [--lanes N] [--prefill-chunk N] ARTIFACT TOKENS_BIN CONTEXTS ROUNDS OUT_JSONL [WINDOWS]
+//!     [--lanes N] [--prefill-chunk N] [--kv-format FORMAT] [--max-context N] ARTIFACT TOKENS_BIN CONTEXTS ROUNDS OUT_JSONL [WINDOWS]
 //! ```
 //!
 //! `TOKENS_BIN` is int32 LE text (any real stream). `CONTEXTS` is an ascending
@@ -71,7 +71,7 @@ fn main() {
     let flags = ShapeFlags::take(&mut args).unwrap_or_else(|e| panic!("{e}"));
     if !(6..=7).contains(&args.len()) {
         eprintln!(
-            "usage: verify_width_cost [--lanes N] [--prefill-chunk N] ARTIFACT TOKENS_BIN CONTEXTS ROUNDS OUT_JSONL [WINDOWS]"
+            "usage: verify_width_cost [--lanes N] [--prefill-chunk N] [--kv-format FORMAT] [--max-context N] ARTIFACT TOKENS_BIN CONTEXTS ROUNDS OUT_JSONL [WINDOWS]"
         );
         std::process::exit(2);
     }
@@ -97,7 +97,7 @@ fn main() {
     assert!(lane_context <= base.max_context, "a lane's {lane_context} tokens outgrow the load's {}", base.max_context);
     let mut record = |label: &str, window: u32, context: usize, lanes: usize, samples: Vec<f64>| {
         let line = serde_json::json!({
-            "load": label, "window": window, "verify_width": window + 1, "lanes": lanes,
+            "load": label, "kv_format": base.kv_format.as_str(), "max_context": base.max_context, "window": window, "verify_width": window + 1, "lanes": lanes,
             "context": context, "round": stats(samples),
         });
         println!("{line}");

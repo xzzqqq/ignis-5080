@@ -6,13 +6,17 @@
 # per-token costs below are pinned to the Rust ones by a test in
 # crates/server/src/runtime.rs.
 #
-#   kv-pool-tokens.sh <value> <27b|flash-next> <hq-e8-2b|bf16>
+#   kv-pool-tokens.sh <value> <27b|flash-next> <hq-e8-2b|bf16|nvfp4>
 v=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
-case "$2:$3" in
+format=$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+case "$format" in hq|hq_e8_2b) format=hq-e8-2b ;; esac
+case "$2:$format" in
   flash-next:bf16) per_token=25344 ;;
-  flash-next:*) per_token=4224 ;;
+  flash-next:hq-e8-2b) per_token=4224 ;;
   27b:bf16) per_token=65536 ;;
-  *) per_token=9216 ;;
+  27b:hq-e8-2b) per_token=9216 ;;
+  27b:nvfp4) per_token=18432 ;;
+  *) printf '%s\n' "unsupported KV format/geometry: $2:$format" >&2; exit 2 ;;
 esac
 case "$v" in
   *ktok) n=${v%ktok}; scale=1024 ;;

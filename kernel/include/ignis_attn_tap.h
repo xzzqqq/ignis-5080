@@ -87,24 +87,11 @@ int32_t ignis_attn_tap_arm(const int32_t *gqa_ordinals, int32_t n_layers,
                            const int64_t *query_positions, int32_t n_queries,
                            int64_t max_positions, uint16_t *q_out, uint16_t *k_out);
 
-/* Also capture the keys the hq-e8-2b prompt attention consumed, for the
- * chunk that holds `query_positions[0]` of the current arm. Call after
- * `ignis_attn_tap_arm`, before the prefill.
- *
- * `kc_out`: caller-allocated, the same shape as `k_out`
- * (`n_layers * max_positions * 4 * 256` uint16_t, [layer][position][kv_head]
- * [dim]), receiving the keys [0, visible) ignis's prompt attention read
- * (kernel/include/ignis_hq_prompt_attention.h, GitHub #335) in the codec's
- * **rotated** frame, as BF16 rows -- before the attention's band rounds the
- * codec's ones to 8 bits. Nothing is written for a layer whose query chunk did
- * not take that attention (a BF16 or INT8 cache, a small-T width);
- * `consumed_rows` reports 0 for it.
- *
- * The rows come from `ignis_hq_prompt_fetch_rows`, the fetch the attention's
- * own passes run, called before the chunk's append. A caller that relies on
- * this should check it: rows of the current chunk are exact by construction,
- * so the codec's rotation of the captured pre-cache keys must reproduce them.
- * A test-speed seam: it allocates and frees the rows' buffer per capture. */
+/* Capture K as consumed by HQ prompt attention (HQ rotated frame) or NVFP4
+ * eager attention (normal frame), before the current chunk replaces the ring.
+ * Arm after ignis_attn_tap_arm. kc_out has k_out's layout and covers the
+ * visible prefix for the chunk containing query_positions[0]. A route without
+ * consumed-key capture reports zero rows. */
 int32_t ignis_attn_tap_arm_consumed(uint16_t *kc_out);
 
 /* Disarm, and report what was captured: for each armed layer, how many key
@@ -133,14 +120,14 @@ int32_t ignis_attn_tap_record(uint32_t gqa_ordinal, int64_t start_position, int3
                               const void *rotated_query, const void *rotated_key,
                               cudaStream_t stream);
 
-struct IgnisHqPromptKeys;
+#include "ignis_hq_prompt_attention.h"
 
 /* The hook `run_gqa_layer` calls after ignis's prompt attention and before its
  * attend-first append. `hq_keys` says where that attention read its keys; null
  * when the call did not take it. Returns 0 when there is nothing to capture. */
 int32_t ignis_attn_tap_record_consumed(uint32_t gqa_ordinal, int64_t start_position,
                                        int32_t tokens, const IgnisHqPromptKeys *hq_keys,
-                                       cudaStream_t stream);
+                                       cudaStream_t stream, decltype(&ignis_hq_prompt_fetch_rows) fetch);
 #endif
 
 #endif /* IGNIS_ATTN_TAP_H */

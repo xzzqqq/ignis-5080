@@ -11,8 +11,8 @@
 // exists to prevent, except caught nowhere.
 //
 // It is a CTest rather than a Rust test because the Rust binding cannot
-// express the bug: `ignis_core::KvFormat` is a two-variant enum, so
-// `abi_code()` only ever produces 0 or 1. This guard is only reachable from a
+// express the bug: `ignis_core::KvFormat` is a three-variant enum, so
+// `abi_code()` only ever produces 0, 1 or 2. This guard is only reachable from a
 // caller writing the flat C ABI directly, which is what this file does.
 //
 // Host-only by construction: every check `ignis_model_load` makes before the
@@ -58,8 +58,13 @@ ignis_topology minimal_topology() {
 // Loads with `kv_format` and returns the leaf's own last-error message. The
 // load always fails here -- with no bound tensors it could not do otherwise.
 // What the two arms differ on is *why*.
-std::string load_error_for(int32_t kv_format) {
-  const ignis_topology topology = minimal_topology();
+std::string load_error_for(int32_t kv_format, bool valid_nv4_geometry = true) {
+  ignis_topology topology = minimal_topology();
+  if (kv_format == IGNIS_KV_FORMAT_NVFP4 && valid_nv4_geometry) {
+    topology.num_q_heads = 24;
+    topology.num_kv_heads = 4;
+    topology.head_dim = 256;
+  }
   // Non-null, count 0: the null check is about the pointer, and the format
   // check happens before anything reads through it.
   ignis_bound_tensor tensors[1]{};
@@ -82,7 +87,7 @@ int main() {
   // An unrecognized format is refused by name, and the message says which
   // value it was so an operator (or a future third format) can see what the
   // ABI was handed.
-  for (const int32_t bogus : {-1, 2, 7}) {
+  for (const int32_t bogus : {-1, 3, 7}) {
     const std::string message = load_error_for(bogus);
     check(message.find("kv_format") != std::string::npos,
          "kv_format " + std::to_string(bogus) + " is refused by name: got \"" + message + "\"");
@@ -91,11 +96,15 @@ int main() {
              message + "\"");
   }
 
+  const auto wrong_geometry = load_error_for(IGNIS_KV_FORMAT_NVFP4, false);
+  check(wrong_geometry.find("nvfp4 KV supports") != std::string::npos,
+        "recognized NV4 rejects unsupported geometry before binding");
+
   // The control arm, and the reason the checks above are not vacuous: a
   // recognized format gets *past* the kv_format check and fails on the first
-  // missing bound tensor instead. Both real formats, so neither is the one
+  // missing bound tensor instead. Every real format, so none is the one
   // that happens to be a passthrough.
-  for (const int32_t known : {IGNIS_KV_FORMAT_BF16, IGNIS_KV_FORMAT_HQ_E8_2B}) {
+  for (const int32_t known : {IGNIS_KV_FORMAT_BF16, IGNIS_KV_FORMAT_HQ_E8_2B, IGNIS_KV_FORMAT_NVFP4}) {
     const std::string message = load_error_for(known);
     check(message.find("kv_format") == std::string::npos,
          "a recognized kv_format (" + std::to_string(known) +

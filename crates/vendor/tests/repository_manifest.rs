@@ -54,6 +54,30 @@ fn every_vendored_file_is_what_the_manifest_records() {
 }
 
 #[test]
+fn the_independent_xqa_snapshot_is_what_its_manifest_records() {
+    let vendor_root = repository_root().join("kernel/third_party/flashinfer_xqa");
+    let manifest_path = vendor_root.join("manifest.json");
+    let manifest = Manifest::load(&manifest_path)
+        .unwrap_or_else(|error| panic!("load {}: {error}", manifest_path.display()));
+    assert!(!manifest.files.is_empty(), "the independent XQA snapshot cannot be empty");
+
+    // Check the committed bytes and recorded patches without requiring a
+    // machine-local FlashInfer checkout.
+    let report = vendor::verify_vendor_tree(&vendor_root, &manifest).expect("verify XQA snapshot");
+    assert!(
+        report.is_clean(),
+        "kernel/third_party/flashinfer_xqa no longer matches its manifest. Restore \
+         the recorded snapshot or record the local change as a manifest patch.\n{}",
+        report
+            .findings
+            .iter()
+            .map(|finding| format!("  {finding}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
 fn the_vendored_files_still_match_the_pinned_reference_commit() {
     let (manifest, _) = load();
     let reference = PathBuf::from(&manifest.reference.default_path);

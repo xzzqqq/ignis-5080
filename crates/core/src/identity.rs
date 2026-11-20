@@ -942,14 +942,17 @@ mod tests {
 
     #[test]
     fn a_blob_in_another_kv_format_is_refused() {
-        let other = BlobIdentity {
-            kv_format: KvFormat::Bf16,
-            ..identity()
-        };
-        assert_eq!(
-            identity().accepts(&other).expect_err("refused").field,
-            IdentityField::KvFormat
-        );
+        for source in [KvFormat::Bf16, KvFormat::HqE8_2b, KvFormat::Nvfp4] {
+            let baseline = BlobIdentity { kv_format: source, ..identity() };
+            for target in [KvFormat::Bf16, KvFormat::HqE8_2b, KvFormat::Nvfp4] {
+                let other = BlobIdentity { kv_format: target, ..baseline };
+                if source == target {
+                    assert!(baseline.accepts(&other).is_ok());
+                } else {
+                    assert_eq!(baseline.accepts(&other).expect_err("refused").field, IdentityField::KvFormat);
+                }
+            }
+        }
     }
 
     #[test]

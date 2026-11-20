@@ -46,6 +46,11 @@ persistent disk, preferably SSD. Setup resolves the actual paths and rejects
 Linux tmpfs/ramfs build directories, temporary directories and native build
 symlink targets. Candidate libraries now live under `build_root/candidates`;
 existing named candidates retain their immutable recorded paths.
+
+`settings.kv_format` also accepts `nvfp4` for builtin model forward and
+forward profiling. Stateful attention and GQA-block replay remain HQ G32-only;
+NVFP4 G16 cache views are rejected. No NVFP4 attention hot-load ABI is added.
+
 The context must fit each prepared prompt and its output budget. `benchmark`
 fixes the request used by recording and quick forward. The default is
 `astropy__astropy-12907`; alternatives are `django__django-10097` and

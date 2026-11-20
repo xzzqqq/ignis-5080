@@ -1,5 +1,6 @@
 // Model-local code replacement for the offline experiment engine.
 #include "ignis_gqa_native.h"
+#include "ignis_nvfp4_kv.h"
 #include "trellis_candidate.h"
 #include "gqa_candidate.h"
 #include "lab_segment.h"
@@ -156,7 +157,7 @@ extern "C" int32_t ignis_model_reload_trellis(ignis_model *model, ignis_seq_pool
 namespace ignis {
 bool gqa_candidate_applies(const ignis_model &m,const ninfer::Tensor &q,const ninfer::PagedKVBatchLayerView &cache){
   return m.trellis_candidate && m.trellis_candidate->gqa && q.ne[0]==256 && q.ne[1]==24 &&
-      q.ne[2]==8 && q.ne[3]==1 && cache.dtype==ninfer::DType::U8;
+      q.ne[2]==8 && q.ne[3]==1 && cache.dtype==ninfer::DType::U8 && cache.quant_group==32;
 }
 bool gqa_native_attention_applies(const ignis_model &m,const ninfer::Tensor &q,
     const ninfer::PagedKVBatchLayerView &cache){
@@ -176,6 +177,10 @@ void gqa_attention_dispatch(const ignis_model &m,const ninfer::Tensor &q,const n
     const ninfer::Tensor &rows,const ninfer::Tensor &gate,float scale,
     ninfer::PagedKVBatchLayerView cache,ninfer::ops::GqaExecutionEnvelope envelope,ninfer::DeviceArena &arena,
     ninfer::Tensor &out,cudaStream_t stream,void *replay_workspace,uint64_t replay_bytes){
+  if(nvfp4_cache(cache)) {
+    nvfp4_attention(q,k,v,positions,valid,rows,gate,scale,cache,envelope,arena,out,stream);
+    return;
+  }
   const bool extension=gqa_candidate_applies(m,q,cache);
   const bool native=!extension && gqa_native_attention_applies(m,q,cache);
   if(!extension && !native){

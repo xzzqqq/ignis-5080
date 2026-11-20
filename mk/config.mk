@@ -13,7 +13,8 @@ LOG_LEVEL ?=
 LOG_FORMAT ?=
 API_KEY ?=
 MAX_CONTEXT ?=
-KV_FORMAT ?= hq-e8-2b
+# Empty follows the server's family-scoped profile; an explicit value overrides it.
+KV_FORMAT ?=
 PREFILL_CHUNK ?=
 DECODE_SHARE ?=
 REQUEST_TIMEOUT ?=

@@ -13,11 +13,13 @@
 #include "attention_readout.h"
 
 #include "hq_prompt_keys.cuh"
+#include "nvfp4_codec.cuh"
 
 #include "ops/kernel/hq_codec.cuh"
 #include "ops/kernel/paged_kv_address.cuh"
 
 #include <cuda_bf16.h>
+#include <stdexcept>
 
 namespace {
 
@@ -48,14 +50,42 @@ __device__ __forceinline__ void fetch_span_rows(const IgnisHqPromptKeys &keys, i
                                    stage.rows[warp][group], stage.signs);
 }
 
-// `kHq`: keys as ignis's prompt attention read them (`keys`); otherwise from the
-// BF16 pages.
-template <bool kHq>
+// NVFP4 keeps normal-frame keys. Reuse the production decoder, staging one
+// complete row per warp; neither Q nor K takes an HQ transform here.
+__device__ __forceinline__ void fetch_nv4_row(
+    const IgnisHqPromptKeys &keys, const __nv_bfloat16 *codes, const std::uint8_t *scales,
+    const std::int32_t *table, int head, std::int64_t position,
+    __nv_bfloat16 *out, int lane) {
+  if (keys.residual_k) {
+    auto source = ignis_hq_prompt::key_source(keys, position);
+    const auto *raw = static_cast<const __nv_bfloat16 *>(keys.new_k);
+    const auto *side = static_cast<const __nv_bfloat16 *>(keys.residual_k);
+    const __nv_bfloat16 *p = nullptr;
+    if (source == ignis_hq_prompt::KeySource::Fresh)
+      p = raw + ((position - keys.start) * kKvHeads + head) * kHeadDim;
+    if (source == ignis_hq_prompt::KeySource::Side)
+      p = ninfer::ops::hq_residual_row<ignis_hq_prompt::Geometry>(side, 0, head, position);
+    if (p) {
+      reinterpret_cast<int4 *>(out)[lane] = reinterpret_cast<const int4 *>(p)[lane];
+      return;
+    }
+  }
+  const auto code_offset = ninfer::ops::paged_kv_element_offset<128, kKvHeads>(
+      table, head, static_cast<std::int32_t>(position), 0);
+  const auto scale_offset = ninfer::ops::paged_kv_element_offset<16, kKvHeads>(
+      table, head, static_cast<std::int32_t>(position), 0);
+  ignis::nv4::load8(reinterpret_cast<const std::uint8_t *>(codes) + code_offset,
+                    scales + scale_offset, lane * 8, out + lane * 8);
+}
+
+// kHq consumes the HQ rotated frame; kNv4 decodes the normal-frame NVFP4
+// pages. The default remains the original BF16 page route.
+template <bool kHq, bool kNv4 = false>
 __global__ void attention_readout_kernel(const __nv_bfloat16 *query, const IgnisHqPromptKeys keys,
                                          const __nv_bfloat16 *k_pages,
                                          const std::int32_t *block_table, std::int32_t kv_head,
                                          std::int64_t key_begin, std::int64_t key_count,
-                                         float scale, float *scores) {
+                                         float scale, float *scores, const std::uint8_t *k_scales = nullptr) {
   __shared__ float q[kHeadDim];
   __shared__ __align__(16) HqStage stage;
   const int t = static_cast<int>(threadIdx.x);
@@ -89,11 +119,15 @@ __global__ void attention_readout_kernel(const __nv_bfloat16 *query, const Ignis
        k0 < key_count; k0 += static_cast<std::int64_t>(gridDim.x) * kWarpsPerBlock * per_warp) {
     if (kHq) {
       fetch_span_rows(keys, kv_head, key_begin, key_count, k0, stage, warp);
+    } else if constexpr (kNv4) {
+      fetch_nv4_row(keys, k_pages, k_scales, block_table, kv_head, key_begin + k0,
+                    stage.rows[warp][0], lane);
+      __syncwarp();
     }
     for (int r = 0; r < per_warp && k0 + r < key_count; ++r) {
       const std::int64_t k = k0 + r;
       const __nv_bfloat16 *row =
-          kHq ? stage.rows[warp][r]
+          (kHq || kNv4) ? stage.rows[warp][r]
               : k_pages + ninfer::ops::paged_kv_element_offset<kHeadDim, kKvHeads>(
                               block_table, kv_head, static_cast<std::int32_t>(key_begin + k), 0);
       float acc = 0.0F;
@@ -135,6 +169,7 @@ struct NeighbourGatherArgs {
   const __nv_bfloat16 *query;
   IgnisHqPromptKeys keys;  // hq: where the prompt attention read its keys
   const __nv_bfloat16 *k_pages;
+  const std::uint8_t *k_scales;
   const std::int32_t *block_table;
   std::int64_t key_begin;
   std::int64_t key_count;
@@ -152,7 +187,7 @@ struct NeighbourGatherArgs {
 // head into shared memory exactly as the fused kernel does, scores the one key
 // its neighbour sits on, and writes it. At most 24 heads x 4 -- 384 dot
 // products against keys fetched as the prompt attention fetched them.
-template <bool kHq>
+template <bool kHq, bool kNv4 = false>
 __global__ void neighbour_gather_kernel(const NeighbourGatherArgs args) {
   __shared__ float q[kHeadDim];
   __shared__ __align__(16) HqStage stage;
@@ -214,9 +249,13 @@ __global__ void neighbour_gather_kernel(const NeighbourGatherArgs args) {
                                        stage.rows[0][t >> 3], stage.signs);
     }
     __syncthreads();
+  } else if constexpr (kNv4) {
+    if (t < 32) fetch_nv4_row(args.keys, args.k_pages, args.k_scales, args.block_table, kv_head,
+                               position, stage.rows[0][0], t);
+    __syncthreads();
   }
   const __nv_bfloat16 *krow =
-      kHq ? stage.rows[0][0]
+      (kHq || kNv4) ? stage.rows[0][0]
           : args.k_pages + ninfer::ops::paged_kv_element_offset<kHeadDim, kKvHeads>(
                                args.block_table, kv_head, static_cast<std::int32_t>(position), 0);
   float acc = q[t] * __bfloat162float(krow[t]);
@@ -245,6 +284,7 @@ struct SetReadoutArgs {
   const __nv_bfloat16 *query; // the chunk's last column, [q_heads * 256]
   IgnisHqPromptKeys keys;     // hq: where the prompt attention read its keys
   const __nv_bfloat16 *k_pages;
+  const std::uint8_t *k_scales;
   const std::int32_t *block_table;
   std::int64_t key_begin;
   std::int64_t key_count;
@@ -269,7 +309,7 @@ struct SetReadoutArgs {
 // `atomicMax` per block per head publishes it. The first prototype published
 // one per key per head, on as many addresses as heads, and was 3-5x slower
 // (spec 14, tools/pointing-scenes/bench_readout.cu).
-template <bool kHq>
+template <bool kHq, bool kNv4 = false>
 __global__ void attention_set_readout_kernel(const SetReadoutArgs args) {
   __shared__ float q[kGroup][kHeadDim];
   __shared__ std::int32_t mine_head[kGroup];
@@ -334,12 +374,16 @@ __global__ void attention_set_readout_kernel(const SetReadoutArgs args) {
        k0 += static_cast<std::int64_t>(gridDim.x) * kWarpsPerBlock * per_warp) {
     if (kHq) {
       fetch_span_rows(args.keys, kv_head, args.key_begin, args.key_count, k0, stage, warp);
+    } else if constexpr (kNv4) {
+      fetch_nv4_row(args.keys, args.k_pages, args.k_scales, args.block_table, kv_head,
+                    args.key_begin + k0, stage.rows[warp][0], lane);
+      __syncwarp();
     }
     for (int r = 0; r < per_warp && k0 + r < args.key_count; ++r) {
       const std::int64_t k = k0 + r;
       const std::int64_t position = args.key_begin + k;
       const __nv_bfloat16 *row =
-          kHq ? stage.rows[warp][r]
+          (kHq || kNv4) ? stage.rows[warp][r]
               : args.k_pages +
                     ninfer::ops::paged_kv_element_offset<kHeadDim, kKvHeads>(
                         args.block_table, kv_head, static_cast<std::int32_t>(position), 0);
@@ -402,7 +446,25 @@ __global__ void attention_set_readout_kernel(const SetReadoutArgs args) {
   }
 }
 
+__global__ void capture_nvfp4_keys(IgnisHqPromptKeys keys, int begin, int count, __nv_bfloat16 *dst) {
+  const int pos = blockIdx.x * kWarpsPerBlock + threadIdx.x / 32;
+  if (pos >= count) return;
+  const int head = blockIdx.y;
+  fetch_nv4_row(keys, static_cast<const __nv_bfloat16 *>(keys.codes_k),
+                static_cast<const std::uint8_t *>(keys.meta_k), keys.block_table, head,
+                begin + pos, dst + (std::int64_t(head) * count + pos) * kHeadDim, threadIdx.x % 32);
+}
+
 } // namespace
+
+void ignis_nvfp4_fetch_rows(const IgnisHqPromptKeys &keys, bool values, int begin,
+                            int count, void *dst, cudaStream_t stream) {
+  if (values) throw std::invalid_argument("NVFP4 readout captures keys only");
+  capture_nvfp4_keys<<<dim3((count + kWarpsPerBlock - 1) / kWarpsPerBlock, kKvHeads),
+                       kThreads, 0, stream>>>(keys, begin, count, static_cast<__nv_bfloat16 *>(dst));
+  const auto err = cudaGetLastError();
+  if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+}
 
 int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
                                     const void *rotated_query, int32_t q_heads, int32_t kv_heads,
@@ -436,13 +498,18 @@ int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
   if (target.key_begin < 0 || target.key_count <= 0 || key_end > visible_keys) {
     return 0;
   }
-  const bool hq = cache.dtype == ninfer::DType::U8;
+  const bool hq = cache.dtype == ninfer::DType::U8 && cache.quant_group == 32;
+  const bool nv4 = cache.dtype == ninfer::DType::U8 && cache.quant_group == 16;
+  if (!hq && !nv4 && cache.dtype != ninfer::DType::BF16) {
+    *error = "attention readout: unsupported cache encoding";
+    return -1;
+  }
   // Under hq-e8-2b only ignis's prompt attention says where its keys are: a
   // small-T route decodes in registers and names none.
   if (hq && hq_keys == nullptr) {
     return 0;
   }
-  const IgnisHqPromptKeys keys = hq ? *hq_keys : IgnisHqPromptKeys{};
+  const IgnisHqPromptKeys keys = hq_keys ? *hq_keys : IgnisHqPromptKeys{};
   const auto *last_column = static_cast<const __nv_bfloat16 *>(rotated_query) +
                             (static_cast<std::int64_t>(tokens) - 1) * q_heads * kHeadDim;
   const std::int64_t wanted_blocks = (target.key_count + kWarpsPerBlock - 1) / kWarpsPerBlock;
@@ -455,6 +522,12 @@ int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
       attention_readout_kernel<true><<<blocks, kThreads, 0, stream>>>(
           query, keys, nullptr, nullptr, kv_head, target.key_begin, target.key_count, scale,
           target.device_scores);
+    } else if (nv4) {
+      attention_readout_kernel<false, true><<<blocks, kThreads, 0, stream>>>(
+          query, keys, static_cast<const __nv_bfloat16 *>(cache.k_pages.data),
+          static_cast<const std::int32_t *>(cache.block_tables.data), kv_head, target.key_begin,
+          target.key_count, scale, target.device_scores,
+          static_cast<const std::uint8_t *>(cache.k_scale_pages.data));
     } else {
       attention_readout_kernel<false><<<blocks, kThreads, 0, stream>>>(
           query, keys, static_cast<const __nv_bfloat16 *>(cache.k_pages.data),
@@ -468,6 +541,7 @@ int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
     args.query = last_column;
     args.keys = keys;
     args.k_pages = hq ? nullptr : static_cast<const __nv_bfloat16 *>(cache.k_pages.data);
+    args.k_scales = nv4 ? static_cast<const std::uint8_t *>(cache.k_scale_pages.data) : nullptr;
     args.block_table = hq ? nullptr : static_cast<const std::int32_t *>(cache.block_tables.data);
     args.key_begin = target.key_begin;
     args.key_count = target.key_count;
@@ -496,6 +570,8 @@ int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
     const dim3 grid(blocks, static_cast<unsigned>(kv_heads));
     if (hq) {
       attention_set_readout_kernel<true><<<grid, kThreads, 0, stream>>>(args);
+    } else if (nv4) {
+      attention_set_readout_kernel<false, true><<<grid, kThreads, 0, stream>>>(args);
     } else {
       attention_set_readout_kernel<false><<<grid, kThreads, 0, stream>>>(args);
     }
@@ -516,6 +592,7 @@ int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
     gather.query = args.query;
     gather.keys = args.keys;
     gather.k_pages = args.k_pages;
+    gather.k_scales = args.k_scales;
     gather.block_table = args.block_table;
     gather.key_begin = args.key_begin;
     gather.key_count = args.key_count;
@@ -532,6 +609,8 @@ int32_t ignis_attention_readout_run(const AttentionReadoutTarget &target,
     const dim3 gather_grid(static_cast<unsigned>(target.set_heads), 4);
     if (hq) {
       neighbour_gather_kernel<true><<<gather_grid, kThreads, 0, stream>>>(gather);
+    } else if (nv4) {
+      neighbour_gather_kernel<false, true><<<gather_grid, kThreads, 0, stream>>>(gather);
     } else {
       neighbour_gather_kernel<false><<<gather_grid, kThreads, 0, stream>>>(gather);
     }

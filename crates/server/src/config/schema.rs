@@ -308,9 +308,9 @@ config_group! {
         /// The prompt and output must fit within `max_context`. A request's explicit
         /// cap takes precedence. 0 allows output up to the remaining context.
         default_max_tokens: Tokens = super::DEFAULT_MAX_TOKENS, NO_RULE, ALL, [Visible, Patchable, ReloadRequired, Scoped];
-        /// KV storage format: `hq-e8-2b` by default, or `bf16` for reference
-        /// comparisons.
-        kv_format: KvFormatKind = KvFormat::default(), Validator::OneOf(&["bf16", "hq-e8-2b", "hq_e8_2b", "hq"]), ALL,
+        /// KV storage format: `nvfp4` for Qwen3.8-27B, `hq-e8-2b`, or `bf16`
+        /// for reference comparisons. The base default is `hq-e8-2b`.
+        kv_format: KvFormatKind = KvFormat::default(), Validator::OneOf(&["bf16", "hq-e8-2b", "hq_e8_2b", "hq", "nvfp4"]), ALL,
             [Visible, Patchable, ReloadRequired, Scoped];
         /// Prompt attention precision: `fp8` by default, or `fp16` for FP16
         /// accumulation.

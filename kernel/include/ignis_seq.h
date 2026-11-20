@@ -135,7 +135,11 @@ enum ignis_kv_format {
    * head) row occupies exactly those fixed budgets, so page addressing and
    * capacity math are unchanged; 9,216 bytes per sequence-token, 7.11x
    * denser than BF16. */
-  IGNIS_KV_FORMAT_HQ_E8_2B = 1
+  IGNIS_KV_FORMAT_HQ_E8_2B = 1,
+  /* NVFP4 E2M1 values with one E4M3 scale per16 elements, fixed global1.
+   * FourU8 planes Kcode[D/2],Kscale[D/16],Vcode,Vscale perlayer;
+   * BF16 sink and recent rows use the per-slot residual window. */
+  IGNIS_KV_FORMAT_NVFP4 = 2
 };
 
 /* The geometry a sequence-state pool is built from. KV pages carry
@@ -437,6 +441,7 @@ int32_t ignis_seq_pool_fence_wait(struct ignis_seq_pool *pool, uint64_t fence);
  * ignis_seq_restore, never reinterpreted, so a caller that persists blobs
  * across builds records this alongside them. */
 uint32_t ignis_seq_snapshot_format_version(void);
+uint32_t ignis_seq_snapshot_format_version_for_kv(int32_t kv_format);
 
 /* The blob layout version `pool` writes and accepts (GitHub #303): per model
  * family -- the 27B's above, or Flash-Next's own numbering for a pool with

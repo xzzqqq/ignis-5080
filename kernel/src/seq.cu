@@ -103,12 +103,20 @@ void push_layer_planes(ninfer::PagedKVPoolSpec &spec, int32_t kv_format, uint32_
     spec.planes.push_back({ninfer::DType::U8, kIgnisHqMetaRowBytes, heads});
     return;
   }
+  if (kv_format == IGNIS_KV_FORMAT_NVFP4) {
+    spec.planes.push_back({ninfer::DType::U8, static_cast<std::int32_t>(head_dim / 2), heads});
+    spec.planes.push_back({ninfer::DType::U8, static_cast<std::int32_t>(head_dim / 16), heads});
+    spec.planes.push_back({ninfer::DType::U8, static_cast<std::int32_t>(head_dim / 2), heads});
+    spec.planes.push_back({ninfer::DType::U8, static_cast<std::int32_t>(head_dim / 16), heads});
+    return;
+  }
   spec.planes.push_back({ninfer::DType::BF16, static_cast<std::int32_t>(head_dim), heads});
   spec.planes.push_back({ninfer::DType::BF16, static_cast<std::int32_t>(head_dim), heads});
 }
 
 bool known_kv_format(int32_t kv_format) {
-  return kv_format == IGNIS_KV_FORMAT_BF16 || kv_format == IGNIS_KV_FORMAT_HQ_E8_2B;
+  return kv_format == IGNIS_KV_FORMAT_BF16 || kv_format == IGNIS_KV_FORMAT_HQ_E8_2B ||
+         kv_format == IGNIS_KV_FORMAT_NVFP4;
 }
 
 // Zero `slot`'s lane of the drafter window (P5-03, GitHub #152), so a
@@ -739,6 +747,11 @@ bool validate_pool_spec(const struct ignis_seq_pool_spec &spec, const std::strin
               ", got " + std::to_string(spec.head_dim));
     return false;
   }
+  if (spec.kv_format == IGNIS_KV_FORMAT_NVFP4 &&
+      (spec.head_dim != 256 || spec.num_kv_heads != 4)) {
+    set_error(fn + ": nvfp4 KV requires head_dim256 and4 KV heads");
+    return false;
+  }
   if (spec.speculative_backend != IGNIS_SPECULATIVE_NONE &&
       spec.speculative_backend != IGNIS_SPECULATIVE_DFLASH2 &&
       spec.speculative_backend != IGNIS_SPECULATIVE_VERIFY_ONLY) {
@@ -858,7 +871,7 @@ PoolLayout plan_pool_layout(const struct ignis_seq_pool_spec &spec) {
   // 0030): its bytes come off the KV pool's budget, never out of a request.
   // Each (layer, slot) plane is 1.06 MiB at 4 KV heads, a multiple of the
   // 256-byte alignment, so the three regions pack without padding.
-  if (spec.kv_format == IGNIS_KV_FORMAT_HQ_E8_2B) {
+  if (spec.kv_format == IGNIS_KV_FORMAT_HQ_E8_2B || spec.kv_format == IGNIS_KV_FORMAT_NVFP4) {
     out.hq_residual_plane_bytes = static_cast<std::size_t>(kIgnisHqHeadDim) * spec.num_kv_heads *
                                   kIgnisHqResidualRows * sizeof(std::uint16_t);
     const std::size_t planes = static_cast<std::size_t>(spec.kv_num_layers) * state_slots;
@@ -1805,6 +1818,11 @@ extern "C" int32_t ignis_seq_pool_fence_wait(struct ignis_seq_pool *pool, uint64
 
 extern "C" uint32_t ignis_seq_snapshot_format_version(void) {
   return kIgnisSeqSnapshotFormatVersion;
+}
+
+extern "C" uint32_t ignis_seq_snapshot_format_version_for_kv(int32_t kv_format) {
+  // Previous NVFP4 images have no BF16 residual planes or validity words.
+  return kv_format == IGNIS_KV_FORMAT_NVFP4 ? 6 : kIgnisSeqSnapshotFormatVersion;
 }
 
 extern "C" uint32_t ignis_seq_pool_snapshot_format_version(const struct ignis_seq_pool *pool) {

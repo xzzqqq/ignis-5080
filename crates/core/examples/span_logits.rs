@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run --release -p ignis-core --features cuda --example span_logits -- \
-//!     ARTIFACT KV_FORMAT WINDOWS_JSON OUT_DIR [PREFILL_CHUNK [TAIL]]
+//!     ARTIFACT KV_FORMAT WINDOWS_JSON OUT_DIR [PREFILL_CHUNK [TAIL [TAIL_STEP]]]
 //! ```
 //!
 //! `WINDOWS_JSON` is a JSON array of token-id arrays. Each window is
@@ -13,8 +13,13 @@
 //! logits land in `OUT_DIR/wNNN.bin`. Row `i` is the distribution of the
 //! token after `window[i]`. With `TAIL`, only the last `TAIL` rows are read
 //! (a long window's head is prefilled first, without logits, so a 32K window
-//! costs 1 GB of host memory rather than 16); `TAIL` must be a multiple of
-//! the chunk so the chunks are the ones a whole-window prefill cuts.
+//! costs 1 GB of host memory rather than 16). Without `TAIL_STEP`, `TAIL`
+//! must be a multiple of the chunk; original whole-window chunk cuts also
+//! require the head prefix length to be chunk-aligned. With `TAIL_STEP`,
+//! only the tail is submitted in smaller calls (e.g. TAIL32/TAIL_STEP8);
+//! the head retains the configured prefill chunk. These are eager prefill
+//! traversals, not verify-graph replay. The output head's internal 32-column
+//! readout blocks do not change the backbone's attention width.
 //! `IGNIS_MODEL_EXCEPTION_WEIGHTS=fp8`, the server's own variable for
 //! `--model-exception-weights`, holds the BF16 exception tensors in FP8
 //! (GitHub #341); unset, they are held as stored, as the server's default.
@@ -22,7 +27,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use ignis_artifact::{CudaDevice, ModelScope, VisionResidency, Reader, bind_model_scope_27b_with, materialize};
+use ignis_artifact::{CudaDevice, FrontendSet, ModelScope, VisionResidency, Reader, bind_model_scope_27b_with, materialize};
 use ignis_core::{ExceptionWeights, KvFormat};
 use ignis_core::compute::ModelConfig;
 use ignis_core::model_load::load_qwen38_27b;
@@ -33,16 +38,31 @@ const SERVING_PREFILL_CHUNK: u32 = 1024;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if !(5..=7).contains(&args.len()) {
-        eprintln!("usage: span_logits ARTIFACT KV_FORMAT WINDOWS_JSON OUT_DIR [PREFILL_CHUNK [TAIL]]");
+    // CPU-only input preparation uses the exact tokenizer embedded in the artifact.
+    if args.get(1).map(String::as_str) == Some("--tokenize") {
+        assert_eq!(args.len(), 5, "--tokenize ARTIFACT TEXTS_JSON TOKENS_JSON");
+        let reader = Reader::open(Path::new(&args[2])).expect("open tokenizer artifact");
+        let frontend = FrontendSet::from_reader(&reader).expect("load artifact tokenizer");
+        let texts: Vec<String> = serde_json::from_slice(&std::fs::read(&args[3]).expect("read texts")).expect("texts JSON");
+        let tokens: Vec<Vec<i32>> = texts.iter().map(|text| frontend.tokenizer().encode(text).expect("tokenize").into_iter().map(|id| i32::try_from(id).expect("token id fits i32")).collect()).collect();
+        std::fs::write(&args[4], serde_json::to_vec(&tokens).expect("serialize tokens")).expect("write tokens");
+        return;
+    }
+    if !(5..=8).contains(&args.len()) {
+        eprintln!("usage: span_logits ARTIFACT KV_FORMAT WINDOWS_JSON OUT_DIR [PREFILL_CHUNK [TAIL [TAIL_STEP]]]");
         std::process::exit(2);
     }
     let prefill_chunk: u32 = args
         .get(5)
         .map_or(SERVING_PREFILL_CHUNK, |v| v.parse().unwrap_or_else(|e| panic!("prefill chunk: {e}")));
     let tail: Option<usize> = args.get(6).map(|v| v.parse().unwrap_or_else(|e| panic!("tail: {e}")));
-    if let Some(tail) = tail {
-        assert!(tail % prefill_chunk as usize == 0, "TAIL {tail} is not a multiple of the chunk {prefill_chunk}");
+    let tail_step: Option<usize> = args.get(7).map(|v| v.parse().unwrap_or_else(|e| panic!("tail step: {e}")));
+    if let Some(step) = tail_step {
+        let tail = tail.expect("TAIL_STEP requires TAIL");
+        assert!(step > 0 && step <= prefill_chunk as usize && tail > 0 && tail % step == 0,
+                "TAIL_STEP must be positive, <= PREFILL_CHUNK, and divide the positive TAIL");
+    } else if let Some(tail) = tail {
+        assert!(tail > 0 && tail % prefill_chunk as usize == 0, "TAIL {tail} is not a positive multiple of the chunk {prefill_chunk}");
     }
     let kv_format = KvFormat::parse(&args[2]).unwrap_or_else(|e| panic!("kv format: {e}"));
     let windows: Vec<Vec<i32>> = serde_json::from_str(
@@ -81,6 +101,9 @@ fn main() {
 
     for (index, window) in windows.iter().enumerate() {
         let began = std::time::Instant::now();
+        if tail_step.is_some() {
+            assert!(tail.unwrap() <= window.len(), "window {index} is shorter than TAIL");
+        }
         let head = tail.map_or(0, |tail| window.len().saturating_sub(tail));
         let mut rows = vec![0u16; (window.len() - head) * vocab];
         {
@@ -89,8 +112,49 @@ fn main() {
                 prefill_program(&model, &pool, &mut sequence, &window[..head], 0, None)
                     .unwrap_or_else(|e| panic!("window {index} head: {e}"));
             }
-            prefill_program_span_logits(&model, &pool, &mut sequence, &window[head..], head as u64, &mut rows)
-                .unwrap_or_else(|e| panic!("window {index}: {e}"));
+            let step = tail_step.unwrap_or(window.len() - head);
+            assert!(step > 0, "window {index} has no tail tokens");
+            for offset in (0..window.len() - head).step_by(step) {
+                let end = (offset + step).min(window.len() - head);
+                prefill_program_span_logits(
+                    &model, &pool, &mut sequence, &window[head + offset..head + end],
+                    (head + offset) as u64, &mut rows[offset * vocab..end * vocab],
+                ).unwrap_or_else(|e| panic!("window {index}, tail offset {offset}: {e}"));
+            }
+        }
+        if std::env::var_os("IGNIS_SPAN_CHECK_ORDINARY").is_some() {
+            assert!(tail.is_none(), "ordinary cross-check requires full-window span logits");
+            let mut sequence = pool.alloc(max_context).expect("ordinary check sequence");
+            let mut cuts = vec![prefill_chunk as usize, window.len()];
+            cuts.retain(|&cut| cut <= window.len());
+            cuts.sort_unstable();
+            cuts.dedup();
+            let mut previous = 0;
+            let mut checks = vec![];
+            for cut in cuts {
+                let mut ordinary = vec![0f32; vocab];
+                prefill_program(&model, &pool, &mut sequence, &window[previous..cut], previous as u64, Some(&mut ordinary))
+                    .unwrap_or_else(|e| panic!("ordinary window {index}, cut {cut}: {e}"));
+                let reference = &rows[(cut - 1) * vocab..cut * vocab];
+                let mut squared = 0f64;
+                let mut norm = 0f64;
+                let mut maximum = 0f64;
+                let mut changed = 0usize;
+                for (&span, &last) in reference.iter().zip(&ordinary) {
+                    let span = f32::from_bits(u32::from(span) << 16);
+                    let delta = f64::from(span) - f64::from(last);
+                    squared += delta * delta;
+                    norm += f64::from(last) * f64::from(last);
+                    maximum = maximum.max(delta.abs());
+                    changed += usize::from(span.to_bits() != last.to_bits());
+                }
+                let path = out_dir.join(format!("w{index:03}.ordinary_p{cut:06}.f32"));
+                let data: Vec<u8> = ordinary.iter().flat_map(|v| v.to_le_bytes()).collect();
+                std::fs::write(&path, data).expect("write ordinary logits");
+                checks.push(serde_json::json!({"cut":cut,"changed":changed,"total":vocab,"max_abs":maximum,"relative_l2":(squared/norm).sqrt()}));
+                previous = cut;
+            }
+            std::fs::write(out_dir.join(format!("w{index:03}.ordinary_checks.json")), serde_json::to_vec_pretty(&checks).unwrap()).unwrap();
         }
         let path = out_dir.join(format!("w{index:03}.bin"));
         let mut file = std::io::BufWriter::new(

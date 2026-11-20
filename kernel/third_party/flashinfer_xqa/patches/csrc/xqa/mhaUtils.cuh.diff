@@ -1,0 +1,12 @@
+--- a/reference/csrc/xqa/mhaUtils.cuh
++++ b/vendor/csrc/xqa/mhaUtils.cuh
+@@ -252,6 +252,9 @@
+       kvCachePageList;  // shape: KVCachePageIndex[batchSize][beamWidth][2][maxNbPagesPerSeq].
+   SeqLenDataType const* seqLenList;  // shape: [batchSize][beamWidth] (for compatibility)
+   uint32_t maxNbPagesPerSeq;
++  ignis::nv4::Window window{};
++  const int *slot{};
++  const uint2 *schedule{};
+ };
+ 
+ template <>

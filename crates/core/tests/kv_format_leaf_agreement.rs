@@ -41,7 +41,7 @@ fn every_formats_page_geometry_matches_the_leafs_own_budget_query() {
     // cancelling out.
     let budget: u64 = 3_000_000_000;
 
-    for format in [KvFormat::Bf16, KvFormat::HqE8_2b] {
+    for format in [KvFormat::Bf16, KvFormat::HqE8_2b, KvFormat::Nvfp4] {
         let planes = leaf_planes(&format.pool_planes(geometry));
         let leaf = paged_kv_page_budget(&planes, budget)
             .unwrap_or_else(|e| panic!("{format}: ignis_paged_kv_page_budget: {e}"));
@@ -69,7 +69,7 @@ fn one_gqa_layers_planes_cost_what_the_leaf_says_they_do() {
     // The same agreement one layer at a time, so a mismatch names the layer's
     // planes rather than only the pool total.
     let geometry = KvGeometry::qwen38_27b();
-    for format in [KvFormat::Bf16, KvFormat::HqE8_2b] {
+    for format in [KvFormat::Bf16, KvFormat::HqE8_2b, KvFormat::Nvfp4] {
         let specs = format.planes_per_gqa_layer(geometry);
         let planes = leaf_planes(&specs);
         // One page's worth of budget: the query then reports exactly one

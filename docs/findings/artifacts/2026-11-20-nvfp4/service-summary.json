@@ -1,0 +1,901 @@
+{
+  "schema": "ignis.nvfp4.service-summary/1",
+  "status": "R1 measurements closed; R2 targeted/post checks closed. Django still length-capped under Rewind; no actual rewind demonstrated; default-policy adoption not declared.",
+  "scope": "Three frozen coding-agent next-response fixtures; no tools execute and no SWE-bench task score is computed. Own-TPS on changed histories is not same-work speedup.",
+  "protocol": {
+    "baseline": "coding-agent fixed C1 protocol",
+    "full_warmup_per_fixture": 1,
+    "measured_samples_per_fixture": 3,
+    "generation": "greedy temperature0 seed0 top_p1 top_k0, reasoning enabled/max effort, no thinking budget, EOS honored, max8192, prompt reuse disabled",
+    "benchmark_loop_guard": "off",
+    "normal_product_loop_guard": "Rewind",
+    "guarded_product_functional_check_is_separate": true,
+    "pure_target_forward_timing_available": false,
+    "decode_wall_includes": [
+      "drafting",
+      "target verification",
+      "sampling",
+      "scheduling"
+    ],
+    "truncated_sample_can_be_protocol_valid_but_is_not_task_turn_success": true
+  },
+  "R1_service": {
+    "hq-control": {
+      "revision": "R1",
+      "benchmark_protocol_passed": true,
+      "benchmark_runner_exit_code": 0,
+      "run_record_sha256": "33587ace7e4d52b45d43e8894b079bf3266753d0d4f6cf6df2991581d7a17176",
+      "loaded_record_sha256": "9c61c9529f2d4a89111584592cb412c1cac5f166ece3e277eaa15f8279066e1f",
+      "configuration": {
+        "kv_format": "hq-e8-2b",
+        "max_context": 139264,
+        "prefill_chunk": 1024,
+        "decode_lanes": 2,
+        "rope_scaling": "none",
+        "speculation": "dflash2 draft_tokens=7 draft_head=full",
+        "vision": "max_tokens=4096 item_max_tokens=4096"
+      },
+      "loop_guard": "off",
+      "exception_weights_requested": "bf16",
+      "cases": [
+        {
+          "id": "astropy__astropy-12907",
+          "request_sha256": "1b853f04963f40784e4c9b130612b335648d1413f692888a6f17a2f12c9e18b6",
+          "input_tokens": 19954,
+          "median_own_output_tokens_per_s": 238.77917863195253,
+          "median_prefill_ms": 8744.643594,
+          "median_decode_wall_ms": 4573.263072,
+          "canonical_messages_identical_in_three_samples": true,
+          "common_to_three_samples": {
+            "canonical_message_sha256": "184bf1d7a998f9cd44bb3ca43ec3218607db93b030e6ec98d37c30aa2b34fd77",
+            "reasoning_characters": 3536,
+            "content_characters": 367,
+            "tool_count": 1,
+            "tools": [
+              {
+                "name": "str_replace_editor",
+                "arguments_JSON_valid": true,
+                "argument_keys": [
+                  "command",
+                  "path",
+                  "view_range"
+                ]
+              }
+            ],
+            "output_tokens": 1092,
+            "input_tokens": 19954,
+            "cached_tokens": 0,
+            "finish_reason": "tool_calls",
+            "truncated": false,
+            "protocol_sample_valid": true,
+            "rounds": 222,
+            "accepted": 871,
+            "drafted": 1554,
+            "accepted_per_drafted": 0.5604890604890604,
+            "first_draft_acceptance": 0.8963963963963963,
+            "seventh_draft_acceptance": 0.3333333333333333,
+            "accepted_at": [
+              199,
+              169,
+              135,
+              113,
+              98,
+              83,
+              74
+            ],
+            "drafted_at": [
+              222,
+              222,
+              222,
+              222,
+              222,
+              222,
+              222
+            ],
+            "output_tokens_per_round": 4.918918918918919
+          },
+          "samples": [
+            {
+              "response_sha256": "d53a6f411e4dbaa426c09caef78149e8c26d61b427a15f1322a7801b070653fd",
+              "prefill_ms": 8705.407455,
+              "decode_wall_ms": 4561.913287,
+              "server_elapsed_ms": 13267.320742,
+              "request_total_ms": 13293.199015999999,
+              "own_output_tokens_per_s": 239.37324786769886,
+              "decode_wall_ms_per_round_not_target_forward": 20.54915895045045
+            },
+            {
+              "response_sha256": "632154a441e727a4d62eb25b38d78677ba70f27bbd7360719d1ba312f4962e4c",
+              "prefill_ms": 8744.643594,
+              "decode_wall_ms": 4573.263072,
+              "server_elapsed_ms": 13317.906666,
+              "request_total_ms": 13344.066657000001,
+              "own_output_tokens_per_s": 238.77917863195253,
+              "decode_wall_ms_per_round_not_target_forward": 20.600284108108106
+            },
+            {
+              "response_sha256": "bd225ce5489af0a4d874fc564209ba6869a25b9cc3785c5ecd0120037ba6a257",
+              "prefill_ms": 8772.931743000001,
+              "decode_wall_ms": 4573.700916,
+              "server_elapsed_ms": 13346.632659,
+              "request_total_ms": 13371.515681,
+              "own_output_tokens_per_s": 238.7563201126464,
+              "decode_wall_ms_per_round_not_target_forward": 20.602256378378378
+            }
+          ]
+        },
+        {
+          "id": "django__django-10097",
+          "request_sha256": "6ba9ff9701f76c71e2993c13211d22722dd4757a34a721497ed3bf9dc1c1e5c6",
+          "input_tokens": 22420,
+          "median_own_output_tokens_per_s": 223.147911549846,
+          "median_prefill_ms": 9961.93821,
+          "median_decode_wall_ms": 7887.145291999999,
+          "canonical_messages_identical_in_three_samples": true,
+          "common_to_three_samples": {
+            "canonical_message_sha256": "1c925f338806ebd44d5e3b418b55e5e24b422a652f0fd7717bfb82f7c3fb5b01",
+            "reasoning_characters": 6206,
+            "content_characters": 78,
+            "tool_count": 1,
+            "tools": [
+              {
+                "name": "bash",
+                "arguments_JSON_valid": true,
+                "argument_keys": [
+                  "command"
+                ]
+              }
+            ],
+            "output_tokens": 1760,
+            "input_tokens": 22420,
+            "cached_tokens": 0,
+            "finish_reason": "tool_calls",
+            "truncated": false,
+            "protocol_sample_valid": true,
+            "rounds": 378,
+            "accepted": 1383,
+            "drafted": 2646,
+            "accepted_per_drafted": 0.5226757369614512,
+            "first_draft_acceptance": 0.8809523809523809,
+            "seventh_draft_acceptance": 0.2777777777777778,
+            "accepted_at": [
+              333,
+              269,
+              217,
+              178,
+              154,
+              127,
+              105
+            ],
+            "drafted_at": [
+              378,
+              378,
+              378,
+              378,
+              378,
+              378,
+              378
+            ],
+            "output_tokens_per_round": 4.656084656084656
+          },
+          "samples": [
+            {
+              "response_sha256": "5ee19043aba22193d7862f49a692e85cf3d4a0f17f0f315dccd2ffbe34ca50f8",
+              "prefill_ms": 9945.091611,
+              "decode_wall_ms": 7886.639741999999,
+              "server_elapsed_ms": 17831.731353,
+              "request_total_ms": 17860.691109,
+              "own_output_tokens_per_s": 223.1622157947937,
+              "decode_wall_ms_per_round_not_target_forward": 20.8641263015873
+            },
+            {
+              "response_sha256": "9ca2a13d766a01d5cf493fb974cb4f2c2bb1b9ffb91387e3a868b3b2e1c0ca75",
+              "prefill_ms": 9961.93821,
+              "decode_wall_ms": 7887.145291999999,
+              "server_elapsed_ms": 17849.083501999998,
+              "request_total_ms": 17877.094158,
+              "own_output_tokens_per_s": 223.147911549846,
+              "decode_wall_ms_per_round_not_target_forward": 20.865463735449733
+            },
+            {
+              "response_sha256": "817ce3920be7cdeaee45153eb71670db4fd270d980502ac843ac40f323348b1f",
+              "prefill_ms": 9974.045506999999,
+              "decode_wall_ms": 7889.25879,
+              "server_elapsed_ms": 17863.304297,
+              "request_total_ms": 17891.632207000002,
+              "own_output_tokens_per_s": 223.0881311981908,
+              "decode_wall_ms_per_round_not_target_forward": 20.871055
+            }
+          ]
+        },
+        {
+          "id": "sympy__sympy-11618",
+          "request_sha256": "b61ee5ce8e04a76df569affa918c9f6fd60fa9d7086f8d14f53d255244db969d",
+          "input_tokens": 16717,
+          "median_own_output_tokens_per_s": 264.85253664680613,
+          "median_prefill_ms": 7393.761446,
+          "median_decode_wall_ms": 5176.46543,
+          "canonical_messages_identical_in_three_samples": true,
+          "common_to_three_samples": {
+            "canonical_message_sha256": "8f05fc78818e76f0145d6c8c3eb0d4c3a2638dfb4d25138094c3fc9d00ac2d95",
+            "reasoning_characters": 2863,
+            "content_characters": 267,
+            "tool_count": 1,
+            "tools": [
+              {
+                "name": "str_replace_editor",
+                "arguments_JSON_valid": true,
+                "argument_keys": [
+                  "command",
+                  "new_str",
+                  "old_str",
+                  "path"
+                ]
+              }
+            ],
+            "output_tokens": 1371,
+            "input_tokens": 16717,
+            "cached_tokens": 0,
+            "finish_reason": "tool_calls",
+            "truncated": false,
+            "protocol_sample_valid": true,
+            "rounds": 254,
+            "accepted": 1118,
+            "drafted": 1778,
+            "accepted_per_drafted": 0.6287964004499438,
+            "first_draft_acceptance": 0.9212598425196851,
+            "seventh_draft_acceptance": 0.38976377952755903,
+            "accepted_at": [
+              234,
+              211,
+              175,
+              153,
+              133,
+              113,
+              99
+            ],
+            "drafted_at": [
+              254,
+              254,
+              254,
+              254,
+              254,
+              254,
+              254
+            ],
+            "output_tokens_per_round": 5.397637795275591
+          },
+          "samples": [
+            {
+              "response_sha256": "89475d7a1062a6837251851bf8a2374b6bd9d6244f2eb998408e83682356206f",
+              "prefill_ms": 7389.497409,
+              "decode_wall_ms": 5175.981003000001,
+              "server_elapsed_ms": 12565.478412,
+              "request_total_ms": 12587.4421,
+              "own_output_tokens_per_s": 264.8773245507215,
+              "decode_wall_ms_per_round_not_target_forward": 20.37787796456693
+            },
+            {
+              "response_sha256": "4f278ad6d5634119af7eeac0fc023635ab198e6e4f55b7d73879db3f5a30904b",
+              "prefill_ms": 7393.761446,
+              "decode_wall_ms": 5176.46543,
+              "server_elapsed_ms": 12570.226875999999,
+              "request_total_ms": 12591.978944999999,
+              "own_output_tokens_per_s": 264.85253664680613,
+              "decode_wall_ms_per_round_not_target_forward": 20.379785157480317
+            },
+            {
+              "response_sha256": "7463f21779a5a8b083c18209b31e2be01a9648c8a03bad0bb79acdb6808402ee",
+              "prefill_ms": 7395.63997,
+              "decode_wall_ms": 5177.773286,
+              "server_elapsed_ms": 12573.413256,
+              "request_total_ms": 12595.270027999999,
+              "own_output_tokens_per_s": 264.7856374297034,
+              "decode_wall_ms_per_round_not_target_forward": 20.38493419685039
+            }
+          ]
+        }
+      ]
+    },
+    "nvfp4-default": {
+      "revision": "R1",
+      "benchmark_protocol_passed": true,
+      "benchmark_runner_exit_code": 0,
+      "run_record_sha256": "1211b64e8161d145c76cd57828bd35698d24ed77818bbd1b215f28304e59557d",
+      "loaded_record_sha256": "63369ae56c7cf8a4add336193cde1cc5c442c27c95ace07f175491284c9e3abd",
+      "configuration": {
+        "kv_format": "nvfp4",
+        "max_context": 139264,
+        "prefill_chunk": 1024,
+        "decode_lanes": 2,
+        "rope_scaling": "none",
+        "speculation": "dflash2 draft_tokens=7 draft_head=full",
+        "vision": "max_tokens=4096 item_max_tokens=4096"
+      },
+      "loop_guard": "off",
+      "exception_weights_requested": "bf16",
+      "cases": [
+        {
+          "id": "astropy__astropy-12907",
+          "request_sha256": "1b853f04963f40784e4c9b130612b335648d1413f692888a6f17a2f12c9e18b6",
+          "input_tokens": 19954,
+          "median_own_output_tokens_per_s": 284.67642844741397,
+          "median_prefill_ms": 9387.874074000001,
+          "median_decode_wall_ms": 2704.825279,
+          "canonical_messages_identical_in_three_samples": true,
+          "common_to_three_samples": {
+            "canonical_message_sha256": "0a8feeefea726ddf16cfeb12cc64c9550a9e4462078129554a1d08236de8e419",
+            "reasoning_characters": 2170,
+            "content_characters": 314,
+            "tool_count": 1,
+            "tools": [
+              {
+                "name": "str_replace_editor",
+                "arguments_JSON_valid": true,
+                "argument_keys": [
+                  "command",
+                  "path",
+                  "view_range"
+                ]
+              }
+            ],
+            "output_tokens": 770,
+            "input_tokens": 19954,
+            "cached_tokens": 0,
+            "finish_reason": "tool_calls",
+            "truncated": false,
+            "protocol_sample_valid": true,
+            "rounds": 137,
+            "accepted": 634,
+            "drafted": 959,
+            "accepted_per_drafted": 0.6611053180396246,
+            "first_draft_acceptance": 0.9416058394160584,
+            "seventh_draft_acceptance": 0.4744525547445255,
+            "accepted_at": [
+              129,
+              112,
+              96,
+              85,
+              77,
+              70,
+              65
+            ],
+            "drafted_at": [
+              137,
+              137,
+              137,
+              137,
+              137,
+              137,
+              137
+            ],
+            "output_tokens_per_round": 5.62043795620438
+          },
+          "samples": [
+            {
+              "response_sha256": "413f322e2c63d1dd7a95c2b190dd849330fd9d425a9bc9870b1b04da7dfa1380",
+              "prefill_ms": 9378.721058,
+              "decode_wall_ms": 2703.597776,
+              "server_elapsed_ms": 12082.318834,
+              "request_total_ms": 12123.058585,
+              "own_output_tokens_per_s": 284.80567887551035,
+              "decode_wall_ms_per_round_not_target_forward": 19.734290335766424
+            },
+            {
+              "response_sha256": "4cc03be9fcef58e8582f8cb1ad6b5583d3df2ad22d485883d5ffa7840fb7f751",
+              "prefill_ms": 9387.874074000001,
+              "decode_wall_ms": 2704.825279,
+              "server_elapsed_ms": 12092.699353,
+              "request_total_ms": 12116.635152,
+              "own_output_tokens_per_s": 284.67642844741397,
+              "decode_wall_ms_per_round_not_target_forward": 19.743250211678834
+            },
+            {
+              "response_sha256": "1edb9f89b17b5dbbde81547a61466a04641b0b88d3aebc91ddf1660c1d04c398",
+              "prefill_ms": 9393.237309,
+              "decode_wall_ms": 2707.4107449999997,
+              "server_elapsed_ms": 12100.648054000001,
+              "request_total_ms": 12125.526131,
+              "own_output_tokens_per_s": 284.4045741570698,
+              "decode_wall_ms_per_round_not_target_forward": 19.76212222627737
+            }
+          ]
+        },
+        {
+          "id": "django__django-10097",
+          "request_sha256": "6ba9ff9701f76c71e2993c13211d22722dd4757a34a721497ed3bf9dc1c1e5c6",
+          "input_tokens": 22420,
+          "median_own_output_tokens_per_s": 329.0963017269959,
+          "median_prefill_ms": 10718.870934,
+          "median_decode_wall_ms": 24892.409781000002,
+          "canonical_messages_identical_in_three_samples": true,
+          "common_to_three_samples": {
+            "canonical_message_sha256": "016441be6418699d73bb8e7227a21c1805f37dc6e5b8a4634111961355ee2cdc",
+            "reasoning_characters": 28278,
+            "content_characters": 0,
+            "tool_count": 0,
+            "tools": [],
+            "output_tokens": 8192,
+            "input_tokens": 22420,
+            "cached_tokens": 0,
+            "finish_reason": "length",
+            "truncated": true,
+            "protocol_sample_valid": true,
+            "rounds": 1241,
+            "accepted": 6951,
+            "drafted": 8681,
+            "accepted_per_drafted": 0.8007142034327842,
+            "first_draft_acceptance": 0.9403706688154714,
+            "seventh_draft_acceptance": 0.6814516129032258,
+            "accepted_at": [
+              1167,
+              1099,
+              1037,
+              989,
+              929,
+              885,
+              845
+            ],
+            "drafted_at": [
+              1241,
+              1240,
+              1240,
+              1240,
+              1240,
+              1240,
+              1240
+            ],
+            "output_tokens_per_round": 6.601128122481869
+          },
+          "samples": [
+            {
+              "response_sha256": "f25f2553178a70169f049bcc14315bb3a0c6150ff497a19ca48840fe65bbb4bc",
+              "prefill_ms": 10714.746152,
+              "decode_wall_ms": 24892.409781000002,
+              "server_elapsed_ms": 35607.155933,
+              "request_total_ms": 35640.604491,
+              "own_output_tokens_per_s": 329.0963017269959,
+              "decode_wall_ms_per_round_not_target_forward": 20.05834792989525
+            },
+            {
+              "response_sha256": "cbf679a794e283d4435ae066c41d858a99e6e53ebdbf95694478a14eb5aaa5cd",
+              "prefill_ms": 10718.870934,
+              "decode_wall_ms": 24889.192702,
+              "server_elapsed_ms": 35608.063636,
+              "request_total_ms": 35639.172678,
+              "own_output_tokens_per_s": 329.1388394185129,
+              "decode_wall_ms_per_round_not_target_forward": 20.055755601933924
+            },
+            {
+              "response_sha256": "7327c5fa8ac261e27819b3c3122356df31027c1503ae2313aa48c425140c8ef6",
+              "prefill_ms": 10727.995966,
+              "decode_wall_ms": 24895.61752,
+              "server_elapsed_ms": 35623.613485999995,
+              "request_total_ms": 35654.780997,
+              "own_output_tokens_per_s": 329.05389847907657,
+              "decode_wall_ms_per_round_not_target_forward": 20.06093273166801
+            }
+          ]
+        },
+        {
+          "id": "sympy__sympy-11618",
+          "request_sha256": "b61ee5ce8e04a76df569affa918c9f6fd60fa9d7086f8d14f53d255244db969d",
+          "input_tokens": 16717,
+          "median_own_output_tokens_per_s": 233.97516599653338,
+          "median_prefill_ms": 7793.217461,
+          "median_decode_wall_ms": 5321.077537,
+          "canonical_messages_identical_in_three_samples": true,
+          "common_to_three_samples": {
+            "canonical_message_sha256": "5e3b68f338ab0b92fae43fce95a87ac758193b9a25c362cf4e9bc4146732f38f",
+            "reasoning_characters": 4531,
+            "content_characters": 92,
+            "tool_count": 1,
+            "tools": [
+              {
+                "name": "bash",
+                "arguments_JSON_valid": true,
+                "argument_keys": [
+                  "command"
+                ]
+              }
+            ],
+            "output_tokens": 1245,
+            "input_tokens": 16717,
+            "cached_tokens": 0,
+            "finish_reason": "tool_calls",
+            "truncated": false,
+            "protocol_sample_valid": true,
+            "rounds": 269,
+            "accepted": 977,
+            "drafted": 1883,
+            "accepted_per_drafted": 0.5188528943175783,
+            "first_draft_acceptance": 0.8698884758364313,
+            "seventh_draft_acceptance": 0.2342007434944238,
+            "accepted_at": [
+              234,
+              204,
+              163,
+              127,
+              103,
+              83,
+              63
+            ],
+            "drafted_at": [
+              269,
+              269,
+              269,
+              269,
+              269,
+              269,
+              269
+            ],
+            "output_tokens_per_round": 4.628252788104089
+          },
+          "samples": [
+            {
+              "response_sha256": "6df4438ec827eb65441778106df9a22faf588004db7c6a6ef2d03a947db9c852",
+              "prefill_ms": 7789.674272,
+              "decode_wall_ms": 5320.500246,
+              "server_elapsed_ms": 13110.174518000002,
+              "request_total_ms": 13132.387388,
+              "own_output_tokens_per_s": 234.00055303747092,
+              "decode_wall_ms_per_round_not_target_forward": 19.778811323420072
+            },
+            {
+              "response_sha256": "dc5db6ca1ed7533f53d53a188a2d5b02931fe3138f5e2437060e5b537d208095",
+              "prefill_ms": 7793.217461,
+              "decode_wall_ms": 5321.077537,
+              "server_elapsed_ms": 13114.294998,
+              "request_total_ms": 13136.222266,
+              "own_output_tokens_per_s": 233.97516599653338,
+              "decode_wall_ms_per_round_not_target_forward": 19.7809573866171
+            },
+            {
+              "response_sha256": "06f951ce47c641791302e93fb349d3389ec30569a8917b193d90bb6df86e0227",
+              "prefill_ms": 7794.478433,
+              "decode_wall_ms": 5321.762478000001,
+              "server_elapsed_ms": 13116.240911,
+              "request_total_ms": 13138.569983,
+              "own_output_tokens_per_s": 233.94505206626394,
+              "decode_wall_ms_per_round_not_target_forward": 19.783503635687733
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "Django_R1_repetition": {
+    "all_three_NV4_messages_identical": true,
+    "finish_reason": "length",
+    "output_tokens": 8192,
+    "content_characters": 0,
+    "tool_count": 0,
+    "dominant_exact_block_characters": 1672,
+    "dominant_retokenized_period": 472,
+    "complete_identical_blocks": 11,
+    "dominant_block_first_retokenized_start": 2537,
+    "next_start": 3009,
+    "last_marker_start": 7729,
+    "partial_final_block_truncated": true,
+    "maximum_repeated_line_occurrences": 14,
+    "first_nonoverlapping_128gram_starts": [
+      245,
+      1064
+    ],
+    "first_nonoverlapping_256gram_starts": [
+      2099,
+      2571
+    ],
+    "dominant_block_sha256": "feff1d8bebc0fb3ae1d7d1ea40f70d89116484e09d7c34328b0f50977269066a",
+    "trace_scope": "Observable reasoning re-encoded with artifact ByteLevel BPE, not original emitted ID trace. Leading/trailing newlines may be stripped. Sliding n-gram matches overlap and are not independent loop counts.",
+    "interpretation": "Repeated reasoning without any emitted tool call, not a partial/truncated tool JSON. Does not prove that normal Rewind-guarded product behavior inevitably loops."
+  },
+  "semantic_diagnostics": {
+    "NV4_no_spec_2048": {
+      "revision": "R1",
+      "kv_format": "nvfp4",
+      "max_context": 139264,
+      "max_output_tokens": 2048,
+      "request_sha256": "6bef36d732a37f1f045d0defecaea50ebf8be41b0a1af541e09b9441bec7977f",
+      "response_sha256": "88c6f8cd4d65e161bc3ae112c71320e94deb8de76f86d4369b2c700d87e2588a",
+      "completion_record_sha256": "dc951fe441a2c2a8045b6782130561ef20b1ddf7dc5f9dfb18800c9e6d4172ee",
+      "canonical_message_sha256": "6f40f4b216a700806a12e8c208e61f96294027ce48cf39c298b2789b95b39e9f",
+      "reasoning_characters": 6408,
+      "content_characters": 0,
+      "tool_count": 0,
+      "tools": [],
+      "input_tokens": 22420,
+      "output_tokens": 2048,
+      "finish_reason": "length",
+      "prefill_ms": 10350.73093,
+      "decode_wall_ms": 96924.878498,
+      "speculative": null,
+      "loop_guard": "off",
+      "interpretation": "Reasoning-only length cap; no repeated64/128/256-gram in2048 observable retokenized tokens, but stable R1 spec loop begins around2537 so later looping is not excluded. This used the old slow T1 band route, not R2.",
+      "repetition": {
+        "32": {
+          "first_nonoverlapping_repeat_starts": [
+            616,
+            783
+          ],
+          "repeat_window_occurrences": 220
+        },
+        "64": {
+          "first_nonoverlapping_repeat_starts": null,
+          "repeat_window_occurrences": 0
+        },
+        "128": {
+          "first_nonoverlapping_repeat_starts": null,
+          "repeat_window_occurrences": 0
+        },
+        "256": {
+          "first_nonoverlapping_repeat_starts": null,
+          "repeat_window_occurrences": 0
+        }
+      }
+    },
+    "BF16_spec7": {
+      "revision": "R1",
+      "kv_format": "bf16",
+      "max_context": 32768,
+      "max_output_tokens": 8192,
+      "request_sha256": "5b916da024ab4e95817553fff55951d66f57ae3589915f5b88dcf973acec1ad7",
+      "response_sha256": "90996d647ec939e4668ee8f2f197143d2ea7e05bae8207f1eea7a306ea8755a0",
+      "completion_record_sha256": "796d53379f966c0a3f4060df0b6a7aaef518c3275c7a0de2590a9f926324e501",
+      "canonical_message_sha256": "8ef47c7748186a3162778bce9fd6f31f1f403a15f19a3a84d2d24b01b33a32a2",
+      "reasoning_characters": 2111,
+      "content_characters": 279,
+      "tool_count": 1,
+      "tools": [
+        {
+          "name": "bash",
+          "arguments_JSON_valid": true,
+          "argument_keys": [
+            "command"
+          ]
+        }
+      ],
+      "input_tokens": 22420,
+      "output_tokens": 792,
+      "finish_reason": "tool_calls",
+      "prefill_ms": 10310.188256,
+      "decode_wall_ms": 4145.791945,
+      "speculative": {
+        "rounds": 157,
+        "drafted": 1099,
+        "accepted": 636,
+        "drafted_at": [
+          157,
+          157,
+          157,
+          157,
+          157,
+          157,
+          157
+        ],
+        "accepted_at": [
+          138,
+          119,
+          102,
+          87,
+          73,
+          60,
+          57
+        ]
+      },
+      "loop_guard": "off",
+      "interpretation": "Normal parsed tool call after792 output tokens; one semantic control, not a matched throughput denominator or a solved-task score.",
+      "repetition": {
+        "64": {
+          "first_nonoverlapping_repeat_starts": null,
+          "matching_window_starts": 0
+        },
+        "128": {
+          "first_nonoverlapping_repeat_starts": null,
+          "matching_window_starts": 0
+        },
+        "256": {
+          "first_nonoverlapping_repeat_starts": null,
+          "matching_window_starts": 0
+        }
+      }
+    },
+    "initial_BF16_start_attempt": {
+      "status": "configuration_rejected",
+      "cause": "draft count omitted; retained first startup log, corrected to7 before the measured response",
+      "kernel_failure": false
+    }
+  },
+  "matched_projection_diagnostic": {
+    "method": "Actual first Django frame, same normalized BF16, sameS3 reference query plus explicit per-head split indexing; K/V compared against independent per-weight calls with matching single-weight split policy. Original outputs were not replaced.",
+    "tested_GQA_layers": [
+      3,
+      7,
+      11,
+      15,
+      19,
+      23,
+      27,
+      31,
+      35,
+      39,
+      43,
+      47,
+      51,
+      55,
+      59,
+      63
+    ],
+    "first_actual_position": 22420,
+    "all_query_gate_key_value_bit_differences_zero": true,
+    "aggregate_bit_differences": {
+      "query": 0,
+      "gate": 0,
+      "key": 0,
+      "value": 0
+    },
+    "temporary_gqa_layer_source_sha256": "003917e4abd28cfbfe83fb413e60d9deb489ae74aca906a8f9ae47147ae1539c",
+    "restored_gqa_layer_source_sha256": "67bf8e4d480763dc633f53c844b535109a5ad74753e730f8182a741eb91dc31b",
+    "temporary_overlay_restored": true,
+    "execution_log_sha256": "940d64b9076904cd1c190872c98a0b43437c9d97ca87d473d56bcec83d20ca69",
+    "interpretation": "No tested projection/split/PairStore wiring mismatch. This does not prove every later state or establish overall quantization/task quality."
+  },
+  "R2_small_width_route": {
+    "service_benchmark_for_this_revision_included": false,
+    "runtime_change": "Actual tokens1..8 each lane serially uses nominal8 M48 XQA with device actualQ/valid; wider widths retain bounded band carry. No claim that R1 slow T1 diagnostic or R1 benchmark is R2 timing.",
+    "targeted_operator_regression": {
+      "source_lines": 398,
+      "returncode": 0,
+      "seconds": 2.118224155041389,
+      "coverage": [
+        "T1/T2/T4/T8 x C1/C2",
+        "same graph actual windows8/2048/20000 with active/tail/inactive lanes",
+        "invalid Q/K/V/positions/table-row poison",
+        "max-width9 capacity covers intermediate T8",
+        "private exact workspace envelopes20000/32769 and bases0/256, redzones/sem",
+        "nonuniform QK, multi-band carry and checkpoint four-plane copy"
+      ],
+      "evidence": "owner closed targeted GPU receipt; existing earlier398-line source, no analyst GPU execution"
+    }
+  },
+  "observations": {
+    "Astropy": "Both routes emit the same parsed file-view arguments. Different token/round counts still prevent same-work latency attribution.",
+    "Django": "NV4 high own-TPS counts predictable repeated reasoning and ends at length cap; preserve this adverse completion behavior.",
+    "SymPy": "NV4 output1245<1371 but269>254rounds, accepted/drafted51.885%<62.880%; different next tool steps. No pure target-forward duration can be inferred from decode-wall/round.",
+    "policy": "BF16 fidelity and bounded numeric tests do not establish task-quality superiority. Default-policy adoption is not declared by this service summary."
+  },
+  "followups": {
+    "normal_product_Rewind": "closed with same8192-token loop/no tool and no detected rewind; no rollback exercised",
+    "capacity_only_131072_input": "passed real prefill97991.631326ms with cache0/1pass and1 output token",
+    "default_policy_decision": "under review from mixed service and completion evidence; not decided by lower KL or own-TPS alone"
+  },
+  "provenance": {
+    "artifact_sha256": "2c4c9ee4d6b25c08da6c2d85840126e73d120564e230f926b6230b5b95ee8b3c",
+    "artifact_hash_method": "Earlier compatible Lab digest with unchanged file stat; no new per-leg model rehash.",
+    "runtime_revision_note": "R1 benchmarks and diagnostics retain R1 identity; R2 runtime changed only afterward. Frozen server identities are added from owner receipts when available.",
+    "R1": {
+      "runtime_sources_sha256": "94486531733c99a00f02dc49d68d7fdb63b1cf8d1ec53c460ef6624eb107f145",
+      "binary_sha256": {
+        "ignis-server": "965cd7f801a9e46ad053904dd2998ad4bffb4e11555207bd7628b595f7620260",
+        "ignis-bench": "bbe5b5696a353afe0e0bac8042e40a8add863d13f8c11485a6eb71f803cc857f"
+      },
+      "scope": "Frozen common R1 server/bench for both service legs. R1 default C1/T8 XQA; slow T1 fallback in the historical no-spec diagnostic."
+    },
+    "R2": {
+      "runtime_sources_sha256": "a59dd6176e8124c2b7853529d7418533ce2854269d484de2d670f9bb7993adcb",
+      "server_binary_sha256": "f225e193a235164fbaa51e33d06eb2a226b45c9fffed4349ad338509e7f7ce4d",
+      "scope": "Subsequent actualT<=8 per-lane M48 extension; not the binary of the R1 full coding-agent benchmark. No diagnostic symbols in rebuilt server.",
+      "no_diagnostic_symbols": true
+    }
+  },
+  "R2_post_acceptance": {
+    "revision": "R2",
+    "controller_completed": true,
+    "loaded": {
+      "kv_format": "nvfp4",
+      "max_context": 139264,
+      "prefill_chunk": 1024,
+      "decode_lanes": 2,
+      "speculation": "dflash2 draft_tokens=7 draft_head=full",
+      "rope_scaling": "none",
+      "vision": "max_tokens=4096 item_max_tokens=4096"
+    },
+    "default_Rewind_Django": {
+      "requested_loop_guard": "rewind",
+      "family_cache_format": "nvfp4",
+      "response_sha256": "07ddcd07cab6b93ba1defe8da815866aef9ab7ba5a7ff974db4ddf012085f295",
+      "canonical_message_sha256": "016441be6418699d73bb8e7227a21c1805f37dc6e5b8a4634111961355ee2cdc",
+      "reasoning_characters": 28278,
+      "content_characters": 0,
+      "tool_count": 0,
+      "tools": [],
+      "input_tokens": 22420,
+      "output_tokens": 8192,
+      "cached_tokens": 0,
+      "finish_reason": "length",
+      "request_total_s": 35.2101006989833,
+      "ignis_timing_requested": false,
+      "pure_prefill_decode_timing_available": false,
+      "message_identical_to_R1_off_guard": true,
+      "selected_loop_guard_event_count": 0,
+      "rewind_count_explicitly_reported": null,
+      "actual_rewind_execution_demonstrated": false,
+      "source_eligibility": "Rewind/non-warm-up/reasoning-starting/no-image conditions are met; source conditions alone do not prove an intervention.",
+      "unchanged_guard_CPU_replay": {
+        "retokenized_tokens": 8192,
+        "raw_characters": 28278,
+        "normalized_characters": 23386,
+        "checks": 104,
+        "loop_score_checks": 0,
+        "maximum_consecutive_loop_checks": 0,
+        "minimum_normalized_ratio": 0.457,
+        "minimum_raw_ratio": 0.464,
+        "configuration": {
+          "window_chars": 1000,
+          "check_every_chars": 250,
+          "ratio_permille": 265,
+          "raw_gate_permille": 300,
+          "persist_checks": 4,
+          "normalize": true
+        }
+      },
+      "replay_limit": "Local unchanged public Rust detector on observable reasoning and canonical retokenized cadence, not captured original events; scores stay well above both thresholds. No threshold was changed.",
+      "interpretation": "Product-default Rewind configuration did not recover this tested next response. No new-format rollback execution may be claimed from this run."
+    },
+    "capacity": {
+      "runner_exit_code": 0,
+      "passed": true,
+      "input_tokens": 131072,
+      "computed_prefill_tokens": 131072,
+      "prefill_passes": 1,
+      "cached_tokens": 0,
+      "prefill_ms": 97991.631326,
+      "decode_wall_ms": 23.839281,
+      "server_elapsed_ms": 98015.470607,
+      "request_total_ms": 98242.660055,
+      "output_tokens": 1,
+      "finish_reason": "stop",
+      "response_sha256": "cf1c027491fc9e0145ea2223effbf433e411b6916897d6d9857b648c4460e5e8",
+      "loop_guard": "off, required by the capacity timing protocol",
+      "scope": "Real131072-token prefill and nonempty generation, not long-context answer quality or multi-sequence capacity."
+    },
+    "canary": {
+      "runner_exit_code": 0,
+      "cases": 4,
+      "all_existing_sanity_checks_true": true,
+      "all_existing_determinism_checks_true": true,
+      "report_sha256": "65d2508dad2b414caabcc984c9d88786b444af2292b3291be60406c78965638d",
+      "scope": "Existing bounded harness criteria, not complete-answer or general task-quality evaluation."
+    },
+    "Vision": {
+      "request_sha256": "86dd46c3a78b511314d2f8797910167d9cd5089fce70fd2a861490a6f09903bd",
+      "response_sha256": "506f0fdcfd1892806d0c58a5ecb51b871ee94f16734488a32382b510f8d554a4",
+      "prompt_tokens": 90,
+      "output_tokens": 96,
+      "finish_reason": "length",
+      "enable_thinking": false,
+      "reasoning_present": false,
+      "request_total_s": 0.6620167199289426,
+      "path_smoke_completed": true,
+      "shape_and_color_match": true,
+      "manual_observation": "Corrected on R3 fixture audit: the red region is 128 by 128 on a white 256 by 256 canvas. The reported square and colors match; the answer reaches the output cap.",
+      "scope": "Image request encoding and generation smoke only;90 prompt tokens are not asserted to be90 image-only tokens."
+    },
+    "consumer_cancel": {
+      "observed_cause": "consumer",
+      "tokens_before_cancel": 8,
+      "duration_ms": 64,
+      "followup_prompt_tokens": 25,
+      "followup_output_tokens": 1,
+      "followup_finish_reason": "stop",
+      "followup_request_total_s": 0.05299507896415889,
+      "followup_response_sha256": "3f997333a5e3f66734daa21899528f452f49b69d618dda4f8290610508936ab1",
+      "scope": "Consumer cancellation then nonempty follow-up response; not a cancellation-fault matrix."
+    },
+    "preliminary_guard_request": {
+      "status": "HTTP400 retained",
+      "cause": "ignis_timing=true is incompatible with an enabled loop guard; removed only this diagnostic field for the measured Rewind check.",
+      "kernel_failure": false
+    }
+  }
+}

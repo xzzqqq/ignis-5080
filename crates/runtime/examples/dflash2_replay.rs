@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo run --release -p ignis-runtime --features cuda --example dflash2_replay -- \
-//!     [--lanes N] [--prefill-chunk N] ARTIFACT MANIFEST_JSON INPUT_DIR OUT_DIR [FIRST_JOB [LAST_JOB]]
+//!     [--lanes N] [--prefill-chunk N] [--kv-format FORMAT] [--max-context N] ARTIFACT MANIFEST_JSON INPUT_DIR OUT_DIR [FIRST_JOB [LAST_JOB]]
 //! ```
 //!
 //! The manifest (`tools/dflash2-replay/select.py`) lists jobs: a token stream
@@ -17,7 +17,11 @@
 //! hq-e8-2b KV, 1024-token prefill chunks, rope none, verify graphs captured.
 //! On the NVFP4 body `--prefill-chunk` picks another chunk (its served 2048)
 //! and `--lanes` another lane count than its eight; the trellis body refuses
-//! both. For each job, on one sequence:
+//! both. `--kv-format` and `--max-context` explicitly override the historical
+//! HQ/262,144 defaults without changing record layout or serving configuration.
+//! Each output directory is pinned to its artifact directory hash, complete
+//! manifest hash and actual load shape before any completed job is resumed.
+//! For each job, on one sequence:
 //!
 //! - everything before a turn is prefilled, its last draw forced to the turn's
 //!   first recorded token (a permitted set of one), which becomes the pending
@@ -55,6 +59,8 @@ use ignis_core::step::{decode_program_verify_forced, prefill_program_permitted, 
 mod replay_shape;
 #[path = "support/replay_load.rs"]
 mod replay_load;
+#[path = "support/replay_identity.rs"]
+mod replay_identity;
 
 use replay_shape::{LoadShape, ShapeFlags};
 
@@ -190,33 +196,31 @@ fn main() {
     let flags = ShapeFlags::take(&mut args).unwrap_or_else(|e| panic!("{e}"));
     if !(5..=7).contains(&args.len()) {
         eprintln!(
-            "usage: dflash2_replay [--lanes N] [--prefill-chunk N] ARTIFACT MANIFEST_JSON INPUT_DIR OUT_DIR \
+            "usage: dflash2_replay [--lanes N] [--prefill-chunk N] [--kv-format FORMAT] [--max-context N] ARTIFACT MANIFEST_JSON INPUT_DIR OUT_DIR \
              [FIRST_JOB [LAST_JOB]]"
         );
         std::process::exit(2);
     }
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&args[2]).unwrap_or_else(|e| panic!("read {}: {e}", args[2])),
-    )
-    .unwrap_or_else(|e| panic!("parse manifest: {e}"));
+    let manifest_bytes = std::fs::read(&args[2]).unwrap_or_else(|e| panic!("read {}: {e}", args[2]));
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+        .unwrap_or_else(|e| panic!("parse manifest: {e}"));
     let input = PathBuf::from(&args[3]);
     let out_dir = PathBuf::from(&args[4]);
-    std::fs::create_dir_all(&out_dir).unwrap_or_else(|e| panic!("create {}: {e}", out_dir.display()));
     let jobs = manifest["jobs"].as_array().expect("manifest jobs");
     let first: usize = args.get(5).map_or(0, |v| v.parse().expect("first job"));
     let last: usize = args.get(6).map_or(jobs.len() - 1, |v| v.parse().expect("last job"));
     let jobs = &jobs[first..=last.min(jobs.len() - 1)];
-    let longest = jobs.iter().map(|j| j["tokens"].as_u64().unwrap()).max().unwrap_or(0) as u32;
+    let longest = jobs.iter().map(|j| j["tokens"].as_u64().unwrap()).max().unwrap_or(0);
 
     let reader = Reader::open(Path::new(&args[1])).unwrap_or_else(|e| panic!("open artifact: {e}"));
     let shape = LoadShape::new(body_27b(&reader), flags).unwrap_or_else(|e| panic!("load shape: {e}"));
     assert_eq!(shape.window as usize, WINDOW, "the record's window is the load's");
     // A round at the turn's end still runs its whole window.
     let max_context = shape.max_context;
-    assert!(
-        longest + COLUMNS as u32 <= max_context,
-        "a job's {longest} tokens and a round's {COLUMNS} columns outgrow the load's {max_context}-token context"
-    );
+    shape.validate_job_context(longest, COLUMNS as u32).unwrap_or_else(|e| panic!("{e}"));
+    let identity = replay_identity::identity(reader.content_hash(), &manifest_bytes, shape);
+    replay_identity::ensure_output_identity(&out_dir, &identity).unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("replay identity: {identity}");
     let frontend = FrontendSet::from_reader(&reader).unwrap_or_else(|e| panic!("frontend: {e}"));
     let stop_ids: Vec<i32> = ["<|im_end|>", "<|endoftext|>"]
         .iter()

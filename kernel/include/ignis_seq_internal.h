@@ -92,7 +92,7 @@ inline constexpr int32_t kIgnisKvPlanesPerLayerBf16 = 2;
 inline constexpr int32_t kIgnisKvPlanesPerLayerHq   = 4;
 
 inline constexpr int32_t ignis_kv_planes_per_layer(int32_t kv_format) {
-  return kv_format == IGNIS_KV_FORMAT_HQ_E8_2B ? kIgnisKvPlanesPerLayerHq
+  return kv_format != IGNIS_KV_FORMAT_BF16 ? kIgnisKvPlanesPerLayerHq
                                                : kIgnisKvPlanesPerLayerBf16;
 }
 
@@ -116,10 +116,10 @@ enum ignis_kv_plane_role {
 inline std::size_t ignis_kv_plane_index(int32_t kv_format, int32_t gqa_layer,
                                         ignis_kv_plane_role role) {
   const bool wants_meta = role == IGNIS_KV_PLANE_K_META || role == IGNIS_KV_PLANE_V_META;
-  assert((!wants_meta || kv_format == IGNIS_KV_FORMAT_HQ_E8_2B) &&
+  assert((!wants_meta || kv_format != IGNIS_KV_FORMAT_BF16) &&
          "a BF16 KV pool has no metadata planes");
   const bool is_v      = role == IGNIS_KV_PLANE_V || role == IGNIS_KV_PLANE_V_META;
-  const int32_t within = kv_format == IGNIS_KV_FORMAT_HQ_E8_2B ? static_cast<int32_t>(role)
+  const int32_t within = kv_format != IGNIS_KV_FORMAT_BF16 ? static_cast<int32_t>(role)
                                                                : (is_v ? 1 : 0);
   return static_cast<std::size_t>(gqa_layer) *
              static_cast<std::size_t>(ignis_kv_planes_per_layer(kv_format)) +
@@ -575,12 +575,13 @@ inline std::uint64_t ignis_seq_token_capacity(const ignis_seq &seq) {
  * here, beside the plane mapping, so no call site can select the hq planes
  * and the BF16 route (or the reverse) by editing only half of a view. */
 inline ninfer::DType ignis_kv_cache_dtype(std::int32_t kv_format) {
-  return kv_format == IGNIS_KV_FORMAT_HQ_E8_2B ? ninfer::DType::U8 : ninfer::DType::BF16;
+  return kv_format == IGNIS_KV_FORMAT_BF16 ? ninfer::DType::BF16 : ninfer::DType::U8;
 }
 
 inline std::int32_t ignis_kv_quant_group(std::int32_t kv_format) {
   /* A BF16 cache must declare none at all; the hq wrapper requires 32. */
-  return kv_format == IGNIS_KV_FORMAT_HQ_E8_2B ? kIgnisHqQuantGroup : 0;
+  return kv_format == IGNIS_KV_FORMAT_NVFP4 ? 16 :
+      (kv_format == IGNIS_KV_FORMAT_HQ_E8_2B ? kIgnisHqQuantGroup : 0);
 }
 
 /* The operator-facing spelling of a format, for a message a human reads.
@@ -594,6 +595,8 @@ inline const char *ignis_kv_format_name(std::int32_t kv_format) {
     return "bf16";
   case IGNIS_KV_FORMAT_HQ_E8_2B:
     return "hq-e8-2b";
+  case IGNIS_KV_FORMAT_NVFP4:
+    return "nvfp4";
   default:
     return "unknown";
   }
@@ -619,7 +622,7 @@ inline void ignis_kv_fill_layer_planes(View &view, ignis_seq_pool *pool, std::in
       pool->kv_pool.plane(ignis_kv_plane_index(pool->kv_format, gqa_layer, IGNIS_KV_PLANE_K));
   view.v_pages =
       pool->kv_pool.plane(ignis_kv_plane_index(pool->kv_format, gqa_layer, IGNIS_KV_PLANE_V));
-  if (pool->kv_format == IGNIS_KV_FORMAT_HQ_E8_2B) {
+  if (pool->kv_format != IGNIS_KV_FORMAT_BF16) {
     view.k_scale_pages = pool->kv_pool.plane(
         ignis_kv_plane_index(pool->kv_format, gqa_layer, IGNIS_KV_PLANE_K_META));
     view.v_scale_pages = pool->kv_pool.plane(

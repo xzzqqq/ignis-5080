@@ -24,6 +24,10 @@
 //! which key came from where is `crate::hq_ring::prompt_source` over the ring
 //! as it stood before the query's chunk was appended (GitHub #258), and
 //! `attn_tap_hq_consumed_gpu.rs` holds the capture to it row by row.
+//! NVFP4 keeps normal-frame keys with a fixed global1 G16 codec;
+//! [`AttnTapCapture::scores_for_format`] independently round-trips the raw
+//! captured keys for that format instead of rotating the query or scoring
+//! unquantized keys as though attention had consumed them.
 
 use std::ffi::{CStr, c_char};
 
@@ -82,8 +86,8 @@ pub struct AttnTapCapture {
     pub rows_written: Vec<i64>,
     /// Per query position: 1 when every armed layer saw it, else 0.
     pub queries_seen: Vec<i32>,
-    /// The keys hq-e8-2b attention consumed for the first query's chunk,
-    /// `[layer][max_positions][KV_HEADS][HEAD_DIM]` BF16, **rotated frame**;
+    /// The keys attention consumed for the first query's chunk,
+    /// `[layer][max_positions][KV_HEADS][HEAD_DIM]` BF16, in the HQ rotated frame or the NVFP4 normal frame;
     /// empty unless taken through [`with_attn_tap_hq`].
     pub kc: Vec<u16>,
     /// Consumed rows each armed layer copied (0 = not captured).
@@ -107,7 +111,7 @@ impl AttnTapCapture {
         &self.k[at..at + HEAD_DIM]
     }
 
-    /// The consumed (rotated-frame) key row of `kv_head` at `position` in
+    /// The consumed key row in the selected format’s frame of `kv_head` at `position` in
     /// armed layer `layer`.
     pub fn consumed_key(&self, layer: usize, position: usize, kv_head: usize) -> &[u16] {
         let at = ((layer * self.max_positions as usize + position) * KV_HEADS + kv_head) * HEAD_DIM;
@@ -169,9 +173,39 @@ impl AttnTapCapture {
         (num / den.max(f32::MIN_POSITIVE)).sqrt()
     }
 
+    /// Scores against the keys consumed by the selected cache format.
+    /// Capture consumed rows to include the live residual window. Without a
+    /// consumed capture, the NVFP4 fallback estimates fully quantized scores.
+    pub fn scores_for_format(
+        &self,
+        format: crate::KvFormat,
+        layer: usize,
+        query: usize,
+        q_head: usize,
+        positions: &[usize],
+    ) -> Vec<f32> {
+        match format {
+            crate::KvFormat::Bf16 => self.scores(layer, query, q_head, positions),
+            crate::KvFormat::HqE8_2b => self.consumed_scores(layer, query, q_head, positions),
+            crate::KvFormat::Nvfp4 => {
+                let q = self.query(layer, query, q_head);
+                let kv_head = q_head / (Q_HEADS / KV_HEADS);
+                positions.iter().map(|&position| {
+                    let key = if self.consumed_rows[layer] > position as i64 {
+                        self.consumed_key(layer, position, kv_head).iter().map(|&b| bf16_to_f32(b)).collect()
+                    } else {
+                        nvfp4_key(self.key(layer, position, kv_head))
+                    };
+                    q.iter().zip(key).map(|(&a, b)| bf16_to_f32(a) * b).sum::<f32>() / 16.0
+                }).collect()
+            }
+        }
+    }
+
     /// `q . k / sqrt(HEAD_DIM)` for one head of one armed layer, from query
     /// index `query` to each of `positions` — the pre-softmax attention
-    /// logits the fused kernel would have formed, in f32.
+    /// logits before cache quantization, in f32. Use `scores_for_format`
+    /// when comparing against a quantized cache's actual readout.
     pub fn scores(&self, layer: usize, query: usize, q_head: usize, positions: &[usize]) -> Vec<f32> {
         let kv_head = q_head / (Q_HEADS / KV_HEADS);
         let q: Vec<f32> = self.query(layer, query, q_head).iter().map(|&b| bf16_to_f32(b)).collect();
@@ -199,10 +233,13 @@ pub fn with_attn_tap<T>(
     armed(ordinals, query_positions, max_positions, false, f)
 }
 
-/// [`with_attn_tap`], plus the keys hq-e8-2b attention consumed for the
+/// Backwards-compatible name for [`with_attn_tap_consumed`].
+pub use with_attn_tap_consumed as with_attn_tap_hq;
+
+/// [`with_attn_tap`], plus the keys HQ or NVFP4 attention consumed for the
 /// chunk holding `query_positions[0]` ([`AttnTapCapture::kc`]). On a cache or
 /// route that does not materialize them, `consumed_rows` comes back 0.
-pub fn with_attn_tap_hq<T>(
+pub fn with_attn_tap_consumed<T>(
     ordinals: &[i32],
     query_positions: &[i64],
     max_positions: i64,
@@ -344,6 +381,36 @@ pub fn hq_rotate(v: &[f32]) -> Vec<f32> {
     x
 }
 
+// Independent host mirror of the cache's fixed-global1 G16 format. Reuse
+// the artifact's tested E4M3 RN conversion; no CUDA/engine decoder is called.
+fn nvfp4_key(row: &[u16]) -> Vec<f32> {
+    use ignis_artifact::fp8::{e4m3_from_f32, e4m3_to_f32};
+    const LEVELS: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+    assert_eq!(row.len(), HEAD_DIM);
+    row.chunks_exact(16).flat_map(|group| {
+        let values: Vec<f32> = group.iter().map(|&x| bf16_to_f32(x)).collect();
+        assert!(values.iter().all(|x| x.is_finite()), "nonfinite NVFP4 key");
+        let amax = values.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        assert!(amax <= 2688.0, "NVFP4 key exceeds fixed-global1 range");
+        let scale = e4m3_to_f32(e4m3_from_f32(amax / 6.0));
+        values.into_iter().map(move |value| {
+            let normalized = if scale > 0.0 { value / scale } else { 0.0 };
+            let magnitude = normalized.abs();
+            let mut best = 0;
+            let mut distance = magnitude;
+            for (index, &level) in LEVELS.iter().enumerate().skip(1) {
+                let delta = (magnitude - level).abs();
+                if delta < distance || (delta == distance && index % 2 == 0) {
+                    best = index;
+                    distance = delta;
+                }
+            }
+            // E2M1 * E4M3 at global1 is exactly representable in BF16.
+            (if normalized.is_sign_negative() { -LEVELS[best] } else { LEVELS[best] }) * scale
+        })
+    }).collect()
+}
+
 /// A BF16 bit pattern as f32 (exact: BF16 is f32's top half).
 pub fn bf16_to_f32(bits: u16) -> f32 {
     f32::from_bits(u32::from(bits) << 16)
@@ -392,6 +459,35 @@ mod tests {
         let s = cap.scores(0, 0, 10, &[0, 1, 2]);
         let scale = 1.0 / 16.0;
         assert_eq!(s, vec![1.0 * scale, 2.0 * scale, 3.0 * scale]);
+    }
+
+    #[test]
+    fn nvfp4_scores_use_normal_frame_decoded_keys() {
+        let mut cap = AttnTapCapture {
+            ordinals: vec![0], query_positions: vec![0], max_positions: 1,
+            q: vec![0; Q_HEADS * HEAD_DIM], k: vec![0; KV_HEADS * HEAD_DIM],
+            rows_written: vec![1], queries_seen: vec![1], kc: Vec::new(),
+            consumed_rows: vec![0], consumed_chunk_start: vec![-1],
+        };
+        cap.q[10 * HEAD_DIM] = 0x3f80;
+        cap.k[HEAD_DIM] = 0x3f80;
+        // amax1 -> RN_E4M3(1/6)=0.171875 -> E2M1(1/sf)=6 ->1.03125.
+        assert_eq!(cap.scores_for_format(crate::KvFormat::Nvfp4, 0, 0, 10, &[0]), vec![1.03125 / 16.0]);
+        assert_eq!(cap.scores_for_format(crate::KvFormat::Bf16, 0, 0, 10, &[0]), vec![1.0 / 16.0]);
+        cap.kc = cap.k.clone();
+        cap.consumed_rows[0] = 1;
+        assert_eq!(cap.scores_for_format(crate::KvFormat::Nvfp4, 0, 0, 10, &[0]), vec![1.0 / 16.0]);
+    }
+
+    #[test]
+    fn nvfp4_key_zero_scale_and_exact_levels() {
+        let mut raw = vec![0x3bc0; HEAD_DIM]; //6*2^-10, SF tie rounds to even zero.
+        assert!(nvfp4_key(&raw).iter().all(|x| *x == 0.0));
+        for (d, value) in [0.0f32, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0].iter().enumerate() {
+            raw[d] = (value.to_bits() >> 16) as u16;
+        }
+        let values = nvfp4_key(&raw);
+        assert_eq!(&values[..8], &[0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]);
     }
 
     #[test]

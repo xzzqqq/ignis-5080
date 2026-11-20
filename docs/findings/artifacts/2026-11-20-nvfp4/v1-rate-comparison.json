@@ -1,0 +1,60 @@
+{
+  "schema": "ignis.nvfp4.v1-rate-comparison/1",
+  "baseline_id": "rtx5080-coding-agent-v1-2026-11-03",
+  "baseline_code": "e25780e21b240bca965b17bc6dbd600f170744e3",
+  "reference_source": "docs/user/contributing/coding-agent-benchmark.md",
+  "new_source": "service-summary.json R1_service.nvfp4-default.cases[].median_own_output_tokens_per_s",
+  "primary_control": "Same-build R1 HQ control remains the matched comparison; v1 is retained separately, not replaced",
+  "configuration_difference": "v1 HQ context262144; new NVFP4 context139264. Output histories differ. Rate ratios are not controlled algorithmic speedups. Django is length-truncated without a tool call.",
+  "cases": [
+    {
+      "id": "astropy__astropy-12907",
+      "input_tokens": 19954,
+      "v1_reference_tps": 207.657749750205,
+      "nvfp4_R1_tps": 284.67642844741397,
+      "rate_ratio": 1.3708923880272035,
+      "rate_change_percent": 37.089238802720345,
+      "v1_output_tokens": 876,
+      "v1_finish_reason": "tool_calls",
+      "nvfp4_output_tokens": 770,
+      "nvfp4_finish_reason": "tool_calls",
+      "nvfp4_truncated": false,
+      "nvfp4_tool_count": 1,
+      "useful_completion_improvement_claimed": false
+    },
+    {
+      "id": "django__django-10097",
+      "input_tokens": 22420,
+      "v1_reference_tps": 184.81640248687216,
+      "nvfp4_R1_tps": 329.0963017269959,
+      "rate_ratio": 1.7806660951014464,
+      "rate_change_percent": 78.06660951014463,
+      "v1_output_tokens": 954,
+      "v1_finish_reason": "tool_calls",
+      "nvfp4_output_tokens": 8192,
+      "nvfp4_finish_reason": "length",
+      "nvfp4_truncated": true,
+      "nvfp4_tool_count": 0,
+      "useful_completion_improvement_claimed": false
+    },
+    {
+      "id": "sympy__sympy-11618",
+      "input_tokens": 16717,
+      "v1_reference_tps": 189.94180061893974,
+      "nvfp4_R1_tps": 233.97516599653338,
+      "rate_ratio": 1.2318255656949002,
+      "rate_change_percent": 23.18255656949002,
+      "v1_output_tokens": 1268,
+      "v1_finish_reason": "tool_calls",
+      "nvfp4_output_tokens": 1245,
+      "nvfp4_finish_reason": "tool_calls",
+      "nvfp4_truncated": false,
+      "nvfp4_tool_count": 1,
+      "useful_completion_improvement_claimed": false
+    }
+  ],
+  "source_sha256": {
+    "coding_agent_benchmark_md": "826ad91c4b24fc4074d13554e392ba58eced8e7793ab3945b991f6bd321ecf1d",
+    "service_summary_json": "8a887b3f8a56b71a443c4ce6bf891482278a39c1695505aa9e5559df48a98d63"
+  }
+}

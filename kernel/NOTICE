@@ -39,6 +39,35 @@ header names the upstream repo, commit, path and licence; this section lists
 the same. Only MIT, BSD or Apache-2.0 code is copied (never CUTLASS 3.x, never
 FlashInfer's `csrc/fmha_v2`).
 
+### FlashInfer XQA — `kernel/third_party/flashinfer_xqa/`
+
+This independent subtree pins `flashinfer-ai/flashinfer` v0.7.2, commit
+`d84335d8c54e0c8f9f7e22faa15c7e34a58abf94`, under Apache-2.0. Its original
+NVIDIA/FlashInfer copyright headers and `LICENSE` are retained. The subtree's
+own `manifest.json` records original hashes and the local `mha.cu` patch;
+this is separate from the ninfer pin in `kernel/vendor/manifest.json`.
+
+The adaptation selects SM120 C1/T8 NVFP4 KV storage with BF16 QK/PV math,
+M48/K32/V32 tiles, graph-stable split capacity with device-active splits,
+and explicit preparation instead of CUDA work in a global initializer.
+`kernel/src/nvfp4_xqa.cu` binds the paged storage, slot table and dynamic
+valid-prefix metadata. No code is taken from FlashInfer's `csrc/fmha_v2`.
+Evidence and remaining acceptance limits are recorded in
+`docs/findings/2026-11-20-nvfp4-kv-attention.md`.
+
+### `kernel/src/nvfp4_prefill.cu`
+
+The bounded-band BF16 attention fallback for NVFP4 storage.
+- Upstream: `gpillon/ninfer`, commit
+  `a00648cb828457986cf5b4b4f712b4cbcd7af0d1`, Apache-2.0:
+  `src/ops/kernel/gqa_attention_prefill_bf16.cuh` (through the pinned
+  `kernel/vendor/` copy).
+- Retained: the 64x64 BF16 Tensor Core tile, shared-memory swizzle, fragment
+  mapping and online-softmax structure. Changed: original-frame decoded KV
+  bands, actual query positions, and unnormalized FP32 accumulator/max/sum
+  carry across bands. Only the final band rounds the normalized result to
+  BF16. This is an owned adaptation, not an unmodified vendored file.
+
 ### `kernel/include/ignis_gqa_hq_reduce.cuh`
 The HQ27 split reducer specialization.
 - Upstream: `gpillon/ninfer`, commit

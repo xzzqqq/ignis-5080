@@ -31,6 +31,7 @@ class LabTests(unittest.TestCase):
     def test_config_rejects_ignored_or_invalid_controls(self):
         valid={'artifact':'/model','data_dir':'/data'}
         common.validate_config(valid)
+        common.validate_config(dict(valid,settings={'kv_format':'nvfp4'}))
         for bad in [dict(valid,unused_option=1),dict(valid,warmup=0),dict(valid,samples=True),
                     dict(valid,timeout_s=float('inf')),dict(valid,diagnostic_output_tokens=8193),
                     dict(valid,settings={'prefill_chunk':127}),dict(valid,view={'unknown':1})]:

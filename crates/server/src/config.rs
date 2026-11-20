@@ -1488,6 +1488,12 @@ fn fit_family(
         }
     }
     let (max_context, kv_format) = (s.model.max_context, s.model.kv_format);
+    if kv_format == KvFormat::Nvfp4 && family != ModelFamily::Qwen38_27b {
+        return Err(ConfigError(format!(
+            "`{} nvfp4`: NVFP4 KV currently supports only Qwen3.8-27B; {} requires `bf16` or `hq-e8-2b`",
+            spelled("model", "kv_format"), family.name()
+        )));
+    }
     if family == ModelFamily::Qwen38_27b && max_context > kv_format.gqa_max_context() {
         return Err(ConfigError(format!(
             "`{} {max_context}`: the 27B's attention serves at most {} keys on `{}`",

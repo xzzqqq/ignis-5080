@@ -28,7 +28,7 @@ use ignis_core::model_load::{self, Model as CoreModel};
 use ignis_core::seq::{
     HostPinnedPool, PinnedAllocError, PinnedBuffer, Seq, SeqCheckpoint, SeqPool, SeqPoolBudget,
     SeqPrefix, Window,
-    snapshot_format_version,
+    snapshot_format_version_for_kv,
 };
 use ignis_core::step;
 use ignis_core::{
@@ -826,7 +826,7 @@ impl StepLeaf for CudaLeaf {
     fn blob_identity(&self) -> BlobIdentity {
         self.config.blob_identity(
             ArtifactHash::from_bytes(self.reader.content_hash()),
-            snapshot_format_version(),
+            snapshot_format_version_for_kv(self.config.kv_format),
         )
     }
 
@@ -1199,6 +1199,7 @@ mod tests {
             kv_format: match shape.kv_format {
                 KvFormat::Bf16 => KvFormat::HqE8_2b,
                 KvFormat::HqE8_2b => KvFormat::Bf16,
+                KvFormat::Nvfp4 => KvFormat::Bf16,
             },
             ..shape
         };
@@ -1302,7 +1303,7 @@ mod tests {
         // GitHub #177: the vision reservation is taken beside the operator's
         // KV byte budget, not out of it -- the pool a load plans is the same
         // with or without vision, for every format.
-        for format in [KvFormat::Bf16, KvFormat::HqE8_2b] {
+        for format in [KvFormat::Bf16, KvFormat::HqE8_2b, KvFormat::Nvfp4] {
             let plain = CudaLeafConfig {
                 kv_format: format,
                 ..CudaLeafConfig::default()
@@ -1326,7 +1327,7 @@ mod tests {
         // format and the capacity it bought. Both formats are asked, because
         // "the format" is whichever one is in force and the message is only
         // useful if it names that one.
-        for format in [KvFormat::Bf16, KvFormat::HqE8_2b] {
+        for format in [KvFormat::Bf16, KvFormat::HqE8_2b, KvFormat::Nvfp4] {
             let config = CudaLeafConfig {
                 kv_format: format,
                 kv_pool_bytes: 1024 * 1024,

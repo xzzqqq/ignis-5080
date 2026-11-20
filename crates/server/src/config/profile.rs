@@ -119,17 +119,19 @@ fn built_in_names() -> String {
 pub const NONE_PROFILE: &str = "none";
 
 /// The RTX 5080 baseline settings. The historical name is retained so the
-/// frozen coding-agent benchmark command still resolves the same values.
+/// profile remains explicit; before/after benchmarks must pin their format and context.
 const BUILT_IN: &str = r#"{
     "rtx50-16gb": {
         "vram": {
             "qwen38": {
-                "headroom_bytes": "1200M"
+                "headroom_bytes": "1200M",
+                "adapt_spare_tokens": 8192
             }
         },
         "model": {
             "qwen38": {
-                "max_context": 262144
+                "max_context": 139264,
+                "kv_format": "nvfp4"
             }
         },
         "vision": {
@@ -252,7 +254,9 @@ mod tests {
         assert_eq!(profiles.keys().map(String::as_str).collect::<Vec<_>>(), ["rtx50-16gb"]);
         let sources = Sources { profile: profiles["rtx50-16gb"].clone(), ..Sources::default() };
         let s = resolve_settings(&sources, Some(ModelFamily::Qwen38_27b), Fit::Start).unwrap().settings;
-        assert_eq!(s.model.max_context, 262144);
+        assert_eq!(s.model.max_context, 139264);
+        assert_eq!(s.model.kv_format, ignis_core::KvFormat::Nvfp4);
+        assert_eq!(s.vram.adapt_spare_tokens, 8192);
         assert_eq!(s.spec.decode_lanes, Some(2));
         assert_eq!(s.spec.draft_tokens, Some(7));
         assert_eq!(s.vram.headroom_bytes, 1200 << 20);
