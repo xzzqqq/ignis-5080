@@ -18,7 +18,9 @@ GDN verify without changing its numerical or persistent-state contract?
 ### Implementation
 
 The GDN sublayer runs QKV and Z in one decode grid while keeping each weight's
-input rotation, original K splits and accumulation order. The output preparation
+input rotation, original K splits and accumulation order. The final version
+executes the two independent input transforms in one paired-rotation grid.
+The output preparation
 combines 128-dimensional gated RMSNorm with Trellis input rotation. It retains
 the intermediate BF16 rounding, produces the original FP16 fragment layout and
 inverse scales, and adds the incoming residual directly in the output projection.
@@ -26,7 +28,7 @@ inverse scales, and adds the incoming residual directly in the output projection
 The native route reuses the existing model Trellis workspace. The two input
 projections use disjoint arrival slots in its fixed synchronization prefix;
 other payload bytes may be overwritten by subsequent MLP/head calls. No extra
-persistent allocation or per-layer workspace reset is required. C1/T8 geometry,
+persistent workspace allocation or per-layer workspace reset is required. C1/T8 geometry,
 narrow QKV/Z weights, no SM cap and sufficient existing workspace guard the
 native route. Other shapes and legacy operator recording use the composed path.
 The finite GDN Lab launcher and native route share the implementation.
@@ -59,7 +61,7 @@ An N64 diagnostic of the 120-CTA cooperative gating schedule exceeded residency
 on this 84-SM device (one resident CTA/SM). T8 conv specialization and standalone inverse-norm precomputation
 were bitwise equal but flat in complete GDN replay.
 
-### Final acceptance
+### Initial native acceptance
 
 `make check CUDA=1` passed CUDA/all-target compilation. The official GPU runner
 passed all 132 CTests (including the new mixed-bit GDN workspace-poison test),
@@ -98,7 +100,7 @@ is a capped functional smoke, not an image-quality benchmark. A streaming
 request is closed early and a subsequent request completes normally. Server
 shutdown leaves no GPU compute process. No generated tool calls are executed.
 
-### Review follow-up
+### Review follow-up before paired rotation
 
 The native caller now supplies the `gdn.native_block` NVTX operator scope.
 An instrumented builtin forward (`0a0d4fc9e5d84f5a866289a9b583c8a7`)
@@ -120,13 +122,87 @@ segment regression and 12 forward-timeline CPU tests pass. Private GDN entries
 validate weights, geometry, alignment, workspace capacity and output parameters.
 The earlier service performance numbers were not remeasured for these fixes.
 
+### Paired rotation and early output prefetch
+
+A subsequent change is controlled against the corrected PR at `68c73a8a`,
+not against the original composed GDN route. It advances the dependent-launch
+trigger to immediately after gated rotation's input wait; output decode can
+prefetch weights, but still waits for producer completion before reading XR or
+inverse scales. This follows the [CUDA PDL contract](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/programmatic-dependent-launch.html).
+
+One 80-CTA paired-rotation kernel replaces the two 40-CTA input rotations.
+Both original transforms and A/B output layouts remain independent. It still
+reads h for each transform: the saving is a launch and scheduling boundary,
+not removal of one transform or a promise of halved DRAM traffic. The new kernel
+is prepared before graph capture; capped/wide fallback remains serial.
+
+The initial two-call layer-1 screen used nine alternating pairs: early PDL alone
+1.01825x, paired rotation alone 1.01276x, both 1.02242x. A refactor-only control
+without the merged launch measured 0.99827x. The combination's fifteen-pair
+repeat measured 1.03043x; six calls covering layer 0 (4-bit), layer 5 (3/4-bit)
+and layer 45 (2-bit) measured 1.02157x, 1.02538x and 1.02149x respectively.
+Every replay output and protected state byte matched.
+
+Three full-forward pairs against the saved PR control measured decode speedups
+1.003738x / 1.006091x / 1.004055x. All retain the same 889 output tokens and
+180-round trajectory. The median paired speedup is 1.004055x; the ratio of the
+arm medians (3666.108 / 3643.914 ms) is a different statistic. Do not add these
+figures to the original PR's separately controlled gains.
+
+Final service A/B/A/B uses the same fixed protocol as the initial acceptance,
+with freshly built corrected-PR (`68c73a8a`) and final candidate binaries.
+
+| Request | A1 tok/s | B1 tok/s | A2 tok/s | B2 tok/s | Incremental paired gain |
+|---|---:|---:|---:|---:|---:|
+| astropy | 243.362 | 243.389 | 242.051 | 243.430 | +0.01% / +0.57% |
+| django | 225.360 | 226.361 | 225.141 | 226.389 | +0.44% / +0.55% |
+| sympy | 231.347 | 232.597 | 231.339 | 232.596 | +0.54% / +0.54% |
+
+All 48 responses agree apart from generated tool-call IDs; token and speculative
+counts match. Astropy's first pair is effectively flat. The small decode gains
+are repeated observations under normal boost, not a confidence interval.
+[Derived measurements](artifacts/2026-11-21-gdn/rotation-service-comparison.json)
+retain both decode and prefill values.
+
+Service prefill was slower by about 0.05–1.11% across these pairs, with the larger
+differences in the first pair. A same-resident-engine T=1024 gate/up check over
+15 alternating pairs was essentially flat (0.999710x; bitwise output equality),
+as was the earlier paired full-forward prefill. The active-window SM-clock
+medians differed between runs (A1/B1: 2707/2662 MHz; A2/B2: 2673.5/2655 MHz).
+These are samples within the benchmark window at power >=250 W, not per-kernel
+measurements; the [telemetry summary](artifacts/2026-11-21-gdn/rotation-telemetry-summary.json) retains that scope.
+These observations do not uniquely attribute the service prefill differences;
+no prefill speedup or equal-frequency comparison is claimed.
+
+CUDA/all-target compilation and the final official GPU runner pass: 132/132
+CTest cases, all four Trellis GPU suites and VRAM reload, with no skipped stages.
+The final binary also passes cap0/cap1 dirty-workspace and 5-bit-fallback checks,
+the complete Trellis body test, and cold LAZY finite-segment graph capture/replay.
+Separate service checks pass exact 131,072-input-token capacity, deterministic
+canary, a 96-token Vision response over 25 speculative rounds, and recovery
+after closing a streaming request after 64 generated content characters.
+The follow-up request completes normally. GPU ownership is released afterward.
+
+Control server SHA-256:
+`b2fc7e10700219af9b727e0590d30b82da31db4ed436e4948b941ddb4dcb4efe`.
+Final server SHA-256:
+`c50914c727e90930a7695e89ba4aae44fe0b977bc7439057ca051abff40b8f24`.
+
+Raw screening and immutable candidates are retained under
+`.scratch/gdn-rotation-screen-2026-11-21/`; acceptance receipts and server
+identities are in `.scratch/gdn-rotation-accept-2026-11-21/`. An initial GPU
+preflight rejected its own compound parent-shell command before any test ran;
+launching the runner directly passed with the guard enabled.
+
 ## Finding
 
-The retained exact GDN combination reduces isolated block latency and provides
+The initial exact GDN combination reduces isolated block latency and provides
 0.29–0.76% higher decode throughput across the six service pairs. Independent
 input transforms and split grouping can coexist with joint scheduling. Matching
 the 128-dimensional gated norm and input rotation eliminates a materialization
-boundary while retaining BF16 rounding.
+boundary while retaining BF16 rounding. The subsequent paired-rotation/early-PDL
+change adds small decode gains against the corrected PR control; the two sets
+of percentages are not a measured cumulative gain.
 
 ## Implications
 
@@ -146,9 +222,9 @@ are retained in `.scratch/body-explore-2026-11-21/` and
 separate fixed coding-agent protocol and must not be compared by absolute time
 with that Lab request. Normal boost was used; clocks were not locked.
 
-The final service binary SHA-256 is
+The initial native service binary SHA-256 is
 `0a468ec1f0735d1f4b0b8a54b7c1713e01b5c4ebdf170ef0933c33b3e928aeea`;
-the final candidate DSO identity is
+the initial native candidate DSO identity is
 `a84e24e9d9dd26ff5141be45cdf0223172067a7946584f6781478184cf93faf1`.
 The exploration's original 120-CTA cooperative gating attempt invalidated graph
 capture; the later explicit residency check safely rejected the N64/120-CTA diagnostic.

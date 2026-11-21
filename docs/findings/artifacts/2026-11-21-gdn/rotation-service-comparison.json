@@ -1,0 +1,165 @@
+{
+  "results": [
+    {
+      "request": "astropy__astropy-12907",
+      "medians_tps": {
+        "A1": 243.36207140189902,
+        "B1": 243.38900941156118,
+        "A2": 242.0510567072007,
+        "B2": 243.43045682816708
+      },
+      "prefill_medians_ms": {
+        "A1": 8711.146718,
+        "B1": 8807.760152,
+        "A2": 8834.396561,
+        "B2": 8854.753456999999
+      },
+      "prefill_paired_speedups": [
+        0.9890308736463421,
+        0.9977010205762525
+      ],
+      "paired_gains_percent": [
+        0.011069107649763765,
+        0.5698798178084274
+      ],
+      "all_responses_equal_except_tool_ids": true,
+      "token_and_speculative_counts_equal": true,
+      "counts": [
+        19954,
+        889,
+        "tool_calls",
+        {
+          "accepted": 710,
+          "accepted_at": [
+            163,
+            135,
+            112,
+            92,
+            77,
+            69,
+            62
+          ],
+          "drafted": 1260,
+          "drafted_at": [
+            180,
+            180,
+            180,
+            180,
+            180,
+            180,
+            180
+          ],
+          "rounds": 180
+        }
+      ]
+    },
+    {
+      "request": "django__django-10097",
+      "medians_tps": {
+        "A1": 225.36011778536678,
+        "B1": 226.3610117424304,
+        "A2": 225.14103362746917,
+        "B2": 226.38864559853218
+      },
+      "prefill_medians_ms": {
+        "A1": 9941.479273,
+        "B1": 10019.193021,
+        "A2": 10026.327167,
+        "B2": 10033.792787
+      },
+      "prefill_paired_speedups": [
+        0.9922435122432404,
+        0.9992559523443942
+      ],
+      "paired_gains_percent": [
+        0.44413091672985683,
+        0.5541468611747424
+      ],
+      "all_responses_equal_except_tool_ids": true,
+      "token_and_speculative_counts_equal": true,
+      "counts": [
+        22420,
+        4166,
+        "tool_calls",
+        {
+          "accepted": 3277,
+          "accepted_at": [
+            795,
+            659,
+            535,
+            429,
+            349,
+            283,
+            227
+          ],
+          "drafted": 6230,
+          "drafted_at": [
+            890,
+            890,
+            890,
+            890,
+            890,
+            890,
+            890
+          ],
+          "rounds": 890
+        }
+      ]
+    },
+    {
+      "request": "sympy__sympy-11618",
+      "medians_tps": {
+        "A1": 231.34727590581065,
+        "B1": 232.59708164955026,
+        "A2": 231.33865048748854,
+        "B2": 232.59640204583442
+      },
+      "prefill_medians_ms": {
+        "A1": 7374.363423,
+        "B1": 7417.47576,
+        "A2": 7420.193025,
+        "B2": 7423.730165
+      },
+      "prefill_paired_speedups": [
+        0.9941877346964191,
+        0.9995235360228101
+      ],
+      "paired_gains_percent": [
+        0.5402292889968852,
+        0.5436841425743077
+      ],
+      "all_responses_equal_except_tool_ids": true,
+      "token_and_speculative_counts_equal": true,
+      "counts": [
+        16717,
+        470,
+        "tool_calls",
+        {
+          "accepted": 370,
+          "accepted_at": [
+            85,
+            77,
+            62,
+            49,
+            38,
+            31,
+            28
+          ],
+          "drafted": 707,
+          "drafted_at": [
+            101,
+            101,
+            101,
+            101,
+            101,
+            101,
+            101
+          ],
+          "rounds": 101
+        }
+      ]
+    }
+  ],
+  "requests": 48,
+  "all_passed": true
+}

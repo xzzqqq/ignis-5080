@@ -97,11 +97,9 @@ int32_t admit_first(int sms, uint32_t cap, uint32_t (&admit)[kMaxSmIds / 32]) {
 
 // ---- the activation rotation -----------------------------------------------------------------
 
-__global__ void __launch_bounds__(kThreads) rotate_kernel(const __grid_constant__ RotateParams p) {
-  grid_dependents_launch();
+__device__ __forceinline__ void rotate_item(const RotateParams &p,int item) {
   const int lane = threadIdx.x & 31;
   const int nb = p.in / 128;
-  const int item = blockIdx.x * kWarps + (threadIdx.x >> 5);
   if (item >= p.weights * p.tokens * nb) return;
   // item = (w * nb + blk) * tokens + t: the [weight][block][token] order of xr and inv.
   const int t = item % p.tokens;
@@ -140,6 +138,18 @@ __global__ void __launch_bounds__(kThreads) rotate_kernel(const __grid_constant_
     *reinterpret_cast<uint2 *>(dst) = packed;
   }
   if (lane == 0) p.inv[item] = ldexpf(1.0f, -shift);
+}
+__global__ void __launch_bounds__(kThreads) rotate_kernel(const __grid_constant__ RotateParams p) {
+  grid_dependents_launch();
+  rotate_item(p,int(blockIdx.x)*kWarps+(threadIdx.x>>5));
+}
+// Independent output planes retain each projection's original workspace layout.
+struct GdnRotatePair { RotateParams calls[2]; };
+constexpr int kGdnRotationItems=8*(5120/128);
+__global__ void __launch_bounds__(kThreads) gdn_rotate_pair_kernel(const __grid_constant__ GdnRotatePair p) {
+  grid_dependents_launch();
+  const int item=int(blockIdx.x)*kWarps+(threadIdx.x>>5);
+  if(item<2*kGdnRotationItems)rotate_item(p.calls[item/kGdnRotationItems],item%kGdnRotationItems);
 }
 
 // ---- reconstruct -----------------------------------------------------------------------------
@@ -353,6 +363,8 @@ extern "C" int32_t ignis_trellis_prepare(void) {
   err = cudaDeviceGetAttribute(&st.sms, cudaDevAttrMultiProcessorCount, device);
   if (err != cudaSuccess || st.sms <= 0) return fail("ignis_trellis_prepare: no multiprocessor count");
   if (prepare_decode(&st) != 0 || prepare_prefill(&st) != 0) return -1;
+  cudaFuncAttributes pair_attributes{};
+  if(cudaFuncGetAttributes(&pair_attributes,gdn_rotate_pair_kernel)!=cudaSuccess)return fail("GDN pair rotation prepare failed");
   const char *env = std::getenv("IGNIS_TRELLIS_SM_CAP");
   if (env != nullptr && env[0] != '\0') {
     char *end = nullptr;
@@ -525,6 +537,7 @@ extern "C" int32_t ignis_gdn_joint_projection(const ignis_trellis_weight *qkv,co
     return ignis_trellis_linear(z,x,8,zout,z->out,IGNIS_TRELLIS_STORE,a,raw_stream);
   }
   JointDecodeParams params{};
+  GdnRotatePair rotations{};
   const ignis_trellis_weight *weights[]={qkv,z};
   const ignis_trellis_workspace *spaces[]={a,b};void *outputs[]={conv,zout};
   auto stream=static_cast<cudaStream_t>(raw_stream);
@@ -532,7 +545,11 @@ extern "C" int32_t ignis_gdn_joint_projection(const ignis_trellis_weight *qkv,co
     const auto *w=weights[i];const auto *ws=spaces[i];
     auto l=layout(w->in,w->out,1,8,decode_resident(st,8,false));
     if(ws->bytes<l.bytes)return fail("gdn_joint workspace too small");
-    if(rotate("gdn_joint",x,&w,1,8,true,l,ws,stream))return -1;
+    auto &r=rotations.calls[i];
+    r.x=static_cast<const __nv_bfloat16 *>(x);r.suh[0]=static_cast<const __half *>(w->suh);
+    r.weights=1;r.tokens=8;r.in=w->in;r.scale_exp=kScaleExp;r.frag_order=1;
+    r.xr=reinterpret_cast<__half *>(static_cast<char *>(ws->base)+l.xr);
+    r.inv=reinterpret_cast<float *>(static_cast<char *>(ws->base)+l.inv);
     auto &p=params.calls[i];auto *base=static_cast<char *>(ws->base);
     p.w[0]=device_weight(*w);p.weights=1;p.tokens=8;p.in=w->in;p.out=w->out;p.nb=w->in/128;
     p.splits=l.splits;p.units=(w->out/128)*l.splits;p.epilogue=kStore;
@@ -540,6 +557,8 @@ extern "C" int32_t ignis_gdn_joint_projection(const ignis_trellis_weight *qkv,co
     p.partials=reinterpret_cast<float *>(base+l.partials);p.counters=reinterpret_cast<uint32_t *>(base);
     p.arrivals=reinterpret_cast<uint32_t *>(static_cast<char *>(a->base)+l.arrivals)+(i?qkv->out/128:0);p.y=static_cast<__nv_bfloat16 *>(outputs[i]);p.ldy=w->out;
   }
+  gdn_rotate_pair_kernel<<<(2*kGdnRotationItems+kWarps-1)/kWarps,kThreads,0,stream>>>(rotations);
+  if(check_launch("gdn_joint_rotation"))return -1;
   return launch_joint_decode(params,stream);
 }
 

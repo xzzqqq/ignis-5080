@@ -81,6 +81,9 @@ struct Buffers {
 __global__ void __launch_bounds__(64) gated_rotation(const __nv_bfloat162 *x,const __nv_bfloat162 *weight,
     const __nv_bfloat162 *z,float eps,const __grid_constant__ ignis_tl::RotateParams rotation){
   n::pdl::sync();
+  // Output decode may prefetch weights now; its dependency wait still
+  // guards all reads of this kernel's XR/inverse-scale writes.
+  n::pdl::trigger_dependents();
   const int lane=threadIdx.x&31,row=int(blockIdx.x)*2+(threadIdx.x>>5);
   if(row>=48*8)return;
   float a[4],w[4],gate[4],sum=0.0f;
@@ -105,7 +108,7 @@ __global__ void __launch_bounds__(64) gated_rotation(const __nv_bfloat162 *x,con
     v[q]=lane<16?lo:hi;
   }
   ignis_tl::rotate_bf16_block(rotation,v,row%48,row/48);
-  n::pdl::publish();
+
 }
 
 template<bool Masked>
