@@ -21,6 +21,7 @@
 // int32 return codes (0 = ok, -1 = error), no C++ types across the boundary.
 
 #include "ignis_gqa_native.h"
+#include "ignis_gdn_segment.h"
 #include "ignis_model.h"
 #include "ignis_fp8_linear.h"
 #include "ignis_image_gemm.h"
@@ -1670,6 +1671,8 @@ LoadSizes plan_load_sizes(const ignis_model &model, const ignis_topology &topolo
       model.kv_format==IGNIS_KV_FORMAT_HQ_E8_2B && ignis_gqa_native_workspace(max_context_tokens) &&
       ignis_gqa_native_segment_prepare())
     throw std::runtime_error(std::string("preparing native GQA: ")+ignis_gqa_native_segment_error());
+  if(model.is_trellis_body && topology.hidden==5120 && ignis_lab_gdn_segment_prepare())
+    throw std::runtime_error(std::string("preparing native GDN: ")+ignis_lab_gdn_segment_error());
   // GitHub #336: every round line below is the load's lanes wide.
   const uint32_t lanes = options.decode_lanes;
   sizes.lanes = lanes;

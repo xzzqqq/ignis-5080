@@ -215,10 +215,9 @@ __device__ __forceinline__ void rotate_bf16_block(const RotateParams &p, float (
 #pragma unroll
   for(int q=0;q<4;++q)h[q]=__float2half_rn(v[q]*scale);
   const int item=cb*p.tokens+t;
-  auto pos=[](int k){const int j=k&15;return ((j&7)>>1)*32+(k>>4)*4+(j>>3)*2+(j&1);};
   auto *dst=p.xr+size_t(item)*128;
-  *reinterpret_cast<__half2 *>(dst+pos(4*lane))=__halves2half2(h[0],h[1]);
-  *reinterpret_cast<__half2 *>(dst+pos(4*lane+2))=__halves2half2(h[2],h[3]);
+  *reinterpret_cast<__half2 *>(dst+frag_position(4*lane))=__halves2half2(h[0],h[1]);
+  *reinterpret_cast<__half2 *>(dst+frag_position(4*lane+2))=__halves2half2(h[2],h[3]);
   if(lane==0)p.inv[item]=ldexpf(1.0f,-shift);
 }
 

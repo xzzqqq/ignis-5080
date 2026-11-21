@@ -133,7 +133,7 @@ extern "C" int32_t ignis_lab_gdn_segment_prepare(){
     if(ignis_trellis_prepare())throw std::runtime_error(ignis_trellis_last_error());
     cudaFuncAttributes a{};
     ck(cudaFuncGetAttributes(&a,n::ops::rmsnorm_cta_bf16x2_kernel<n::ops::RmsEpilogue::Offset,512,8,true>));
-    ck(cudaFuncGetAttributes(&a,n::ops::rmsnorm_warp_bf16x2_kernel<n::ops::RmsEpilogue::Gated,512,true>));
+    ck(cudaFuncGetAttributes(&a,gated_rotation));
     ck(cudaFuncGetAttributes(&a,n::ops::detail::gdn_projected_conv_kernel<10240,2048,2048,6144,0,n::ops::detail::NoHistoryPublish>));
     ck(cudaFuncGetAttributes(&a,n::ops::detail::bf16_gdn_gating_proj_small_t_partial_kernel<8,512,4>));
     ck(cudaFuncGetAttributes(&a,n::ops::detail::bf16_gdn_gating_proj_small_t_reduce_kernel));

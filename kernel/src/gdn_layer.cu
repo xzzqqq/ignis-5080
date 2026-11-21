@@ -562,6 +562,7 @@ int32_t run_gdn_layer_record(ignis_model *model, ignis_seq_pool *pool, uint32_t 
         segment_ticket = ignis::lab_segment_before(*model, layer, p, bindings, stream);
       } else {
         if (native_gdn) {
+          ignis::LabProfileRange range("op", "gdn.native_block");
           ignis::segment_gdn_invoke(*model, layer, p, bindings, nullptr,
               model->trellis_workspace.base, model->trellis_workspace.bytes, stream);
         } else {

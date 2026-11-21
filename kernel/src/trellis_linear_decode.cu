@@ -136,7 +136,9 @@ int32_t launch_decode(const DeviceState &st, const DecodeParams &p, cudaStream_t
   cfg.stream = stream;
   cudaLaunchAttribute attr[1];
   attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attr[0].val.programmaticStreamSerializationAllowed = 1;
+  // Capped CTAs must not all be scheduled on unadmitted SMs while a
+  // producer still occupies the admitted SM. Preserve ordinary stream order.
+  attr[0].val.programmaticStreamSerializationAllowed = p.capped ? 0 : 1;
   cfg.attrs = attr;
   cfg.numAttrs = 1;
   const bool mlp4 = st.sms == 84 && !p.capped && p.tokens == 8 && p.in == 5120 && p.out == 17408 &&

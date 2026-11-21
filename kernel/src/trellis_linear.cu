@@ -97,15 +97,6 @@ int32_t admit_first(int sms, uint32_t cap, uint32_t (&admit)[kMaxSmIds / 32]) {
 
 // ---- the activation rotation -----------------------------------------------------------------
 
-// Element k (0..127) of a token's 128-input block in fragment order: the decode kernel's lane
-// with column index c = (k % 8) / 2 reads, for each of the block's eight 16-input tiles kt, the
-// four fp16 values (k = 16 kt + 2c, +1, +8, +9) -- its m16n8k16 B registers b0 / b1 -- as one
-// 8-byte word.
-__device__ __forceinline__ int frag_position(int k) {
-  const int j = k & 15;
-  return ((j & 7) >> 1) * 32 + (k >> 4) * 4 + (j >> 3) * 2 + (j & 1);
-}
-
 __global__ void __launch_bounds__(kThreads) rotate_kernel(const __grid_constant__ RotateParams p) {
   grid_dependents_launch();
   const int lane = threadIdx.x & 31;
@@ -519,10 +510,19 @@ extern "C" const char *ignis_trellis_last_error(void) { return g_last_error.c_st
 extern "C" int32_t ignis_gdn_joint_projection(const ignis_trellis_weight *qkv,const ignis_trellis_weight *z,
     const void *x,void *conv,void *zout,const ignis_trellis_workspace *a,
     const ignis_trellis_workspace *b,void *raw_stream){
-  DeviceState st;if(require_prepared("gdn_joint",&st))return -1;
+  const char *op="gdn_joint";
+  if(check_weight(op,"qkv",qkv) || check_weight(op,"z",z))return -1;
+  if(qkv->in!=5120 || qkv->out!=10240 || z->in!=5120 || z->out!=6144 ||
+      (uint64_t(qkv->out)+z->out)/128>kArrivalBlocks)return fail("gdn_joint invalid geometry");
+  DeviceState st;if(require_prepared(op,&st))return -1;
+  const bool fallback=st.cap || wide_call(qkv,z);
+  // Validate both calls before enqueueing either projection. Serial fallback
+  // reuses A: B's synchronization prefix lives in disposable payload memory.
+  if(check_call(op,st,x,8,conv,qkv->out,qkv->out,a,qkv->in,1,wide_call(qkv,nullptr)) ||
+      check_call(op,st,x,8,zout,z->out,z->out,fallback?a:b,z->in,1,wide_call(z,nullptr)))return -1;
   if(st.cap || wide_call(qkv,z)){
     if(ignis_trellis_linear(qkv,x,8,conv,qkv->out,IGNIS_TRELLIS_STORE,a,raw_stream))return -1;
-    return ignis_trellis_linear(z,x,8,zout,z->out,IGNIS_TRELLIS_STORE,b,raw_stream);
+    return ignis_trellis_linear(z,x,8,zout,z->out,IGNIS_TRELLIS_STORE,a,raw_stream);
   }
   JointDecodeParams params{};
   const ignis_trellis_weight *weights[]={qkv,z};
@@ -545,7 +545,10 @@ extern "C" int32_t ignis_gdn_joint_projection(const ignis_trellis_weight *qkv,co
 
 extern "C" int32_t ignis_gdn_rotation_params(const ignis_trellis_weight *w,
     const ignis_trellis_workspace *ws,RotateParams *r){
-  DeviceState st;if(require_prepared("lab_rotation",&st))return -1;
+  if(check_weight("gdn_rotation","weight",w))return -1;
+  if(!r || w->in!=6144 || w->out!=5120 || !ws || !aligned(ws->base,256))
+    return fail("gdn_rotation invalid geometry, workspace or output parameters");
+  DeviceState st;if(require_prepared("gdn_rotation",&st))return -1;
   const auto l=layout(w->in,w->out,1,8,decode_resident(st,8,wide_call(w,nullptr)));
   if(ws->bytes<l.bytes)return fail("lab_rotation workspace too small");
   *r={};r->suh[0]=static_cast<const __half *>(w->suh);r->tokens=8;r->weights=1;r->in=w->in;
@@ -554,6 +557,11 @@ extern "C" int32_t ignis_gdn_rotation_params(const ignis_trellis_weight *w,
 }
 extern "C" int32_t ignis_gdn_output_from(const ignis_trellis_weight *w,const void *x,const void *residual,
     void *out,const ignis_trellis_workspace *ws,void *stream){
-  DeviceState st;if(require_prepared("lab_add_from",&st))return -1;
+  if(check_weight("gdn_output","weight",w))return -1;
+  if(w->in!=6144 || w->out!=5120 || !aligned(residual,8) || !aligned(out,8) ||
+      !ws || !aligned(ws->base,256))return fail("gdn_output invalid geometry, residual, output or workspace");
+  DeviceState st;if(require_prepared("gdn_output",&st))return -1;
+  const auto l=layout(w->in,w->out,1,8,decode_resident(st,8,wide_call(w,nullptr)));
+  if(ws->bytes<l.bytes)return fail("gdn_output workspace too small");
   return run("lab_add_from",st,w,nullptr,x,8,out,w->out,kAdd,ws,stream,0,true,residual);
 }

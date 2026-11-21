@@ -98,6 +98,28 @@ is a capped functional smoke, not an image-quality benchmark. A streaming
 request is closed early and a subsequent request completes normally. Server
 shutdown leaves no GPU compute process. No generated tool calls are executed.
 
+### Review follow-up
+
+The native caller now supplies the `gdn.native_block` NVTX operator scope.
+An instrumented builtin forward (`0a0d4fc9e5d84f5a866289a9b583c8a7`)
+attributes all 239,620 kernels: 48 GDN layers contribute 8,640 native block
+instances and 86,400 kernels, with zero unattributed kernels overall. This is
+attribution evidence, not a replacement performance measurement.
+
+The serial wide/capped projection fallback reuses workspace A for both calls;
+workspace B's prefix is disposable payload and must never be interpreted as
+initialized counters. The dirty-payload regression now covers either projection
+at 5-bit, as well as narrow mixed-bit inputs. SM-cap1 exposed a separate capped
+scheduling failure during this follow-up; disabling PDL on capped decode launches
+removed that failure while leaving uncapped launch policy unchanged. Both cap0
+and cap1 tests pass, along with the complete Trellis body test.
+
+Model loading now prepares GDN kernels before capture, including the fused
+`gated_rotation` kernel. CUDA/all-target compilation, the cold LAZY-mode finite
+segment regression and 12 forward-timeline CPU tests pass. Private GDN entries
+validate weights, geometry, alignment, workspace capacity and output parameters.
+The earlier service performance numbers were not remeasured for these fixes.
+
 ## Finding
 
 The retained exact GDN combination reduces isolated block latency and provides
@@ -115,8 +137,6 @@ The original composed route remains the recording reference and fallback.
 
 ## Limits and unknowns
 
-
-
 Raw source snapshots, immutable candidate identities, paired timings and errors
 are retained in `.scratch/body-explore-2026-11-21/` and
 `.scratch/body-deeper-2026-11-21/`. Remote acceptance receipts are in
@@ -125,7 +145,6 @@ are retained in `.scratch/body-explore-2026-11-21/` and
 65,536 context and the fixed Astropy request. Service measurements use the
 separate fixed coding-agent protocol and must not be compared by absolute time
 with that Lab request. Normal boost was used; clocks were not locked.
-
 
 The final service binary SHA-256 is
 `0a468ec1f0735d1f4b0b8a54b7c1713e01b5c4ebdf170ef0933c33b3e928aeea`;

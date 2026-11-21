@@ -131,6 +131,15 @@ struct Weight {
 // admit only their original epilogues. Its output is planar [2][tokens][ldy].
 enum Epilogue : int { kStore = 0, kAdd = 1, kSwiGlu = 2, kSwiGluUp = 3, kPairStore = 4 };
 
+// Element k (0..127) of a token's 128-input block in fragment order: the decode kernel's lane
+// with column index c = (k % 8) / 2 reads, for each of the block's eight 16-input tiles kt, the
+// four fp16 values (k = 16 kt + 2c, +1, +8, +9) -- its m16n8k16 B registers b0 / b1 -- as one
+// 8-byte word.
+__host__ __device__ inline int frag_position(int k) {
+  const int j = k & 15;
+  return ((j & 7) >> 1) * 32 + (k >> 4) * 4 + (j >> 3) * 2 + (j & 1);
+}
+
 struct RotateParams {
   const __nv_bfloat16 *x;
   const __half *suh[2];
