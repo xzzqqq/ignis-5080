@@ -131,6 +131,15 @@ struct Weight {
 // admit only their original epilogues. Its output is planar [2][tokens][ldy].
 enum Epilogue : int { kStore = 0, kAdd = 1, kSwiGlu = 2, kSwiGluUp = 3, kPairStore = 4 };
 
+// Element k (0..127) of a token's 128-input block in fragment order: the decode kernel's lane
+// with column index c = (k % 8) / 2 reads, for each of the block's eight 16-input tiles kt, the
+// four fp16 values (k = 16 kt + 2c, +1, +8, +9) -- its m16n8k16 B registers b0 / b1 -- as one
+// 8-byte word.
+__host__ __device__ inline int frag_position(int k) {
+  const int j = k & 15;
+  return ((j & 7) >> 1) * 32 + (k >> 4) * 4 + (j >> 3) * 2 + (j & 1);
+}
+
 struct RotateParams {
   const __nv_bfloat16 *x;
   const __half *suh[2];
@@ -144,6 +153,7 @@ struct RotateParams {
 };
 
 struct DecodeParams {
+  const __nv_bfloat16 *residual_in=nullptr;
   Weight w[2];
   int weights;
   int tokens;
@@ -163,6 +173,10 @@ struct DecodeParams {
   int capped;
   uint32_t admit[kMaxSmIds / 32];
 };
+
+struct JointDecodeParams { DecodeParams calls[2]; };
+int32_t prepare_joint_decode();
+int32_t launch_joint_decode(const JointDecodeParams &,cudaStream_t);
 
 struct PrefillParams {
   Weight w;
@@ -237,10 +251,10 @@ __device__ __forceinline__ void mma_f16acc(uint32_t (&d)[2], const uint32_t (&a)
 __device__ __forceinline__ uint32_t load_stream(const uint32_t *p) { return __ldcs(p); }
 
 // Four BF16 values at y (8-byte aligned), with the residual add when `add`.
-__device__ __forceinline__ void store_bf16x4(__nv_bfloat16 *y, const float (&v)[4], bool add) {
+__device__ __forceinline__ void store_bf16x4(__nv_bfloat16 *y, const float (&v)[4], bool add, const __nv_bfloat16 *residual_in=nullptr) {
   float o[4] = {v[0], v[1], v[2], v[3]};
   if (add) {
-    const uint2 r = *reinterpret_cast<const uint2 *>(y);
+    const uint2 r = *reinterpret_cast<const uint2 *>(residual_in?residual_in:y);
     const __nv_bfloat162 r0 = *reinterpret_cast<const __nv_bfloat162 *>(&r.x);
     const __nv_bfloat162 r1 = *reinterpret_cast<const __nv_bfloat162 *>(&r.y);
     o[0] += __low2float(r0);

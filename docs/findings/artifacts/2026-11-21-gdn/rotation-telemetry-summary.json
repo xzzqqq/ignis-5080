@@ -1,0 +1,30 @@
+[
+  {
+    "leg": "A1",
+    "samples": 199,
+    "median_sm_mhz": 2707.0,
+    "median_temp_c": 71.0,
+    "scope": "benchmark window, power>=250W; not a per-kernel measurement"
+  },
+  {
+    "leg": "B1",
+    "samples": 199,
+    "median_sm_mhz": 2662.0,
+    "median_temp_c": 75.0,
+    "scope": "benchmark window, power>=250W; not a per-kernel measurement"
+  },
+  {
+    "leg": "A2",
+    "samples": 200,
+    "median_sm_mhz": 2673.5,
+    "median_temp_c": 75.0,
+    "scope": "benchmark window, power>=250W; not a per-kernel measurement"
+  },
+  {
+    "leg": "B2",
+    "samples": 199,
+    "median_sm_mhz": 2655.0,
+    "median_temp_c": 76.0,
+    "scope": "benchmark window, power>=250W; not a per-kernel measurement"
+  }
+]

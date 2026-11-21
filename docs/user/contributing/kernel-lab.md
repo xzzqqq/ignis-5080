@@ -11,8 +11,8 @@ at a time; coordinate access before issuing commands.
 
 Hot loading covers Trellis linear/SwiGLU operations, the complete C1/T8 HQ
 GQA attention launcher, and three finite layer segments (MLP, GQA and GDN). The same selected attention code runs in stateful replay
-and real forward graphs. Other attention shapes use builtin code; GDN state
-updates and normalization remain fixed.
+and real forward graphs. Other attention shapes use builtin code; commit-time
+GDN state updates remain outside these finite blocks.
 
 NVFP4 settings are supported for full-model `forward --candidate builtin`
 and `profile --forward --candidate builtin`. Stateful `layer.N.attention`

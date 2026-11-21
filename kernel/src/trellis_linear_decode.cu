@@ -15,6 +15,21 @@ __device__ __forceinline__ void decode_unit(const DecodeParams &p, const Smem &s
   });
 }
 
+__global__ void __launch_bounds__(kThreads,2) joint_decode_kernel(
+    const __grid_constant__ JointDecodeParams params){
+    const int ticket=static_cast<int>(blockIdx.x);
+    const int role=ticket<params.calls[0].units?0:1;
+    const int local=ticket-(role==0?0:params.calls[0].units);
+    const DecodeParams& p=params.calls[role];
+    extern __shared__ __align__(16) unsigned char smem_raw[];
+    __shared__ int last;const Smem smem=carve(smem_raw,8);
+    dispatch_k2(p.w[0].k2,[&](auto k){
+        constexpr int K2=decltype(k)::value;
+        if constexpr(K2<10)unit<K2,1>(p,smem,0,local/p.splits,local%p.splits,&last);
+        else __trap();
+    });
+}
+
 template <int NG, bool kWide>
 __global__ void __launch_bounds__(kThreads, !kWide && NG <= 2 ? 2 : 1) decode_static_kernel(const __grid_constant__ DecodeParams p) {
   extern __shared__ __align__(16) unsigned char smem_raw[];
@@ -82,7 +97,24 @@ template <bool kWide> cudaError_t launch_one(cudaLaunchConfig_t &cfg, int cls, c
 
 }  // namespace
 
+int32_t prepare_joint_decode(){
+    const auto bytes=decode_smem(8);
+    auto err=cudaFuncSetAttribute(joint_decode_kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,static_cast<int>(bytes));
+    if(err!=cudaSuccess)return fail(std::string("joint GDN attributes: ")+cudaGetErrorString(err));
+    return 0;
+}
+int32_t launch_joint_decode(const JointDecodeParams&params,cudaStream_t stream){
+    cudaLaunchAttribute attr{};attr.id=cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr.val.programmaticStreamSerializationAllowed=1;
+    cudaLaunchConfig_t cfg{};cfg.gridDim=dim3(params.calls[0].units+params.calls[1].units);cfg.blockDim=dim3(kThreads);
+    cfg.dynamicSmemBytes=decode_smem(8);cfg.stream=stream;cfg.attrs=&attr;cfg.numAttrs=1;
+    const auto err=cudaLaunchKernelEx(&cfg,joint_decode_kernel,params);
+    if(err!=cudaSuccess)return fail(std::string("joint GDN launch: ")+cudaGetErrorString(err));
+    return 0;
+}
+
 int32_t prepare_decode(DeviceState *st) {
+  if(prepare_joint_decode())return -1;
   if (prepare_one<1, false>(st, 0) != 0 || prepare_one<2, false>(st, 1) != 0 || prepare_one<4, false>(st, 2) != 0 ||
       prepare_one<8, false>(st, 3) != 0 || prepare_one<1, true>(st, 0) != 0 || prepare_one<2, true>(st, 1) != 0 ||
       prepare_one<4, true>(st, 2) != 0 || prepare_one<8, true>(st, 3) != 0) {
@@ -104,7 +136,9 @@ int32_t launch_decode(const DeviceState &st, const DecodeParams &p, cudaStream_t
   cfg.stream = stream;
   cudaLaunchAttribute attr[1];
   attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attr[0].val.programmaticStreamSerializationAllowed = 1;
+  // Capped CTAs must not all be scheduled on unadmitted SMs while a
+  // producer still occupies the admitted SM. Preserve ordinary stream order.
+  attr[0].val.programmaticStreamSerializationAllowed = p.capped ? 0 : 1;
   cfg.attrs = attr;
   cfg.numAttrs = 1;
   const bool mlp4 = st.sms == 84 && !p.capped && p.tokens == 8 && p.in == 5120 && p.out == 17408 &&

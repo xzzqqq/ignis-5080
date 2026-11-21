@@ -329,7 +329,7 @@ fn hq_attention_recording_restores_pages_residual_ring_and_masks() {
 fn finite_segments_capture_replay_and_preserve_gdn_commit_liveouts() {
     let path=std::env::var("IGNIS_MODEL_ARTIFACT").unwrap();
     let kv_name=std::env::var("IGNIS_SEGMENT_TEST_KV_FORMAT").unwrap_or_else(|_|"hq-e8-2b".into());
-    let kv=match kv_name.as_str(){"hq-e8-2b"=>KvFormat::HqE8_2b,"bf16"=>KvFormat::Bf16,_=>panic!("unsupported segment test KV format")};
+    let kv=match kv_name.as_str(){"hq-e8-2b"=>KvFormat::HqE8_2b,"bf16"=>KvFormat::Bf16,"nvfp4"=>KvFormat::Nvfp4,_=>panic!("unsupported segment test KV format")};
     let hq=kv==KvFormat::HqE8_2b;
     let dir=std::env::temp_dir().join(format!("ignis-segment-capture-{}",std::process::id()));
     std::fs::create_dir(&dir).unwrap();
@@ -367,6 +367,9 @@ fn finite_segments_capture_replay_and_preserve_gdn_commit_liveouts() {
         assert_eq!(result["passed"],true,"segment replay: {result}");
         assert_eq!(result["executions_checked"],5);
         assert!(!result["outputs"].as_array().unwrap().is_empty());
+        if r["profile"]["kind"] == 3 {
+            assert_eq!(result["mismatches"], 0, "fused GDN must preserve the composed reference: {result}");
+        }
     }
     // Execution ordinals must survive the map's different flush order: GDN
     // executes before its MLP, but segment kind sorting flushes the MLP first.

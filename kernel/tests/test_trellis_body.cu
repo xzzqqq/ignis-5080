@@ -21,6 +21,8 @@
 #include "moe_fixture.h"
 #include "trellis_body.h"
 #include "ignis_gqa_native.h"
+#include "ignis_gdn_segment.h"
+#include "trellis_linear_internal.cuh"
 
 #include "core/arena.h"
 #include "core/tensor.h"
@@ -35,6 +37,9 @@
 #include <string>
 #include <vector>
 
+extern "C" int32_t ignis_gdn_joint_projection(const ignis_trellis_weight *,const ignis_trellis_weight *,const void *,void *,void *,const ignis_trellis_workspace *,const ignis_trellis_workspace *,void *);
+extern "C" int32_t ignis_gdn_rotation_params(const ignis_trellis_weight *,const ignis_trellis_workspace *,ignis_tl::RotateParams *);
+extern "C" int32_t ignis_gdn_output_from(const ignis_trellis_weight *,const void *,const void *,void *,const ignis_trellis_workspace *,void *);
 using namespace moe_test;
 namespace tb = ignis::trellis_body;
 
@@ -314,12 +319,63 @@ void native_gqa_reuses_poisoned_workspace() {
   }
 }
 
+// The native GDN chain borrows the model workspace. Only the fixed counter
+// prefix is persistent: MLP/head calls may overwrite every later byte.
+void gdn_reuses_trellis_payload(uint32_t qkv_bits, uint32_t z_bits) {
+  Trellis qkv(810,5120,10240,qkv_bits), z(811,5120,6144,z_bits), out(812,6144,5120,6);
+  DeviceBytes input(5120*8*2), norm(5120*2), conv_w(10240*4*2), ab(96*5120*2),
+      alog(48*4), bias(48*4), gnorm(128*2), conv_state(10240*3*2*2),
+      state(128*128*48*4*2), slots(4), valid(4), output(5120*8*2),
+      cr(10240*8*2), kr(128*16*8*2), vr(128*48*8*2), gr(2*48*8*4);
+  upload(input,activations(813,5120*8));upload(conv_w,activations(814,10240*4));
+  upload(gnorm,std::vector<uint16_t>(128,f32_to_bf16(1.0f)));
+  upload(conv_state,activations(815,10240*3*2));upload(state,std::vector<float>(128*128*48*2,0.01f));
+  for(auto *b:{&norm,&ab,&alog,&bias})MOE_CUDA(cudaMemset(b->p,0,b->bytes));
+  upload(slots,std::vector<int32_t>{1});
+  ignis_gdn_segment_call c{};c.profile={IGNIS_SEGMENT_GDN,8,1,5120,0,0,2,0,1e-6f};
+  c.qkv_weight=qkv.w;c.z_weight=z.w;c.output_weight=out.w;
+  c.input_norm=norm.p;c.convolution=conv_w.p;c.ab_projection=ab.p;c.a_log=alog.p;c.dt_bias=bias.p;c.gdn_norm=gnorm.p;
+  c.residual_in=input.p;c.residual_out=output.p;c.conv_states=conv_state.p;c.recurrent_states=state.p;
+  c.lane_slots=slots.as<int32_t>();c.valid_columns=valid.as<int32_t>();
+  c.conv_record=cr.p;c.key_record=kr.p;c.value_record=vr.p;c.gate_record=gr.p;
+  const auto rc=[](int32_t status){if(status){std::fprintf(stderr,"GDN: %s\n",ignis_lab_gdn_segment_error());std::exit(EXIT_FAILURE);}};
+  rc(ignis_lab_gdn_segment_prepare());
+  DeviceBytes workspace(ignis_lab_gdn_segment_workspace(&c.profile));
+  ignis_trellis_workspace full{workspace.p,workspace.bytes}, tiny{workspace.p,0};
+  ignis_tl::RotateParams rotation{};
+  check(ignis_gdn_joint_projection(nullptr,&z.w,input.p,cr.p,output.p,&tiny,&tiny,nullptr)!=0,"GDN rejects null weight");
+  check(ignis_gdn_joint_projection(&qkv.w,&z.w,input.p,cr.p,output.p,&tiny,&tiny,nullptr)!=0,"GDN rejects undersized workspace");
+  check(ignis_gdn_rotation_params(&out.w,&tiny,&rotation)!=0,"GDN rotation rejects undersized workspace");
+  check(ignis_gdn_rotation_params(&out.w,&full,nullptr)!=0,"GDN rotation rejects null parameters");
+  check(ignis_gdn_output_from(&out.w,nullptr,input.p,output.p,&tiny,nullptr)!=0,"GDN output rejects undersized workspace");
+  check(ignis_gdn_output_from(&out.w,nullptr,static_cast<char *>(input.p)+2,output.p,&full,nullptr)!=0,"GDN rejects unaligned residual");
+  const auto before_state=download<uint8_t>(state.p,state.bytes),before_conv=download<uint8_t>(conv_state.p,conv_state.bytes);
+  const auto snapshot=[&](){std::vector<uint8_t> v;for(auto *b:{&output,&cr,&kr,&vr,&gr}){
+    auto x=download<uint8_t>(b->p,b->bytes);v.insert(v.end(),x.begin(),x.end());}return v;};
+  for(int n:{8,5,0}){
+    upload(valid,std::vector<int32_t>{n});
+    for(auto *b:{&output,&cr,&kr,&vr,&gr})MOE_CUDA(cudaMemset(b->p,0x7F,b->bytes));
+    MOE_CUDA(cudaMemset(workspace.p,0,workspace.bytes));
+    rc(ignis_lab_gdn_segment_run(&c,workspace.p,workspace.bytes,nullptr));MOE_CUDA(cudaDeviceSynchronize());
+    const auto expected=snapshot();
+    for(int poison:{0x7F,0xFF}){
+      for(auto *b:{&output,&cr,&kr,&vr,&gr})MOE_CUDA(cudaMemset(b->p,0x7F,b->bytes));
+      MOE_CUDA(cudaMemset(static_cast<char *>(workspace.p)+ignis_tl::kCounterBytes,poison,workspace.bytes-ignis_tl::kCounterBytes));
+      rc(ignis_lab_gdn_segment_run(&c,workspace.p,workspace.bytes,nullptr));MOE_CUDA(cudaDeviceSynchronize());
+      check(snapshot()==expected,"GDN shared payload reuse qkv="+std::to_string(qkv_bits)+" z="+std::to_string(z_bits)+" valid="+std::to_string(n)+" poison="+std::to_string(poison));
+      check(download<uint8_t>(state.p,state.bytes)==before_state,"GDN recurrent state readonly");
+      check(download<uint8_t>(conv_state.p,conv_state.bytes)==before_conv,"GDN conv state readonly");
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
+  const bool gdn_only = argc == 2 && std::strcmp(argv[1], "--native-gdn-only") == 0;
   const bool native_only = argc == 2 && std::strcmp(argv[1], "--native-gqa-only") == 0;
-  if (argc != 1 && !native_only) {
-    std::fprintf(stderr, "usage: %s [--native-gqa-only]\n", argv[0]);
+  if (argc != 1 && !native_only && !gdn_only) {
+    std::fprintf(stderr, "usage: %s [--native-gqa-only|--native-gdn-only]\n", argv[0]);
     return 2;
   }
   int device_count = 0;
@@ -328,11 +384,16 @@ int main(int argc, char **argv) {
     return 1;
   }
   TL_RC(ignis_trellis_prepare());
-  native_gqa_reuses_poisoned_workspace();
+  if(!gdn_only)native_gqa_reuses_poisoned_workspace();
   if (!native_only) {
+    gdn_reuses_trellis_payload(6,8);
+    gdn_reuses_trellis_payload(10,8);
+    gdn_reuses_trellis_payload(6,10);
+    if(!gdn_only){
     split_lands_every_half_in_its_head();
     query_gate_is_the_op_then_the_split();
     head_and_epilogues_are_the_op_at_the_bodies_widths();
+    }
   }
   if (g_failed != 0) {
     std::fprintf(stderr, "%d check(s) failed\n", g_failed);

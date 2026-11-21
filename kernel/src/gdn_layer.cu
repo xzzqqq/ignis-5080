@@ -528,11 +528,19 @@ int32_t run_gdn_layer_record(ignis_model *model, ignis_seq_pool *pool, uint32_t 
     // is a read-only livein; every ReplaySSM plane is an observable liveout
     // consumed later by accept/commit, including preserved invalid suffixes.
     // Other widths and legacy operator captures retain the original chain.
+    // The native C1/T8 chain shares the model's already-zeroed Trellis prefix.
+    // Its two projections reserve disjoint arrival slots in that prefix; the
+    // payload is dead before the next layer/MLP reuses this same workspace.
+    const auto native_profile = ignis::segment_gdn_profile(*model, *pool);
+    const auto native_bytes = model->is_trellis_body ? ignis::segment_gdn_workspace(native_profile) : 0;
+    const bool native_gdn = native_bytes && !model->lab_trace && !model->trellis_candidate &&
+        ignis_trellis_sm_cap() == 0 && w.trellis.in_proj_qkv.k2 < 10 && w.trellis.in_proj_z.k2 < 10 &&
+        native_bytes <= model->trellis_workspace.bytes;
     bool record_segment = false;
     void *segment_ticket = nullptr;
     if (model->is_trellis_body && W == 8 && batch == 1 && hidden == 5120 &&
         head_dim == 128 && spec.value_head_dim == 128 && value_heads == 48 && qk_heads == 16 && conv_channels == 10240 &&
-        ignis::lab_segment_should_run(*model, IGNIS_SEGMENT_GDN, layer, T, batch)) {
+        (ignis::lab_segment_should_run(*model, IGNIS_SEGMENT_GDN, layer, T, batch) || native_gdn)) {
       const auto p = ignis::segment_gdn_profile(*model, *pool);
       ninfer::Tensor residual_view(out_residual, ninfer::DType::BF16, {hidden, T, 1, 1});
       const std::vector<ignis::SegmentBinding> bindings{
@@ -553,7 +561,13 @@ int32_t run_gdn_layer_record(ignis_model *model, ignis_seq_pool *pool, uint32_t 
         record_segment = true;
         segment_ticket = ignis::lab_segment_before(*model, layer, p, bindings, stream);
       } else {
-        ignis::lab_segment_execute(*model, layer, p, bindings, stream);
+        if (native_gdn) {
+          ignis::LabProfileRange range("op", "gdn.native_block");
+          ignis::segment_gdn_invoke(*model, layer, p, bindings, nullptr,
+              model->trellis_workspace.base, model->trellis_workspace.bytes, stream);
+        } else {
+          ignis::lab_segment_execute(*model, layer, p, bindings, stream);
+        }
         const ninfer::Tensor post_norm =
             weight_tensor(w.post_attention_norm, ninfer::DType::BF16, {hidden, 1, 1, 1});
         ignis::segment_mlp(*model, layer, post_norm, residual_view, post, fused, stream);
