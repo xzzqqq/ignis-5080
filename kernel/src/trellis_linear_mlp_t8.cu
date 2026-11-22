@@ -3,18 +3,11 @@
 
 namespace ignis_tl {
 namespace {
-// T=8 MLP: four warps retain the same 128-output work unit.
-// Each warp owns two adjacent 16-output tiles; each output keeps the baseline K order.
 template <int K2>
-__device__ void mlp_unit4(const DecodeParams &p, const Smem &s, int wsel, int cb, int *s_last) {
+__device__ __forceinline__ void accumulate_mlp_tiles(const DecodeParams &p, const Smem &s, int wsel,
+    const uint32_t *base, size_t row_words, size_t slice_words,
+    const typename PlanOf<K2>::type &plan, float (&acc)[2][1][4]) {
   constexpr int words = ignis_trellis::tile_words(K2);
-  const Weight &w = p.w[wsel];
-  const int lane = threadIdx.x & 31;
-  const int warp = threadIdx.x >> 5;
-  const size_t row_words = static_cast<size_t>(w.stride) * words;
-  const size_t slice_words = 8 * row_words;
-  const uint32_t *base = w.trellis + (cb * 8 + warp * 2) * words;
-  const auto plan = plan_for<K2>(lane);
   uint32_t ra[2][8][kRegs<K2>], rb[2][8][kRegs<K2>];
 #pragma unroll
   for (int j = 0; j < 2; ++j) {
@@ -28,7 +21,6 @@ __device__ void mlp_unit4(const DecodeParams &p, const Smem &s, int wsel, int cb
   cp_async_commit();
   stage_block(p, s, 1, wsel, 1);
   cp_async_commit();
-  float acc[2][1][4] = {};
   for (int i = 0; i < p.nb; i += 2) {
     cp_async_wait<1>();
     __syncthreads();
@@ -57,6 +49,69 @@ __device__ void mlp_unit4(const DecodeParams &p, const Smem &s, int wsel, int cb
     if (i + 3 < p.nb) stage_block(p, s, 1, wsel, i + 3);
     cp_async_commit();
   }
+}
+
+// K3 weights stay in registers. Gather both output tiles of the current K
+// block before reusing their packed storage for the next block.
+template <>
+__device__ __forceinline__ void accumulate_mlp_tiles<6>(const DecodeParams &p, const Smem &s, int wsel,
+    const uint32_t *base, size_t row_words, size_t slice_words,
+    const PlanOf<6>::type &plan, float (&acc)[2][1][4]) {
+  constexpr int words = ignis_trellis::tile_words(6);
+  uint32_t packed[2][8][1];
+#pragma unroll
+  for (int j = 0; j < 2; ++j)
+    load_block<6>(base + j * words, row_words, packed[j]);
+  grid_dependency_wait();
+  stage_block(p, s, 0, wsel, 0);
+  cp_async_commit();
+  stage_block(p, s, 1, wsel, 1);
+  cp_async_commit();
+  for (int i = 0; i < p.nb; i += 2) {
+#pragma unroll
+    for (int stage = 0; stage < 2; ++stage) {
+      cp_async_wait<1>();
+      __syncthreads();
+      uint32_t gathered[2][8][2];
+#pragma unroll
+      for (int j = 0; j < 2; ++j) {
+#pragma unroll
+        for (int tile = 0; tile < 8; ++tile) {
+          const uint32_t word = packed[j][tile][0];
+          gathered[j][tile][0] = __shfl_sync(0xffffffffu, word, plan.w0);
+          gathered[j][tile][1] = __shfl_sync(0xffffffffu, word, plan.w1);
+        }
+      }
+      const int next = i + stage + 1;
+      if (next < p.nb) {
+#pragma unroll
+        for (int j = 0; j < 2; ++j)
+          load_block<6>(base + next * slice_words + j * words, row_words, packed[j]);
+      }
+#pragma unroll
+      for (int j = 0; j < 2; ++j)
+        compute_block<6, 1, true>(gathered[j], plan, s.a[stage], s.inv[stage], 8, acc[j]);
+      __syncthreads();
+      if (next + 1 < p.nb) stage_block(p, s, stage, wsel, next + 1);
+      cp_async_commit();
+    }
+  }
+}
+
+// T=8 MLP: four warps retain the same 128-output work unit.
+// Each warp owns two adjacent 16-output tiles; each output keeps the baseline K order.
+template <int K2>
+__device__ void mlp_unit4(const DecodeParams &p, const Smem &s, int wsel, int cb, int *s_last) {
+  constexpr int words = ignis_trellis::tile_words(K2);
+  const Weight &w = p.w[wsel];
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const size_t row_words = static_cast<size_t>(w.stride) * words;
+  const size_t slice_words = 8 * row_words;
+  const uint32_t *base = w.trellis + (cb * 8 + warp * 2) * words;
+  const auto plan = plan_for<K2>(lane);
+  float acc[2][1][4] = {};
+  accumulate_mlp_tiles<K2>(p, s, wsel, base, row_words, slice_words, plan, acc);
   cp_async_wait<0>();
   __syncthreads();
   const int g = lane >> 2, c = lane & 3;
@@ -159,6 +214,111 @@ __device__ void down_t8_partial_unit(const DecodeParams &p, const Smem &s, int c
   // Ordinary stream ordering publishes partials to the reduction kernel.
 }
 
+// One shared stage covers 128 input features, 128 output features and 8 tokens.
+struct alignas(16) DownK3Stage {
+  uint32_t packed[8 * 8 * ignis_trellis::tile_words(6)];
+  __half activation[8][kXRow];
+  float inverse_scale[8];
+};
+
+__device__ __forceinline__ void fetch_down_stage(
+    DownK3Stage &stage, const DecodeParams &p, int output_group, int block) {
+  constexpr int words = ignis_trellis::tile_words(6);
+  const Weight &weight = p.w[0];
+  const size_t row_stride = size_t(weight.stride) * words;
+  const uint32_t *base = weight.trellis + block * 8 * row_stride + output_group * 8 * words;
+
+  const int tid = threadIdx.x, lane = tid % 32, warp = tid / 32;
+#pragma unroll
+  for (int pass = 0; pass < 2; ++pass) {
+    if (pass == 1 && lane >= 16) break;
+    const int word = 4 * (pass == 0 ? tid : 256 + 16 * warp + lane);
+    const int row = word / (8 * words);
+    const uint32_t address = static_cast<uint32_t>(__cvta_generic_to_shared(stage.packed + word));
+    unsigned long long policy;
+    asm volatile("createpolicy.fractional.L2::evict_first.b64 %0;" : "=l"(policy));
+    asm volatile("cp.async.cg.shared.global.L2::cache_hint [%0], [%1], 16, %2;"
+                 :: "r"(address), "l"(base + row * row_stride + word % (8 * words)), "l"(policy));
+  }
+  if (lane >= 16) {
+    const int col = (lane - 16) * 8;
+    cp_async16(&stage.activation[warp][col], p.xr + block * 1024 + warp * 128 + col);
+  }
+  if (lane == 0)
+    cp_async4(&stage.inverse_scale[warp], p.inv + block * 8 + warp);
+}
+
+struct DownFragment {
+  uint32_t packed;
+  uint2 activation;
+};
+
+__device__ __forceinline__ DownFragment load_down_fragment(const DownK3Stage &stage, int k) {
+  const int lane = threadIdx.x % 32;
+  const int warp = threadIdx.x / 32;
+  constexpr int words = ignis_trellis::tile_words(6);
+  return {lane < words ? stage.packed[(k * 8 + warp) * words + lane] : 0u,
+          *reinterpret_cast<const uint2 *>(&stage.activation[lane / 4][(lane % 4) * 32 + 4 * k])};
+}
+
+__global__ __launch_bounds__(256) void down_k3_multistage_kernel(const __grid_constant__ DecodeParams p) {
+  __shared__ DownK3Stage stages[2];
+  const int split = blockIdx.x % p.splits;
+  const int output_group = blockIdx.x / p.splits;
+  const int begin = split * p.nb / p.splits;
+  const int end = (split + 1) * p.nb / p.splits;
+  const int lane = threadIdx.x % 32;
+  const int warp = threadIdx.x / 32;
+  const auto plan = plan_for<6>(lane);
+
+  grid_dependency_wait();
+  fetch_down_stage(stages[0], p, output_group, begin);
+  cp_async_commit();
+  cp_async_wait<0>();
+  __syncthreads();
+  float acc[4] = {};
+  for (int block = begin, slot = 0; block < end; ++block, slot ^= 1) {
+    const int next = block + 1;
+    if (next < end)
+    fetch_down_stage(stages[slot ^ 1], p, output_group, next);
+    cp_async_commit();
+    DownFragment fragments[2];
+    const DownK3Stage &current = stages[slot];
+    fragments[0] = load_down_fragment(current, 0);
+    const float scale0 = current.inverse_scale[2 * (lane % 4)];
+    const float scale1 = current.inverse_scale[2 * (lane % 4) + 1];
+    uint32_t half_acc[2] = {};
+#pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      if (k < 7) fragments[(k + 1) % 2] = load_down_fragment(current, k + 1);
+      const DownFragment &frag = fragments[k % 2];
+      const uint32_t packed[1] = {frag.packed};
+      uint32_t decoded[4];
+      tile_fragment<6>(packed, plan, decoded);
+      const uint32_t operand[4] = {decoded[0], decoded[2], decoded[1], decoded[3]};
+      mma_f16acc(half_acc, operand, frag.activation.x, frag.activation.y);
+      if (k % 2 == 1) {
+        const float2 lo = __half22float2(*reinterpret_cast<const __half2 *>(&half_acc[0]));
+        const float2 hi = __half22float2(*reinterpret_cast<const __half2 *>(&half_acc[1]));
+        acc[0] = fmaf(lo.x, scale0, acc[0]);
+        acc[1] = fmaf(lo.y, scale1, acc[1]);
+        acc[2] = fmaf(hi.x, scale0, acc[2]);
+        acc[3] = fmaf(hi.y, scale1, acc[3]);
+        half_acc[0] = half_acc[1] = 0;
+      }
+    }
+    cp_async_wait<0>();
+    __syncthreads(); // Next slot is ready; all readers have released the current slot.
+  }
+  const int col = output_group * 128 + warp * 16 + lane / 4;
+  float *part = p.partials + size_t(split) * 8 * p.out + col;
+  const int token = 2 * (lane % 4);
+  part[token * p.out] = acc[0];
+  part[token * p.out + 8] = acc[2];
+  part[(token + 1) * p.out] = acc[1];
+  part[(token + 1) * p.out + 8] = acc[3];
+}
+
 // Each warp owns one token and a complete 128-output rotation group.
 __global__ void __launch_bounds__(128) down_t8_reduce_kernel(const __grid_constant__ DecodeParams p) {
   const int lane = threadIdx.x & 31;
@@ -167,6 +327,29 @@ __global__ void __launch_bounds__(128) down_t8_reduce_kernel(const __grid_consta
   if (cb >= p.out / 128) return;
   float v[4];
   sum_splits(p, t, 0, cb, v);
+  warp_hadamard128(v);
+  float scale[4];
+  load_half4(p.w[0].svh + cb * 128 + 4 * lane, scale);
+#pragma unroll
+  for (int q = 0; q < 4; ++q) v[q] = __fmul_rn(v[q], scale[q]);
+  store_bf16x4(p.y + static_cast<size_t>(t) * p.ldy + cb * 128 + 4 * lane, v, true);
+}
+
+__global__ void __launch_bounds__(128) down_k3_reduce4_kernel(const __grid_constant__ DecodeParams p) {
+  const int lane = threadIdx.x & 31;
+  const int item = static_cast<int>(blockIdx.x) * 4 + (threadIdx.x >> 5);
+  const int cb = item / 8, t = item % 8;
+  // The caller selects exactly 40 column groups and 8 tokens.
+  const float4 *src = reinterpret_cast<const float4 *>(p.partials) + t * 1280 + cb * 32 + lane;
+  float v[4] = {};
+#pragma unroll
+  for (int split = 0; split < 4; ++split) {
+    const float4 q = __ldcg(src + split * 10240);
+    v[0] += q.x;
+    v[1] += q.y;
+    v[2] += q.z;
+    v[3] += q.w;
+  }
   warp_hadamard128(v);
   float scale[4];
   load_half4(p.w[0].svh + cb * 128 + 4 * lane, scale);
@@ -199,9 +382,20 @@ cudaError_t launch_mlp_t8(cudaLaunchConfig_t &cfg, const DecodeParams &p) {
   return cudaLaunchKernelEx(&cfg, mlp_static4_kernel, p);
 }
 cudaError_t launch_down_t8(cudaLaunchConfig_t &cfg, const DecodeParams &p) {
-  cudaError_t err = cudaLaunchKernelEx(&cfg, down_t8_partial_kernel, p);
+  cudaError_t err;
+  if (p.w[0].k2 == 6) {
+    // On the 84-SM RTX 5080, reserve two more stages' worth of shared memory
+    // so this 160-CTA grid spreads across the card even with PDL enabled.
+    cfg.dynamicSmemBytes = 2 * sizeof(DownK3Stage);
+    err = cudaLaunchKernelEx(&cfg, down_k3_multistage_kernel, p);
+  } else {
+    err = cudaLaunchKernelEx(&cfg, down_t8_partial_kernel, p);
+  }
   if (err != cudaSuccess) return err;
-  down_t8_reduce_kernel<<<(p.out / 128) * 2, 128, 0, cfg.stream>>>(p);
+  if (p.w[0].k2 == 6)
+    down_k3_reduce4_kernel<<<80, 128, 0, cfg.stream>>>(p);
+  else
+    down_t8_reduce_kernel<<<(p.out / 128) * 2, 128, 0, cfg.stream>>>(p);
   return cudaGetLastError();
 }
 } // namespace ignis_tl

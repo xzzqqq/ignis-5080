@@ -142,8 +142,8 @@ __device__ __forceinline__ void tile_fragment(const uint32_t (&r)[kRegs<K2>], co
 // tokens. fp16 accumulation, folded into fp32 times the block's inverse scale every 32 inputs,
 // as the prefill route does (the scale keeps a fold's 32 products below fp16's range).
 // acc[n] = {(column g, token 8n + 2c), (g, 8n + 2c + 1), (g + 8, 8n + 2c), (g + 8, 8n + 2c + 1)}.
-template <int K2, int NG>
-__device__ __forceinline__ void compute_block(const uint32_t (&r)[8][kRegs<K2>], const typename PlanOf<K2>::type &plan,
+template <int K2, int NG, bool Gathered = false>
+__device__ __forceinline__ void compute_block(const uint32_t (&r)[8][Gathered ? 2 : kRegs<K2>], const typename PlanOf<K2>::type &plan,
                                               const __half *x, const float *inv, int tokens, float (&acc)[NG][4]) {
   const int lane = threadIdx.x & 31;
   const int g = lane >> 2;
@@ -161,7 +161,12 @@ __device__ __forceinline__ void compute_block(const uint32_t (&r)[8][kRegs<K2>],
 #pragma unroll
   for (int kt = 0; kt < 8; ++kt) {
     uint32_t frag[4];
-    tile_fragment<K2>(r[kt], plan, frag);
+    if constexpr (Gathered) {
+      static_assert(K2 == 6);
+      ignis_trellis::decode_fragment<K2>(r[kt][0], r[kt][1], plan, frag);
+    } else {
+      tile_fragment<K2>(r[kt], plan, frag);
+    }
     const uint32_t a[4] = {frag[0], frag[2], frag[1], frag[3]};
 #pragma unroll
     for (int n = 0; n < NG; ++n) {
