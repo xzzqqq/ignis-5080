@@ -220,6 +220,11 @@ struct alignas(16) DownK3Stage {
   __half activation[8][kXRow];
   float inverse_scale[8];
 };
+static_assert(sizeof(DownK3Stage) % 16 == 0);
+
+// Reserve two additional stages on RTX 5080. The combined static and dynamic
+// allocation fits twice per SM. Three CTAs would exceed its shared memory.
+constexpr size_t kDownK3SharedReserve = 2 * sizeof(DownK3Stage);
 
 __device__ __forceinline__ void fetch_down_stage(
     DownK3Stage &stage, const DecodeParams &p, int output_group, int block) {
@@ -229,14 +234,14 @@ __device__ __forceinline__ void fetch_down_stage(
   const uint32_t *base = weight.trellis + block * 8 * row_stride + output_group * 8 * words;
 
   const int tid = threadIdx.x, lane = tid % 32, warp = tid / 32;
+  unsigned long long policy;
+  asm volatile("createpolicy.fractional.L2::evict_first.b64 %0;" : "=l"(policy));
 #pragma unroll
   for (int pass = 0; pass < 2; ++pass) {
     if (pass == 1 && lane >= 16) break;
     const int word = 4 * (pass == 0 ? tid : 256 + 16 * warp + lane);
     const int row = word / (8 * words);
     const uint32_t address = static_cast<uint32_t>(__cvta_generic_to_shared(stage.packed + word));
-    unsigned long long policy;
-    asm volatile("createpolicy.fractional.L2::evict_first.b64 %0;" : "=l"(policy));
     asm volatile("cp.async.cg.shared.global.L2::cache_hint [%0], [%1], 16, %2;"
                  :: "r"(address), "l"(base + row * row_stride + word % (8 * words)), "l"(policy));
   }
@@ -364,7 +369,7 @@ __global__ void __launch_bounds__(256, 2) down_t8_partial_kernel(const __grid_co
   const int ticket = static_cast<int>(blockIdx.x);
   dispatch_k2(p.w[0].k2, [&](auto k) {
     constexpr int K2 = decltype(k)::value;
-    if constexpr (K2 == 4 || K2 == 6)
+    if constexpr (K2 == 4)
       down_t8_partial_unit<K2>(p, s, ticket / p.splits, ticket % p.splits);
     else __trap();
   });
@@ -376,17 +381,32 @@ int32_t prepare_mlp_t8(DeviceState *st) {
   const cudaError_t err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
       &st->mlp4_ctas, mlp_static4_kernel, 128, decode_smem(8));
   if (err != cudaSuccess || st->mlp4_ctas < 1) return fail("MLP4 occupancy query failed");
+  if (st->sms == 84) {
+    int resident = 0;
+    const auto status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &resident, down_k3_multistage_kernel, 256, kDownK3SharedReserve);
+    if (status != cudaSuccess)
+      return fail(std::string("K3 down occupancy query failed: ") + cudaGetErrorString(status));
+    if (resident != 2)
+      return fail("K3 down expected two resident CTAs per SM, got " + std::to_string(resident));
+    // Resolve functions before the first graph capture with lazy module loading.
+    cudaFuncAttributes attributes{};
+    if (cudaFuncGetAttributes(&attributes, down_k3_reduce4_kernel) != cudaSuccess ||
+        cudaFuncGetAttributes(&attributes, down_t8_partial_kernel) != cudaSuccess ||
+        cudaFuncGetAttributes(&attributes, down_t8_reduce_kernel) != cudaSuccess)
+      return fail("T8 down function preparation failed");
+  }
   return 0;
 }
 cudaError_t launch_mlp_t8(cudaLaunchConfig_t &cfg, const DecodeParams &p) {
   return cudaLaunchKernelEx(&cfg, mlp_static4_kernel, p);
 }
-cudaError_t launch_down_t8(cudaLaunchConfig_t &cfg, const DecodeParams &p) {
+cudaError_t launch_down_t8(cudaLaunchConfig_t cfg, const DecodeParams &p) {
   cudaError_t err;
   if (p.w[0].k2 == 6) {
     // On the 84-SM RTX 5080, reserve two more stages' worth of shared memory
     // so this 160-CTA grid spreads across the card even with PDL enabled.
-    cfg.dynamicSmemBytes = 2 * sizeof(DownK3Stage);
+    cfg.dynamicSmemBytes = kDownK3SharedReserve;
     err = cudaLaunchKernelEx(&cfg, down_k3_multistage_kernel, p);
   } else {
     err = cudaLaunchKernelEx(&cfg, down_t8_partial_kernel, p);
