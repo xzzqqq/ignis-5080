@@ -29,11 +29,23 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <stdexcept>
 #include <string>
 
 namespace {
+
+void draft_linear(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &out, cudaStream_t stream,
+                  bool small_mma_at_16 = true) {
+  if (static_cast<int>(w.layout) == IGNIS_LAYOUT_NVFP4_MMA16)
+    ignis_dflash2_packed_linear(x, w, out, stream);
+  else if (small_mma_at_16 && x.ne[1] == 16)
+    ignis_dflash2_small_mma(x, w, out, false, stream);
+  else
+    ninfer::ops::linear(x, w, out, stream);
+}
 
 // A BF16 weight (a norm, a conv base) as the tensor the ops take.
 ninfer::Tensor bf16_tensor(const ninfer::Weight &weight, std::initializer_list<std::int32_t> shape) {
@@ -88,7 +100,8 @@ void ignis_dflash2_append_context(ignis_model *model, ignis_seq_pool *pool,
   const Dflash2Weights &weights = model->dflash2;
 
   ninfer::Tensor projected = arena.alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
-  IGNIS_PROFILE_OP("linear.feature_projection", ninfer::ops::linear(features, weights.feature_projection, projected, stream));
+  IGNIS_PROFILE_OP("linear.feature_projection",
+                   draft_linear(features, weights.feature_projection, projected, stream, false));
   ninfer::Tensor context = arena.alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
   IGNIS_PROFILE_OP("rmsnorm", ninfer::ops::rmsnorm(projected, bf16_tensor(weights.context_norm, {hidden, 1, 1, 1}),
                        kDflash2RmsEps, /*unit_offset=*/false, context, stream));
@@ -170,25 +183,30 @@ void ignis_dflash2_propose(ignis_model *model, ignis_seq_pool *pool, std::uint32
                            /*unit_offset=*/false, normed, stream));
       ninfer::Tensor dynamic = arena.alloc(
           ninfer::DType::BF16, {static_cast<std::int32_t>(w.attention_conv_proj.n), columns, 1, 1});
-      IGNIS_PROFILE_OP("linear.attention_conv_proj", ninfer::ops::linear(normed, w.attention_conv_proj, dynamic, stream));
+      IGNIS_PROFILE_OP("linear.attention_conv_proj",
+                       draft_linear(normed, w.attention_conv_proj, dynamic, stream, false));
       ninfer::Tensor conv_hidden = arena.alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
       IGNIS_PROFILE_OP("dflash2_dynamic_conv", ninfer::ops::dflash2_dynamic_conv(normed, dynamic, attention_base, 0, block, conv_hidden,
                                         stream));
-      ninfer::Tensor qkv =
-          arena.alloc(ninfer::DType::BF16, {query_size + 2 * kv_width, columns, 1, 1});
-      IGNIS_PROFILE_OP(
-          "linear.query_key_value",
-          (columns == 16
-               ? ignis_dflash2_small_mma(conv_hidden, w.query_key_value, qkv,
-                                         false, stream)
-               : ninfer::ops::linear(conv_hidden, w.query_key_value, qkv,
-                                     stream)));
       ninfer::Tensor query_raw = arena.alloc(ninfer::DType::BF16, {query_size, columns, 1, 1});
       ninfer::Tensor key_raw   = arena.alloc(ninfer::DType::BF16, {kv_width, columns, 1, 1});
       ninfer::Tensor value     = arena.alloc(ninfer::DType::BF16, {kv_width, columns, 1, 1});
-      copy_bf16_rows(query_raw, qkv, 0, stream);
-      copy_bf16_rows(key_raw, qkv, query_size, stream);
-      copy_bf16_rows(value, qkv, query_size + kv_width, stream);
+      static const bool direct = [] {
+        const char *flag = std::getenv("IGNIS_DFLASH2_DIRECT_QKV");
+        return !flag || std::strcmp(flag, "0") != 0;
+      }();
+      if (direct && (columns == 8 || columns == 16 ||
+                     static_cast<int>(w.query_key_value.layout) == IGNIS_LAYOUT_NVFP4_MMA16)) {
+        IGNIS_PROFILE_OP(
+            "linear.query_key_value",
+            ignis_dflash2_split_qkv(conv_hidden, w.query_key_value, query_raw, key_raw, value, stream));
+      } else {
+        ninfer::Tensor qkv = arena.alloc(ninfer::DType::BF16, {query_size + 2 * kv_width, columns, 1, 1});
+        IGNIS_PROFILE_OP("linear.query_key_value", draft_linear(conv_hidden, w.query_key_value, qkv, stream));
+        copy_bf16_rows(query_raw, qkv, 0, stream);
+        copy_bf16_rows(key_raw, qkv, query_size, stream);
+        copy_bf16_rows(value, qkv, query_size + kv_width, stream);
+      }
       ninfer::Tensor query = arena.alloc(ninfer::DType::BF16, {query_size, columns, 1, 1});
       ninfer::Tensor key   = arena.alloc(ninfer::DType::BF16, {kv_width, columns, 1, 1});
       ninfer::Tensor query_normed = query.view({head_dim, query_heads, columns});
@@ -210,12 +228,7 @@ void ignis_dflash2_propose(ignis_model *model, ignis_seq_pool *pool, std::uint32
                        pool->dflash2_window->layer_view(static_cast<std::uint32_t>(layer)),
                        swa_envelope, arena, attention_blocks, stream));
       ninfer::Tensor projected = arena.alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
-      IGNIS_PROFILE_OP(
-          "linear.output",
-          (columns == 16
-               ? ignis_dflash2_small_mma(attention, w.output, projected, false,
-                                         stream)
-               : ninfer::ops::linear(attention, w.output, projected, stream)));
+      IGNIS_PROFILE_OP("linear.output", draft_linear(attention, w.output, projected, stream));
       ninfer::Tensor conv_attention = arena.alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
       IGNIS_PROFILE_OP("dflash2_dynamic_conv", ninfer::ops::dflash2_dynamic_conv(projected, dynamic, attention_base, 1, block, conv_attention,
                                         stream));
@@ -228,7 +241,7 @@ void ignis_dflash2_propose(ignis_model *model, ignis_seq_pool *pool, std::uint32
                            kDflash2RmsEps, /*unit_offset=*/false, normed, stream));
       ninfer::Tensor dynamic = arena.alloc(
           ninfer::DType::BF16, {static_cast<std::int32_t>(w.mlp_conv_proj.n), columns, 1, 1});
-      IGNIS_PROFILE_OP("linear.mlp_conv_proj", ninfer::ops::linear(normed, w.mlp_conv_proj, dynamic, stream));
+      IGNIS_PROFILE_OP("linear.mlp_conv_proj", draft_linear(normed, w.mlp_conv_proj, dynamic, stream, false));
       ninfer::Tensor conv_hidden = arena.alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
       IGNIS_PROFILE_OP("dflash2_dynamic_conv", ninfer::ops::dflash2_dynamic_conv(normed, dynamic, mlp_base, 0, block, conv_hidden, stream));
       const auto intermediate_rows = static_cast<std::int32_t>(w.mlp_down.k);
@@ -253,15 +266,7 @@ void ignis_dflash2_propose(ignis_model *model, ignis_seq_pool *pool, std::uint32
                                    ninfer::ops::LinearPolicy::A16Only, arena, stream));
       }
       ninfer::Tensor projected = arena.alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
-      if (columns == 16) {
-        IGNIS_PROFILE_OP("linear.mlp_down",
-                         ignis_dflash2_small_mma(intermediate, w.mlp_down,
-                                                 projected, false, stream));
-      } else {
-        IGNIS_PROFILE_OP(
-            "linear.mlp_down",
-            ninfer::ops::linear(intermediate, w.mlp_down, projected, stream));
-      }
+      IGNIS_PROFILE_OP("linear.mlp_down", draft_linear(intermediate, w.mlp_down, projected, stream));
       ninfer::Tensor conv_projected = arena.alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
       IGNIS_PROFILE_OP("dflash2_dynamic_conv", ninfer::ops::dflash2_dynamic_conv(projected, dynamic, mlp_base, 1, block, conv_projected,
                                         stream));

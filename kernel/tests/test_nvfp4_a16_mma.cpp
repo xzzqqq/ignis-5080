@@ -180,11 +180,10 @@ int check_dispatch(std::int32_t n, std::int32_t k, std::int32_t t, bool expect_m
 
 // Use an independent host traversal of logical rows to encode the same weight
 // in both layouts. Compare every active output and the first inactive column.
-int check_packed_swiglu() {
-  constexpr int rows = 128, k = 128;
-  auto weight = make_nvfp4_weight(2 * rows, k, 8123U);
+std::vector<uint8_t> pack_mma16(const test::quantized_weight::PackedWeight &weight) {
+  const int rows = weight.weight.n, k = weight.weight.k;
   auto packed = weight.payload;
-  for (int row = 0; row < 2 * rows; ++row) {
+  for (int row = 0; row < rows; ++row) {
     for (int g = 0; g < k / 16; ++g) {
       const int tile = row / 16 * (k / 16) + g;
       for (int b = 0; b < 8; ++b) {
@@ -198,6 +197,13 @@ int check_packed_swiglu() {
           weight.payload[weight.scale_plane_offset + source];
     }
   }
+  return packed;
+}
+
+int check_packed_swiglu() {
+  constexpr int rows = 128, k = 128;
+  auto weight = make_nvfp4_weight(2 * rows, k, 8123U);
+  const auto packed = pack_mma16(weight);
   DeviceBytes original(weight.payload.size()), tiled(packed.size()),
       input(k * 16 * 2);
   cuda_ok(cudaMemcpy(original.p, weight.payload.data(), weight.payload.size(),
@@ -310,8 +316,66 @@ int check_kv_rows() {
   return 0;
 }
 
+int check_packed_qkv() {
+  constexpr int n = 6144, k = 5120, capacity = 144;
+  auto host = make_nvfp4_weight(n, k, 5099U);
+  auto tiled = pack_mma16(host);
+  DeviceBytes orig(tiled.size()), pack(tiled.size()), x(k * capacity * 2), all(n * capacity * 2);
+  DeviceBytes q(4096 * capacity * 2), key(1024 * capacity * 2), value(1024 * capacity * 2);
+  cuda_ok(cudaMemcpy(orig.p, host.payload.data(), tiled.size(), cudaMemcpyHostToDevice), "original QKV");
+  cuda_ok(cudaMemcpy(pack.p, tiled.data(), tiled.size(), cudaMemcpyHostToDevice), "packed QKV");
+  auto row = host.device_weight(orig.p), packed = host.device_weight(pack.p);
+  packed.layout = static_cast<QuantLayout>(IGNIS_LAYOUT_NVFP4_MMA16);
+  std::vector<uint16_t> input(k * capacity);
+  for (size_t i = 0; i < input.size(); ++i)
+    input[i] = 0x3900 + (i * 79 % 1800);
+  cuda_ok(cudaMemcpy(x.p, input.data(), input.size() * 2, cudaMemcpyHostToDevice), "input");
+  for (int t : {1, 7, 8, 16, 17, 63, 127, 128, 129}) {
+    Tensor in(x.p, DType::BF16, {k, t}), query(q.p, DType::BF16, {4096, t});
+    Tensor keys(key.p, DType::BF16, {1024, t}), values(value.p, DType::BF16, {1024, t});
+    for (bool commit : {false, true}) {
+      const bool wide = commit && t >= 128;
+      const int padded = wide ? t : (t + 15) / 16 * 16;
+      Tensor full_x(x.p, DType::BF16, {k, padded}), full_y(all.p, DType::BF16, {n, padded});
+      if (wide) {
+        ops::linear(full_x, row, full_y, nullptr);
+      } else {
+        for (int first = 0; first < t; first += 16) {
+          const int width = t - first <= 8 ? 8 : 16;
+          auto a = full_x.slice(1, first, width), b = full_y.slice(1, first, width);
+          ignis_dflash2_small_mma(a, row, b, false, nullptr);
+        }
+      }
+      std::vector<uint16_t> expected(n * t);
+      cuda_ok(cudaMemcpy(expected.data(), all.p, expected.size() * 2, cudaMemcpyDeviceToHost), "reference");
+      for (auto *dst : {&query, &keys, &values})
+        cuda_ok(cudaMemset(dst->data, 0xa5, (t + 1) * dst->ne[0] * 2), "tail sentinel");
+      if (commit)
+        ignis_dflash2_project_kv(in, packed, keys, values, nullptr);
+      else
+        ignis_dflash2_split_qkv(in, packed, query, keys, values, nullptr);
+      int first = 0;
+      for (auto *dst : {&query, &keys, &values}) {
+        const int rows = dst->ne[0];
+        if (!commit || first) {
+          std::vector<uint16_t> got((t + 1) * rows);
+          cuda_ok(cudaMemcpy(got.data(), dst->data, got.size() * 2, cudaMemcpyDeviceToHost), "split output");
+          for (int col = 0; col < t; ++col)
+            if (std::memcmp(got.data() + col * rows, expected.data() + col * n + first, rows * 2))
+              throw std::runtime_error("packed QKV differs at T=" + std::to_string(t));
+          for (int r = 0; r < rows; ++r)
+            if (got[t * rows + r] != 0xa5a5)
+              throw std::runtime_error("packed QKV overwrote tail");
+        }
+        first += rows;
+      }
+    }
+  }
+  return 0;
+}
+
 int run_nvfp4_a16_mma() {
-    int failures = check_route_selection() + check_kv_rows() + check_packed_swiglu();
+    int failures = check_route_selection() + check_kv_rows() + check_packed_swiglu() + check_packed_qkv();
 
     failures += check_dispatch(6144, 5120, 63, false);
     failures += check_dispatch(6144, 5120, 64, true);

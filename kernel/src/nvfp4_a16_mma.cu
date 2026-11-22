@@ -38,6 +38,8 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 namespace {
@@ -107,11 +109,25 @@ __device__ __forceinline__ std::uint32_t pack_bf16x2(float lo, float hi) {
   return *reinterpret_cast<const std::uint32_t *>(&packed);
 }
 
-template <int M, int K, bool FullTokens>
+// A split grid maps logical rows to each consumer's contiguous [rows,T] buffer.
+struct DflashSplitOutput {
+  __nv_bfloat16 *query, *key, *value;
+
+  __device__ void store(int row, int token, float result) const {
+    if (query && row < 4096) {
+      query[token * 4096 + row] = __float2bfloat16_rn(result);
+    } else {
+      auto *base = row % 2048 < 1024 ? key : value;
+      base[token * 1024 + row % 1024] = __float2bfloat16_rn(result);
+    }
+  }
+};
+
+template <int M, int K, bool FullTokens, bool Split = false, bool Packed = false>
 __global__ __launch_bounds__(kThreads) void nvfp4_a16_mma_kernel(
     const __nv_bfloat16 *__restrict__ x, const std::uint8_t *__restrict__ codes,
-    const std::uint8_t *__restrict__ scales, float inverse_weight_divisor,
-    __nv_bfloat16 *__restrict__ out, std::int32_t tokens) {
+    const std::uint8_t *__restrict__ scales, float inverse_weight_divisor, __nv_bfloat16 *__restrict__ out,
+    std::int32_t tokens, DflashSplitOutput split = {}) {
   static_assert(M % kBlockRows == 0);
   static_assert(K % kBlockK == 0);
   constexpr int kTiles = K / kBlockK;
@@ -155,19 +171,29 @@ __global__ __launch_bounds__(kThreads) void nvfp4_a16_mma_kernel(
   auto load_stage = [&](int stage, int k_tile) {
     const int k0 = k_tile * kBlockK;
     unsigned char *code_dst = stage_codes(stage);
-    for (int item = tid; item < kBlockRows * 2; item += kThreads) {
-      const int row = item >> 1;
-      const int half = item & 1;
-      cp_async<16, Cache::cg>(code_dst + row * kCodeBytesPerRow + half * 16,
-                              codes + static_cast<std::int64_t>(m0 + row) * (K / 2) + k0 / 2 +
-                                  half * 16);
-    }
-    unsigned char *scale_dst = stage_scales(stage);
-    const std::uint8_t *scale_src =
-        scales + (static_cast<std::int64_t>(scale_tile_m) * kScaleTilesPerRow + k_tile) *
-                     kScaleTileBytes;
-    for (int item = tid; item < kScaleTileBytes / 16; item += kThreads) {
-      cp_async<16, Cache::cg>(scale_dst + item * 16, scale_src + item * 16);
+    if constexpr (Packed) {
+      for (int item = tid; item < kCodeStageBytes / 16; item += kThreads) {
+        const int tile = item / 8;
+        const int global_tile = (m0 / 16 + tile / 4) * (K / 16) + k_tile * 4 + tile % 4;
+        cp_async<16, Cache::cg>(code_dst + item * 16, codes + global_tile * 128 + item % 8 * 16);
+      }
+      if (tid < (kBlockRows / 16) * 4) {
+        const int tile = (m0 / 16 + tid / 4) * (K / 16) + k_tile * 4 + tid % 4;
+        cp_async<16, Cache::cg>(stage_scales(stage) + tid * 16, scales + tile * 16);
+      }
+    } else {
+      for (int item = tid; item < kBlockRows * 2; item += kThreads) {
+        const int row = item >> 1;
+        const int half = item & 1;
+        cp_async<16, Cache::cg>(code_dst + row * kCodeBytesPerRow + half * 16,
+                                codes + static_cast<std::int64_t>(m0 + row) * (K / 2) + k0 / 2 + half * 16);
+      }
+      unsigned char *scale_dst = stage_scales(stage);
+      const std::uint8_t *scale_src =
+          scales + (static_cast<std::int64_t>(scale_tile_m) * kScaleTilesPerRow + k_tile) * kScaleTileBytes;
+      for (int item = tid; item < kScaleTileBytes / 16; item += kThreads) {
+        cp_async<16, Cache::cg>(scale_dst + item * 16, scale_src + item * 16);
+      }
     }
     __nv_bfloat16 *token_dst = stage_tokens(stage);
     for (int item = tid; item < kBlockCols * (kBlockK / 8); item += kThreads) {
@@ -194,17 +220,33 @@ __global__ __launch_bounds__(kThreads) void nvfp4_a16_mma_kernel(
       (decode_scale_row & 31) * 16 + (decode_scale_row >> 5) * 4 + decode_group;
 
   auto decode_stage = [&](int stage) {
-    const uint2 packed = *reinterpret_cast<const uint2 *>(
-        stage_codes(stage) + decode_row * kCodeBytesPerRow + decode_group * 8);
-    const float scale = decode_nvfp4_e4m3(stage_scales(stage)[decode_scale_index]);
-    const std::uint32_t words[2] = {packed.x, packed.y};
     std::uint32_t decoded[8];
-#pragma unroll
-    for (int w = 0; w < 2; ++w) {
+    if constexpr (Packed) {
+      const int tile = (decode_row / 16) * 4 + decode_group;
+      const int r = decode_row % 16;
+      const float scale = decode_nvfp4_e4m3(stage_scales(stage)[tile * 16 + r]);
 #pragma unroll
       for (int b = 0; b < 4; ++b) {
-        const float2 pair = decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(words[w] >> (8 * b)));
-        decoded[w * 4 + b] = pack_bf16x2(pair.x * scale, pair.y * scale);
+        const int lane = (r % 8) * 4 + b;
+        const unsigned word = reinterpret_cast<const unsigned *>(stage_codes(stage))[tile * 32 + lane];
+#pragma unroll
+        for (int half = 0; half < 2; ++half) {
+          const float2 pair = decode_nvfp4_e2m1x2(word >> (8 * (2 * half + r / 8)));
+          decoded[half * 4 + b] = pack_bf16x2(pair.x * scale, pair.y * scale);
+        }
+      }
+    } else {
+      const uint2 packed = *reinterpret_cast<const uint2 *>(stage_codes(stage) +
+                                                            decode_row * kCodeBytesPerRow + decode_group * 8);
+      const float scale = decode_nvfp4_e4m3(stage_scales(stage)[decode_scale_index]);
+      const std::uint32_t words[2] = {packed.x, packed.y};
+#pragma unroll
+      for (int w = 0; w < 2; ++w) {
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+          const float2 pair = decode_nvfp4_e2m1x2(static_cast<std::uint8_t>(words[w] >> (8 * b)));
+          decoded[w * 4 + b] = pack_bf16x2(pair.x * scale, pair.y * scale);
+        }
       }
     }
     const int col = decode_group * 16;
@@ -281,8 +323,10 @@ __global__ __launch_bounds__(kThreads) void nvfp4_a16_mma_kernel(
   }
 
   auto store = [&](int row, int token, float value) {
-    out[static_cast<std::int64_t>(token) * M + row] =
-        __float2bfloat16_rn(value * inverse_weight_divisor);
+    if constexpr (Split)
+      split.store(row, token, value * inverse_weight_divisor);
+    else
+      out[static_cast<std::int64_t>(token) * M + row] = __float2bfloat16_rn(value * inverse_weight_divisor);
   };
 #pragma unroll
   for (int mi = 0; mi < kMmaRows; ++mi) {
@@ -415,10 +459,10 @@ template <size_t... I> constexpr auto kv_launchers(std::index_sequence<I...>) {
 
 // Eight warps divide K within one 16-output tile. Keep the weight fragment in
 // registers across both eight-token groups; reduce warp sums once at the end.
-template <int T, bool SwiGlu, bool Packed = false>
-__global__ void small_projection(const __nv_bfloat16 *x, const uint8_t *codes,
-                                 const uint8_t *scales, int k, int rows,
-                                 float inverse, __nv_bfloat16 *out, int tokens) {
+template <int T, bool SwiGlu, bool Packed = false, bool EvictCodes = false, bool Split = false>
+__global__ void small_projection(const __nv_bfloat16 *x, const uint8_t *codes, const uint8_t *scales, int k,
+                                 int rows, float inverse, __nv_bfloat16 *out, int tokens,
+                                 DflashSplitOutput split = {}) {
   constexpr int halves = SwiGlu ? 2 : 1;
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int group = lane / 4, pair = lane % 4;
@@ -437,7 +481,15 @@ __global__ void small_projection(const __nv_bfloat16 *x, const uint8_t *codes,
       unsigned a[4];
       if constexpr (Packed) {
         const int tile = ((h * (rows / 16) + blockIdx.x) * (k / 16) + start / 16);
-        const unsigned word = reinterpret_cast<const unsigned *>(codes)[tile * 32 + lane];
+        const unsigned *address = reinterpret_cast<const unsigned *>(codes) + tile * 32 + lane;
+        unsigned word;
+        if constexpr (EvictCodes) {
+          unsigned long long policy;
+          asm("createpolicy.fractional.L2::evict_first.b64 %0;" : "=l"(policy));
+          asm("ld.global.L2::cache_hint.b32 %0, [%1], %2;" : "=r"(word) : "l"(address), "l"(policy));
+        } else {
+          word = *address;
+        }
         for (int r = 0; r < 2; ++r) {
           const float scale = decode_nvfp4_e4m3(scales[tile * 16 + group + 8 * r]);
           for (int i = 0; i < 2; ++i) {
@@ -480,20 +532,94 @@ __global__ void small_projection(const __nv_bfloat16 *x, const uint8_t *codes,
   if constexpr (SwiGlu)
     v[0] = ninfer::ops::silu(v[0]) * v[1];
   if constexpr (Packed) { if (8 * n + pair * 2 + i % 2 >= tokens) return; }
-  out[(8 * n + pair * 2 + i % 2) * rows + blockIdx.x * 16 + group +
-      8 * (i / 2)] = __float2bfloat16(v[0]);
+  const int token = 8 * n + pair * 2 + i % 2;
+  const int row = blockIdx.x * 16 + group + 8 * (i / 2);
+  if constexpr (Split)
+    split.store(row, token, v[0]);
+  else
+    out[token * rows + row] = __float2bfloat16(v[0]);
 }
 
-template <int T, bool Fused, bool Packed = false>
-void launch_small(const ninfer::Tensor &x, const ninfer::Weight &w,
-                  ninfer::Tensor &out, cudaStream_t stream) {
-  small_projection<T, Fused, Packed><<<out.ne[0] / 16, 256, 0, stream>>>(
-      static_cast<const __nv_bfloat16 *>(x.data),
-      static_cast<const uint8_t *>(w.qdata),
-      static_cast<const uint8_t *>(w.scales), w.k, out.ne[0],
-      1.f / w.weight_scale_divisor, static_cast<__nv_bfloat16 *>(out.data), x.ne[1]);
+template <int T, bool Fused, bool Packed = false, bool EvictCodes = false>
+void launch_small(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &out,
+                  cudaStream_t stream) {
+  small_projection<T, Fused, Packed, EvictCodes><<<out.ne[0] / 16, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16 *>(x.data), static_cast<const uint8_t *>(w.qdata),
+      static_cast<const uint8_t *>(w.scales), w.k, out.ne[0], 1.f / w.weight_scale_divisor,
+      static_cast<__nv_bfloat16 *>(out.data), x.ne[1]);
   CUDA_CHECK(cudaGetLastError());
 }
+template <int T, bool Draft>
+void launch_split_simt(const ninfer::Tensor &x, const ninfer::Weight &w, DflashSplitOutput dst,
+                       cudaStream_t stream) {
+  using Geometry = Nvfp4GemvGeometry<Draft ? 6144 : 2048, 5120>;
+  constexpr int skip = Draft ? 0 : 4096;
+  const auto *input = static_cast<const __nv_bfloat16 *>(x.data);
+  const auto *codes = static_cast<const uint8_t *>(w.qdata) + skip * (5120 / 2);
+  const auto *scales = static_cast<const uint8_t *>(w.scales) + skip * (5120 / 16);
+  const float inverse = 1.f / w.weight_scale_divisor;
+  if constexpr (T == 1) {
+    using S = Nvfp4LinearDecodeProductionSchedule<Nvfp4DFlash2QkvGeometry>::Type;
+    nvfp4_gemv_kernel<Geometry, S><<<Geometry::kOutputRows / S::kRowsPerCta, S::kThreads, 0, stream>>>(
+        input, codes, scales, inverse, Nvfp4IdentityEpilogue{}, dst);
+  } else {
+    using S = typename Nvfp4LinearSmallTProductionSchedule<Nvfp4DFlash2QkvGeometry, T>::Type;
+    constexpr int token_tiles = (T + S::kTokenTile - 1) / S::kTokenTile;
+    nvfp4_small_t_kernel<Geometry, T, S>
+        <<<Geometry::kOutputRows / S::kRowsPerCta * token_tiles, S::kThreads, 0, stream>>>(
+            input, codes, scales, inverse, Nvfp4IdentityEpilogue{}, dst);
+  }
+  CUDA_CHECK(cudaGetLastError());
+}
+
+template <size_t... I> constexpr auto combined_launchers(std::index_sequence<I...>) {
+  return std::array{&launch_split_simt<I + 1, false>...};
+}
+
+// The Q span ends on a complete 16-row tile in both layouts.
+template <bool Split, bool Packed>
+void project_wide_kv(const ninfer::Tensor &x, const ninfer::Weight &w, DflashSplitOutput dst,
+                     cudaStream_t stream) {
+  const int tokens = x.ne[1];
+  constexpr int rows = Split ? 2048 : 1024;
+  const int blocks = (rows / kBlockRows) * ((tokens + kBlockCols - 1) / kBlockCols);
+  const auto *input = static_cast<const __nv_bfloat16 *>(x.data);
+  const auto *codes = static_cast<const uint8_t *>(w.qdata);
+  const auto *scales = static_cast<const uint8_t *>(w.scales);
+  const float inverse = 1.f / w.weight_scale_divisor;
+  if (tokens % kBlockCols == 0)
+    nvfp4_a16_mma_kernel<rows, 5120, true, Split, Packed>
+        <<<blocks, kThreads, kSharedBytes, stream>>>(input, codes, scales, inverse, dst.key, tokens, dst);
+  else
+    nvfp4_a16_mma_kernel<rows, 5120, false, Split, Packed>
+        <<<blocks, kThreads, kSharedBytes, stream>>>(input, codes, scales, inverse, dst.key, tokens, dst);
+  CUDA_CHECK(cudaGetLastError());
+}
+
+template <bool Split>
+void small_packed_rows(const ninfer::Tensor &x, const ninfer::Weight &w, int rows, DflashSplitOutput dst,
+                       cudaStream_t stream) {
+  for (int first = 0; first < x.ne[1]; first += 16) {
+    const int count = std::min(16, x.ne[1] - first);
+    const auto *input = static_cast<const __nv_bfloat16 *>(x.data) + first * w.k;
+    const auto *codes = static_cast<const uint8_t *>(w.qdata);
+    const auto *scales = static_cast<const uint8_t *>(w.scales);
+    const float inverse = 1.f / w.weight_scale_divisor;
+    if (count <= 8)
+      small_projection<8, false, true, false, Split>
+          <<<rows / 16, 256, 0, stream>>>(input, codes, scales, w.k, rows, inverse, dst.key, count, dst);
+    else
+      small_projection<16, false, true, false, Split>
+          <<<rows / 16, 256, 0, stream>>>(input, codes, scales, w.k, rows, inverse, dst.key, count, dst);
+    CUDA_CHECK(cudaGetLastError());
+    if (dst.query)
+      dst.query += 4096 * count;
+    dst.key += (Split ? 1024 : rows) * count;
+    if (dst.value)
+      dst.value += 1024 * count;
+  }
+}
+
 void require_matrix(const ninfer::Tensor &a, int rows, int tokens) {
   if (a.data == nullptr || reinterpret_cast<uintptr_t>(a.data) % 16 ||
       a.dtype != ninfer::DType::BF16 || !a.is_contiguous() || tokens < 1 ||
@@ -531,6 +657,42 @@ void ignis_dflash2_small_mma(const ninfer::Tensor &x, const ninfer::Weight &w,
                                                                       stream);
 }
 
+void ignis_dflash2_packed_linear(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &out,
+                                 cudaStream_t stream) {
+  require_projection(x, w, out, false, true);
+  if (w.k == 25600 && w.n == 5120 && x.ne[1] >= kMinTokens) {
+    const int tokens = x.ne[1];
+    const int blocks = (5120 / kBlockRows) * ((tokens + kBlockCols - 1) / kBlockCols);
+    const auto *input = static_cast<const __nv_bfloat16 *>(x.data);
+    const auto *codes = static_cast<const uint8_t *>(w.qdata);
+    const auto *scales = static_cast<const uint8_t *>(w.scales);
+    auto *dst = static_cast<__nv_bfloat16 *>(out.data);
+    const float inverse = 1.f / w.weight_scale_divisor;
+    if (tokens % kBlockCols == 0)
+      nvfp4_a16_mma_kernel<5120, 25600, true, false, true>
+          <<<blocks, kThreads, kSharedBytes, stream>>>(input, codes, scales, inverse, dst, tokens);
+    else
+      nvfp4_a16_mma_kernel<5120, 25600, false, false, true>
+          <<<blocks, kThreads, kSharedBytes, stream>>>(input, codes, scales, inverse, dst, tokens);
+    CUDA_CHECK(cudaGetLastError());
+    return;
+  }
+  static const bool evict_down = [] {
+    const char *value = std::getenv("IGNIS_DFLASH2_DOWN_EVICT_CODES");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  const bool evict = evict_down && w.k == 17408;
+  for (int first = 0; first < x.ne[1]; first += 16) {
+    const int count = std::min(16, x.ne[1] - first);
+    auto input = x.slice(1, first, count);
+    auto output = out.slice(1, first, count);
+    if (count <= 8)
+      (evict ? launch_small<8, false, true, true> : launch_small<8, false, true>)(input, w, output, stream);
+    else
+      (evict ? launch_small<16, false, true, true> : launch_small<16, false, true>)(input, w, output, stream);
+  }
+}
+
 void ignis_dflash2_packed_swiglu(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &out, cudaStream_t stream) {
   require_projection(x, w, out, true, true);
   if (x.ne[1] >= 1 && x.ne[1] <= 8) launch_small<8,true,true>(x,w,out,stream);
@@ -538,23 +700,90 @@ void ignis_dflash2_packed_swiglu(const ninfer::Tensor &x, const ninfer::Weight &
   else throw std::invalid_argument("packed SwiGLU requires an 8- or 16-column tile");
 }
 
+void ignis_dflash2_split_qkv(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &query,
+                             ninfer::Tensor &key, ninfer::Tensor &value, cudaStream_t stream) {
+  const bool packed = static_cast<int>(w.layout) == IGNIS_LAYOUT_NVFP4_MMA16;
+  auto planes = w;
+  if (packed)
+    planes.layout = ninfer::QuantLayout::BlockScaleK16M128x4;
+  validate_nvfp4_weight(planes, "DFlash2 QKV");
+  require_matrix(x, 5120, x.ne[1]);
+  require_matrix(query, 4096, x.ne[1]);
+  require_matrix(key, 1024, x.ne[1]);
+  require_matrix(value, 1024, x.ne[1]);
+  if (w.n != 6144 || w.k != 5120 || (!packed && x.ne[1] != 8 && x.ne[1] != 16))
+    throw std::invalid_argument("unsupported DFlash2 split QKV shape");
+  DflashSplitOutput dst{static_cast<__nv_bfloat16 *>(query.data), static_cast<__nv_bfloat16 *>(key.data),
+                        static_cast<__nv_bfloat16 *>(value.data)};
+  if (packed) {
+    small_packed_rows<true>(x, w, 6144, dst, stream);
+  } else if (x.ne[1] == 8) {
+    launch_split_simt<8, true>(x, w, dst, stream);
+  } else {
+    small_projection<16, false, false, false, true><<<6144 / 16, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16 *>(x.data), static_cast<const uint8_t *>(w.qdata),
+        static_cast<const uint8_t *>(w.scales), w.k, w.n, 1.f / w.weight_scale_divisor, nullptr, 16, dst);
+    CUDA_CHECK(cudaGetLastError());
+  }
+}
+
 void ignis_dflash2_project_kv(const ninfer::Tensor &x, const ninfer::Weight &w,
                               ninfer::Tensor &key, ninfer::Tensor &value,
                               cudaStream_t stream) {
   if (w.n != 6144 || w.k != 5120)
     throw std::invalid_argument("expected DFlash2 QKV [6144,5120]");
-  validate_nvfp4_weight(w, "DFlash2 KV");
+  const bool packed = static_cast<int>(w.layout) == IGNIS_LAYOUT_NVFP4_MMA16;
+  auto planes = w;
+  if (packed)
+    planes.layout = ninfer::QuantLayout::BlockScaleK16M128x4;
+  validate_nvfp4_weight(planes, "DFlash2 KV");
   require_matrix(x, w.k, x.ne[1]);
   require_matrix(key, 1024, x.ne[1]);
   require_matrix(value, 1024, x.ne[1]);
+  static const bool combined = [] {
+    const char *flag = std::getenv("IGNIS_DFLASH2_COMBINED_KV");
+    return !flag || std::strcmp(flag, "0") != 0;
+  }();
+  auto kv_rows = [&](int first) {
+    auto slice = w;
+    slice.qdata = static_cast<const uint8_t *>(w.qdata) + first * (w.k / 2);
+    slice.scales = static_cast<const uint8_t *>(w.scales) + first * (w.k / 16);
+    return slice;
+  };
+  if (combined) {
+    DflashSplitOutput dst{nullptr, static_cast<__nv_bfloat16 *>(key.data),
+                          static_cast<__nv_bfloat16 *>(value.data)};
+    const int tokens = x.ne[1];
+    if (tokens >= kMinTokensNarrow) {
+      const auto slice = kv_rows(4096);
+      (packed ? project_wide_kv<true, true> : project_wide_kv<true, false>)(x, slice, dst, stream);
+    } else if (packed) {
+      small_packed_rows<true>(x, kv_rows(4096), 2048, dst, stream);
+    } else {
+      static constexpr auto launch = combined_launchers(std::make_index_sequence<32>{});
+      for (int first = 0; first < tokens; first += 32) {
+        const int count = std::min(32, tokens - first);
+        launch[count - 1](x.slice(1, first, count), w, dst, stream);
+        dst.key += 1024 * count;
+        dst.value += 1024 * count;
+      }
+    }
+    return;
+  }
   static constexpr auto launch = kv_launchers(std::make_index_sequence<32>{});
   for (int half = 0; half < 2; ++half) {
     const int row = 4096 + half * 1024;
-    auto slice = w;
+    auto slice = kv_rows(row);
     slice.n = 1024;
-    slice.qdata = static_cast<const uint8_t *>(w.qdata) + row * (w.k / 2);
-    slice.scales = static_cast<const uint8_t *>(w.scales) + row * (w.k / 16);
     auto &out = half == 0 ? key : value;
+    if (packed) {
+      DflashSplitOutput dst{nullptr, static_cast<__nv_bfloat16 *>(out.data), nullptr};
+      if (x.ne[1] >= kMinTokensNarrow)
+        project_wide_kv<false, true>(x, slice, dst, stream);
+      else
+        small_packed_rows<false>(x, slice, 1024, dst, stream);
+      continue;
+    }
     if (x.ne[1] >= kMinTokensNarrow) {
       launch_geometry<KvGeometry>(x, slice, out, stream);
     } else {

@@ -217,8 +217,8 @@ class ModelBinder {
 
   // Bind a required field: look up `name`, check its shape, and fill `out`.
   // False (error set) on a missing or mis-shaped tensor.
-  bool bind(const std::string &name, std::initializer_list<int64_t> want_shape,
-            ninfer::Weight &out, bool packed_gate_up = false) {
+  bool bind(const std::string &name, std::initializer_list<int64_t> want_shape, ninfer::Weight &out,
+            bool allow_packed_nvfp4 = false) {
     auto it = index_.find(name);
     if (it == index_.end()) {
       set_error("ignis_model_load: missing bound tensor: " + name);
@@ -233,11 +233,8 @@ class ModelBinder {
                 "the body), and a load binds one body, never a mix");
       return false;
     }
-    if (t.layout == IGNIS_LAYOUT_NVFP4_MMA16 &&
-        (!packed_gate_up || t.qtype != IGNIS_QTYPE_NVFP4)) {
-      set_error(
-          "ignis_model_load: packed NVFP4 requires a DFlash2 gate/up slot: " +
-          name);
+    if (t.layout == IGNIS_LAYOUT_NVFP4_MMA16 && (!allow_packed_nvfp4 || t.qtype != IGNIS_QTYPE_NVFP4)) {
+      set_error("ignis_model_load: packed NVFP4 requires a supported DFlash2 projection slot: " + name);
       return false;
     }
     if (!shape_matches(t, want_shape)) {
@@ -466,23 +463,23 @@ bool bind_dflash2_layer(ModelBinder &binder, const std::string &prefix, const Ge
   const std::initializer_list<int64_t> conv_base{kDflash2ConvTaps, kDflash2ConvTaps, g.hidden};
   return binder.bind(prefix + "input_norm", {g.hidden}, w.input_norm) &&
          binder.bind(prefix + "attention/query_key_value", {q_width + 2 * kv_width, g.hidden},
-                     w.query_key_value) &&
+                     w.query_key_value, true) &&
          binder.bind(prefix + "attention/query_norm", {kDflash2HeadDim}, w.query_norm) &&
          binder.bind(prefix + "attention/key_norm", {kDflash2HeadDim}, w.key_norm) &&
-         binder.bind(prefix + "attention/output", {g.hidden, q_width}, w.output) &&
+         binder.bind(prefix + "attention/output", {g.hidden, q_width}, w.output, true) &&
          binder.bind(prefix + "attention/conv_base", conv_base, w.attention_conv_base) &&
-         binder.bind(prefix + "attention/conv_proj", {kDflash2ConvProjRows, g.hidden},
-                     w.attention_conv_proj) &&
+         binder.bind(prefix + "attention/conv_proj", {kDflash2ConvProjRows, g.hidden}, w.attention_conv_proj,
+                     true) &&
          binder.bind(prefix + "post_attention_norm", {g.hidden}, w.post_attention_norm) &&
          binder.bind(prefix + "mlp/gate_up", {2 * g.ffn_intermediate, g.hidden}, w.mlp_gate_up, true) &&
-         binder.bind(prefix + "mlp/down", {g.hidden, g.ffn_intermediate}, w.mlp_down) &&
+         binder.bind(prefix + "mlp/down", {g.hidden, g.ffn_intermediate}, w.mlp_down, true) &&
          binder.bind(prefix + "mlp/conv_base", conv_base, w.mlp_conv_base) &&
-         binder.bind(prefix + "mlp/conv_proj", {kDflash2ConvProjRows, g.hidden}, w.mlp_conv_proj);
+         binder.bind(prefix + "mlp/conv_proj", {kDflash2ConvProjRows, g.hidden}, w.mlp_conv_proj, true);
 }
 
 bool bind_dflash2(ModelBinder &binder, const Geometry &g, Dflash2Weights &w) {
   if (!binder.bind("dflash2/feature_projection", {g.hidden, kDflash2FeatureTaps * g.hidden},
-                   w.feature_projection) ||
+                   w.feature_projection, true) ||
       !binder.bind("dflash2/context_norm", {g.hidden}, w.context_norm)) {
     return false;
   }
