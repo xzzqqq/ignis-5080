@@ -145,7 +145,7 @@ int32_t launch_decode(const DeviceState &st, const DecodeParams &p, cudaStream_t
                     p.epilogue == kSwiGlu && p.splits == 1 && !wide && p.w[0].k2 == p.w[1].k2 &&
                     (p.w[0].k2 == 4 || p.w[0].k2 == 6 || p.w[0].k2 == 8);
   const bool down_t8 = st.sms == 84 && !p.capped && p.tokens == 8 && p.in == 17408 && p.out == 5120 &&
-                       p.weights == 1 && p.epilogue == kAdd && p.splits == 4 &&
+                       p.weights == 1 && p.epilogue == kAdd && p.splits == 4 && !p.residual_in &&
                        (p.w[0].k2 == 4 || p.w[0].k2 == 6);
   cudaError_t err;
   if (down_t8) {
