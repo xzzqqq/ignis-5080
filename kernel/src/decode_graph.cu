@@ -18,6 +18,7 @@
 #include "dflash2_drafter.h"
 #include "ignis_gdn_layer.h"
 #include "ignis_gqa_layer.h"
+#include "nvfp4_xqa.h"
 #include "layer_internal.h"
 #include "model_internal.h"
 #include "trellis_body.h"
@@ -192,10 +193,21 @@ int32_t ignis_verify_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, u
         model->decode_graph_scratch->alloc(ninfer::DType::BF16, {hidden, columns, 1, 1});
     IGNIS_PROFILE_OP("embedding", ninfer::ops::embedding(ids, model->token_embedding, left, model->stream));
 
+    const bool native_nvfp4 = batch == 1 && lane_columns == 8 && model->is_trellis_body &&
+        model->hidden == 5120 && model->kv_format == IGNIS_KV_FORMAT_NVFP4 &&
+        pool->kv_format == model->kv_format && pool->has_hq_residual() &&
+        !model->lab_trace && !model->trellis_candidate;
+    void *round_metadata = native_nvfp4 ? model->decode_graph_scratch->alloc_bytes(
+        ignis_nv4_xqa_metadata_bytes(model->max_context_tokens)).data : nullptr;
     for (uint32_t layer = 0; layer < model->layers.size(); ++layer) {
-      const int32_t rc = model->layers[layer].kind == IGNIS_LAYER_GQA
-          ? ignis_gqa_layer_run_body_verify(model, pool, layer, width, left.data, right.data, mode)
-          : ignis_gdn_layer_run_body_verify(model, pool, layer, width, left.data, right.data, mode);
+      int32_t rc = 0;
+      if (model->layers[layer].kind != IGNIS_LAYER_GQA) {
+        rc = ignis_gdn_layer_run_body_verify(model, pool, layer, width, left.data, right.data, mode);
+      } else if (native_nvfp4) {
+        ignis_nvfp4_gqa_verify(*model, *pool, layer, left, right, round_metadata);
+      } else {
+        rc = ignis_gqa_layer_run_body_verify(model, pool, layer, width, left.data, right.data, mode);
+      }
       if (rc != 0) {
         const char *detail = model->layers[layer].kind == IGNIS_LAYER_GQA
             ? ignis_gqa_layer_last_error()

@@ -12,6 +12,13 @@ bool nvfp4_cache(const ninfer::PagedKVBatchLayerView &cache);
 std::size_t nvfp4_attention_workspace_bytes(std::uint32_t max_keys, std::int32_t tokens,
                                             std::int32_t batch = 1);
 void nvfp4_prepare();
+// Native C1/T8 verify with an exact BF16 window. The enclosing round owns
+// round_metadata across all layers; workspace is private to this layer.
+void nvfp4_verify_attention(const ninfer::Tensor &q, const ninfer::Tensor &k, const ninfer::Tensor &v,
+                            const ninfer::Tensor &positions, const ninfer::Tensor &valid,
+                            const ninfer::Tensor &rows, const ninfer::PagedKVBatchLayerView &cache,
+                            std::uint32_t max_keys, const ninfer::Tensor &out, ninfer::DeviceSpan workspace,
+                            void *round_metadata, bool first, bool last, cudaStream_t stream);
 void nvfp4_store_window(const ninfer::Tensor &k, const ninfer::Tensor &v,
                         const ninfer::Tensor &positions, const ninfer::Tensor &valid,
                         const ninfer::Tensor &rows, ninfer::PagedKVBatchLayerView cache,

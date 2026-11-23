@@ -627,6 +627,57 @@ void mixed_window(cudaStream_t stream, int start) {
     std::printf("mixed window T%d max absolute error %g\n",tokens,worst);
     check(worst<.012,"mixed window FP64 reference");
   }
+  // Reuse metadata on a second layer, including the last-layer validity
+  // publication. Compare every cache byte and active output with append-first
+  // XQA using the same preimage. Poison packed fresh rows before both arms.
+  Inputs x(8, 1);
+  fill(x, start);
+  upload(x.q, std::vector<std::uint16_t>(x.q.bytes/2, f32_to_bf16(.125f)));
+  const ninfer::Tensor q(x.q.p,ninfer::DType::BF16,{D,QH,8}), k(x.k.p,ninfer::DType::BF16,{D,H,8}),
+      v(x.v.p,ninfer::DType::BF16,{D,H,8}), positions(x.positions.p,ninfer::DType::I32,{8}),
+      valid(x.valid.p,ninfer::DType::I32,{1}), slots(x.rows.p,ninfer::DType::I32,{1});
+  const std::array<DeviceBytes *,7> planes{&cache.k,&cache.v,&cache.ks,&cache.vs,&sk,&sv,&bits};
+  auto snapshot = [&]() {
+    std::vector<std::vector<std::uint8_t>> state;
+    for (auto *p : planes) state.push_back(download<std::uint8_t>(p->p,p->bytes));
+    return state;
+  };
+  for (auto *p : {&cache.k,&cache.v,&cache.ks,&cache.vs})
+    MOE_CUDA(cudaMemsetAsync(p->p,0x21,p->bytes,stream));
+  for (int t=0;t<8;++t) {
+    const int word=(start+t)%512/32;
+    MOE_CUDA(cudaMemsetAsync(bits.as<std::uint32_t>()+16+word,0,4,stream));
+  }
+  MOE_CUDA(cudaStreamSynchronize(stream));
+  const auto original=snapshot();
+  auto restore = [&]() {
+    for (std::size_t i=0;i<planes.size();++i) upload(*planes[i],original[i]);
+  };
+  ninfer::DeviceArena arena(ignis::nvfp4_attention_workspace_bytes(capacity,8));
+  DeviceBytes metadata(ignis_nv4_xqa_metadata_bytes(capacity));
+  for (int count : {8,3,0}) {
+    upload(x.valid,std::vector<std::int32_t>{count});
+    for (bool last : {false,true}) {
+      restore();
+      x.run(cache,arena,capacity,stream);
+      ignis::nvfp4_store_window(k,v,positions,valid,slots,cache.view,last,stream);
+      MOE_CUDA(cudaStreamSynchronize(stream));
+      const auto expected=snapshot();
+      const auto output=download<std::uint16_t>(x.out.p,x.out.bytes/2);
+      restore();
+      arena.reset();
+      auto scratch=arena.alloc_bytes(ignis_nv4_xqa_workspace(capacity));
+      MOE_CUDA(cudaMemsetAsync(scratch.data,0xff,scratch.bytes,stream));
+      MOE_CUDA(cudaMemsetAsync(x.out.p,0xff,x.out.bytes,stream));
+      ignis::nvfp4_verify_attention(q,k,v,positions,valid,slots,cache.view,capacity,x.output(),
+                                    scratch,metadata.p,!last,last,stream);
+      MOE_CUDA(cudaStreamSynchronize(stream));
+      check(snapshot()==expected,"verify packed pages, exact window and published validity");
+      check(download<std::uint16_t>(x.out.p,count*QH*D)==
+            std::vector<std::uint16_t>(output.begin(),output.begin()+count*QH*D),
+            "verify active pre-gate output bits");
+    }
+  }
 }
 void checkpoint_four_plane_copy() {
   ignis_seq_pool_spec spec{};spec.num_kv_heads=4;spec.head_dim=256;spec.kv_format=IGNIS_KV_FORMAT_NVFP4;
