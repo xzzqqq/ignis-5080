@@ -129,6 +129,8 @@ python3 scripts/repack_dflash2_gate_up.py \
   --projection attention/conv_proj --projection mlp/conv_proj
 ```
 
+上述增量转换的 `.conversion.json` 中，`layout_conversion.tensors` 记录本次转写并逆变换验证的 26 个张量。要在同一条记录中列出全部 31 个，可从原始 `models/qwen3_8_27b_trellis_sc30-v2.ninfer` 运行上述命令，并追加 `--projection mlp/gate_up`。最终各张量的布局可直接从 artifact header 读取。
+
 每个布局由 artifact 的张量标签独立选择。`IGNIS_DFLASH2_DIRECT_QKV=0` 强制投影后拆分，`IGNIS_DFLASH2_COMBINED_KV=0` 强制按 K、V 分别投影，`IGNIS_DFLASH2_DOWN_EVICT_CODES=1` 仅为 packed down 的 codes 选择 L2 优先淘汰。实验目录为测量 checkout 的 `.scratch/dflash-remaining-20261122/`。
 
 ## Limits and unknowns

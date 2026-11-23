@@ -1258,19 +1258,29 @@ mod tests {
 
     #[test]
     fn packed_layout_is_selected_only_for_supported_drafter_projections() {
-        let name = "dflash2/layers/0/mlp/down";
+        let supported = [
+            "dflash2/feature_projection",
+            "dflash2/layers/0/mlp/gate_up",
+            "dflash2/layers/1/mlp/down",
+            "dflash2/layers/2/attention/output",
+            "dflash2/layers/3/attention/query_key_value",
+            "dflash2/layers/4/attention/conv_proj",
+            "dflash2/layers/0/mlp/conv_proj",
+        ];
         let neighbor = "dflash2/selector/hidden";
-        let objects = [name, neighbor].into_iter().enumerate().map(|(i, name)|
-            crate::fixture::FixtureObject::Tensor {
-                name, shape: vec![128,64], format: "NVFP4", layout: "nvfp4-mma16-v1",
+        let objects: Vec<_> = supported.iter().copied().chain([neighbor]).enumerate()
+            .map(|(i, name)| crate::fixture::FixtureObject::Tensor {
+                name, shape: vec![128, 64], format: "NVFP4", layout: "nvfp4-mma16-v1",
                 offset: i as u64 * 4864, bytes: 4612,
-            }).collect::<Vec<_>>();
-        let file = crate::fixture::write_fixture(&objects, &vec![0; 4864+4612], "packed-scope").unwrap();
+            }).collect();
+        let file = crate::fixture::write_fixture(&objects, &vec![0; supported.len() * 4864 + 4612], "packed-scope").unwrap();
         let reader = Reader::open(&file.path).unwrap();
         let scope = ModelScope { draft: Some(DraftModule::Dflash2), ..Default::default() };
         let entries = model_scope_27b_of(&reader, scope).unwrap();
         let layout = |name| entries.iter().find(|e| e.name == name).unwrap().layout;
-        assert_eq!(layout(name), StorageLayout::Nvfp4Mma16V1);
+        for name in supported {
+            assert_eq!(layout(name), StorageLayout::Nvfp4Mma16V1, "{name}");
+        }
         assert_eq!(layout(neighbor), StorageLayout::BlockScaleK16M128x4V1);
     }
 

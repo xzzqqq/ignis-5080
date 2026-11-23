@@ -316,7 +316,46 @@ int check_kv_rows() {
   return 0;
 }
 
-int check_packed_qkv() {
+// The feature projection switches from 16-column slices to a wide MMA at T=64.
+int check_packed_linear() {
+  constexpr int n = 5120, k = 25600, capacity = 130;
+  auto host = make_nvfp4_weight(n, k, 5100U);
+  const auto tiled = pack_mma16(host);
+  DeviceBytes original(tiled.size()), packed_bytes(tiled.size()), x(k * capacity * 2);
+  DeviceBytes reference(n * capacity * 2), actual(n * capacity * 2);
+  cuda_ok(cudaMemcpy(original.p, host.payload.data(), tiled.size(), cudaMemcpyHostToDevice), "original feature");
+  cuda_ok(cudaMemcpy(packed_bytes.p, tiled.data(), tiled.size(), cudaMemcpyHostToDevice), "packed feature");
+  auto row = host.device_weight(original.p), packed = host.device_weight(packed_bytes.p);
+  packed.layout = static_cast<QuantLayout>(IGNIS_LAYOUT_NVFP4_MMA16);
+  std::vector<uint16_t> input(k * capacity);
+  for (size_t i = 0; i < input.size(); ++i) input[i] = 0x3900 + (i * 79 % 1800);
+  cuda_ok(cudaMemcpy(x.p, input.data(), input.size() * 2, cudaMemcpyHostToDevice), "feature input");
+
+  for (int t : {17, 64, 128, 129}) {
+    Tensor in(x.p, DType::BF16, {k, t}), ref(reference.p, DType::BF16, {n, t});
+    Tensor out(actual.p, DType::BF16, {n, t});
+    if (t == 17) {
+      // Match the candidate reduction for the last active column with a padded T=8 call.
+      Tensor padded_x(x.p, DType::BF16, {k, 24}), padded_y(reference.p, DType::BF16, {n, 24});
+      for (int first : {0, 16}) {
+        const int width = first == 0 ? 16 : 8;
+        auto a = padded_x.slice(1, first, width), b = padded_y.slice(1, first, width);
+        ignis_dflash2_small_mma(a, row, b, false, nullptr);
+      }
+    } else {
+      ops::linear(in, row, ref, nullptr);
+    }
+    std::vector<uint16_t> expected(n * (t + 1), 0xa5a5), got(expected.size());
+    cuda_ok(cudaMemcpy(expected.data(), reference.p, n * t * 2, cudaMemcpyDeviceToHost), "feature reference");
+    cuda_ok(cudaMemset(actual.p, 0xa5, got.size() * 2), "feature sentinel");
+    ignis_dflash2_packed_linear(in, packed, out, nullptr);
+    cuda_ok(cudaMemcpy(got.data(), actual.p, got.size() * 2, cudaMemcpyDeviceToHost), "feature output");
+    if (got != expected) throw std::runtime_error("packed feature output or tail differs at T=" + std::to_string(t));
+  }
+  return 0;
+}
+
+int check_split_qkv() {
   constexpr int n = 6144, k = 5120, capacity = 144;
   auto host = make_nvfp4_weight(n, k, 5099U);
   auto tiled = pack_mma16(host);
@@ -333,11 +372,18 @@ int check_packed_qkv() {
   for (int t : {1, 7, 8, 16, 17, 63, 127, 128, 129}) {
     Tensor in(x.p, DType::BF16, {k, t}), query(q.p, DType::BF16, {4096, t});
     Tensor keys(key.p, DType::BF16, {1024, t}), values(value.p, DType::BF16, {1024, t});
-    for (bool commit : {false, true}) {
+    enum class Route { PackedDraft, PackedCommit, OriginalDraft };
+    for (auto route : {Route::PackedDraft, Route::PackedCommit, Route::OriginalDraft}) {
+      const bool original = route == Route::OriginalDraft;
+      const bool commit = route == Route::PackedCommit;
+      if (original && t != 8 && t != 16) continue;
       const bool wide = commit && t >= 128;
       const int padded = wide ? t : (t + 15) / 16 * 16;
       Tensor full_x(x.p, DType::BF16, {k, padded}), full_y(all.p, DType::BF16, {n, padded});
-      if (wide) {
+      if (original && t == 8) {
+        Tensor ref(all.p, DType::BF16, {n, t});
+        ops::linear(in, row, ref, nullptr);
+      } else if (wide) {
         ops::linear(full_x, row, full_y, nullptr);
       } else {
         for (int first = 0; first < t; first += 16) {
@@ -353,7 +399,7 @@ int check_packed_qkv() {
       if (commit)
         ignis_dflash2_project_kv(in, packed, keys, values, nullptr);
       else
-        ignis_dflash2_split_qkv(in, packed, query, keys, values, nullptr);
+        ignis_dflash2_split_qkv(in, original ? row : packed, query, keys, values, nullptr);
       int first = 0;
       for (auto *dst : {&query, &keys, &values}) {
         const int rows = dst->ne[0];
@@ -362,10 +408,10 @@ int check_packed_qkv() {
           cuda_ok(cudaMemcpy(got.data(), dst->data, got.size() * 2, cudaMemcpyDeviceToHost), "split output");
           for (int col = 0; col < t; ++col)
             if (std::memcmp(got.data() + col * rows, expected.data() + col * n + first, rows * 2))
-              throw std::runtime_error("packed QKV differs at T=" + std::to_string(t));
+              throw std::runtime_error("split QKV differs at T=" + std::to_string(t));
           for (int r = 0; r < rows; ++r)
             if (got[t * rows + r] != 0xa5a5)
-              throw std::runtime_error("packed QKV overwrote tail");
+              throw std::runtime_error("split QKV overwrote tail");
         }
         first += rows;
       }
@@ -375,7 +421,7 @@ int check_packed_qkv() {
 }
 
 int run_nvfp4_a16_mma() {
-    int failures = check_route_selection() + check_kv_rows() + check_packed_swiglu() + check_packed_qkv();
+    int failures = check_route_selection() + check_kv_rows() + check_packed_swiglu() + check_split_qkv() + check_packed_linear();
 
     failures += check_dispatch(6144, 5120, 63, false);
     failures += check_dispatch(6144, 5120, 64, true);

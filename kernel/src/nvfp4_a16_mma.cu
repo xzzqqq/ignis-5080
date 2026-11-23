@@ -115,10 +115,11 @@ struct DflashSplitOutput {
 
   __device__ void store(int row, int token, float result) const {
     if (query && row < 4096) {
-      query[token * 4096 + row] = __float2bfloat16_rn(result);
+      query[static_cast<std::int64_t>(token) * 4096 + row] = __float2bfloat16_rn(result);
     } else {
-      auto *base = row % 2048 < 1024 ? key : value;
-      base[token * 1024 + row % 1024] = __float2bfloat16_rn(result);
+      const int kv_row = query ? row - 4096 : row;
+      auto *base = kv_row < 1024 ? key : value;
+      base[static_cast<std::int64_t>(token) * 1024 + kv_row % 1024] = __float2bfloat16_rn(result);
     }
   }
 };
@@ -601,7 +602,7 @@ void small_packed_rows(const ninfer::Tensor &x, const ninfer::Weight &w, int row
                        cudaStream_t stream) {
   for (int first = 0; first < x.ne[1]; first += 16) {
     const int count = std::min(16, x.ne[1] - first);
-    const auto *input = static_cast<const __nv_bfloat16 *>(x.data) + first * w.k;
+    const auto *input = static_cast<const __nv_bfloat16 *>(x.data) + static_cast<std::int64_t>(first) * w.k;
     const auto *codes = static_cast<const uint8_t *>(w.qdata);
     const auto *scales = static_cast<const uint8_t *>(w.scales);
     const float inverse = 1.f / w.weight_scale_divisor;

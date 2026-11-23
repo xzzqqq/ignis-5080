@@ -117,6 +117,6 @@ if __name__ == '__main__':
     parser.add_argument('source', type=Path)
     parser.add_argument('dest', type=Path)
     parser.add_argument('--projection', action='append', choices=SHAPES,
-                        help='Projection to convert in each layer (repeatable, default: mlp/gate_up)')
+                        help='Projection to convert (repeatable, default: mlp/gate_up; feature_projection is shared across layers)')
     args = parser.parse_args()
     convert(args.source, args.dest, args.projection or ('mlp/gate_up',))
