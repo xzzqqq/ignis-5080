@@ -50,22 +50,43 @@ With 192 always-active blocks, the three requests ended at 405, 534 and 412 acti
 
 With only prompt and committed-output blocks, Django diverged at output token 380. The full head stopped at 873 tokens, while the context-only run reached its 8,192-token cap. An independent process reproduced all 8,192 tokens and all 1,277 per-round emission counts. The runs already differed in emission count on round one. Token 380 fell at the end of a full-head round and at the start of a context-only round. Both selected IDs (81 and 25,543) belonged to active blocks at the divergence. The target logits and state difference at that position were not measured. The other three requests reproduced their full-head tokens.
 
+### Workload stress screen
+
+The follow-up kept the 256-block prefix and measured one active lane with one configured lane. Short prompts ran full / active / active / full. The long prompt contained 131,072 tokens of repository excerpts and ran once per arm. Short and long requests used the same 131,584-token context capacity and NVFP4 KV. The table pools the short runs. All greedy rows reproduced the same token IDs and finish conditions. The sampled rows used identical 256-token caps and matched seeds across arms, but each seed produced different text between the two arms.
+
+| Request | Output tokens | Rounds, full → active | ms/round, full → active | Decode tok/s change | Active blocks, start → finish |
+|---|---:|---:|---:|---:|---:|
+| Chinese advice | 256 | 111 → 113 | 18.668 → 18.097 | +1.33% | 281 → 328 |
+| Chinese single-sentence answer | 44 | 31 → 34 | 18.325 → 17.741 | -5.82% | 271 → 296 |
+| Greenfield Python | 256 | 51 → 53 | 18.690 → 18.116 | -0.73% | 262 → 270 |
+| Chinese open reasoning | 256 | 74 → 86 | 18.655 → 18.090 | -11.27% | 270 → 307 |
+| Chinese raw completion | 44 | 18 → 20 | 18.291 → 17.719 | -7.09% | 266 → 277 |
+| Tool-format instruction | 98 | 18 → 19 | 18.504 → 17.948 | -2.32% | 263 → 265 |
+| Chinese sampling, seed 7 | 256 | 129 → 132 | 18.786 → 18.227 | +0.72% | 281 → 325 |
+| Chinese sampling, seed 23 | 256 | 128 → 130 | 18.781 → 18.202 | +1.59% | 281 → 336 |
+| Chinese sampling, seed 41 | 256 | 135 → 138 | 18.765 → 18.230 | +0.69% | 281 → 334 |
+| 128 Ki repository synthesis | 256 | 82 → 82 | 23.859 → 23.477 | +1.63% | 748 → 748 |
+
+Let C denote mean round time and Q denote output tokens per round. Output throughput is Q/C. The active head wins when Q_active/Q_full exceeds C_active/C_full. On the open Chinese reasoning prompt the active head took about 3% less time per round, but delivered 14% fewer tokens per round. The host mask check and occasional device upload together averaged 0.02–1.26 µs/round across the cases. Setup, including the first upload, was timed in prefill. The long case saved 31 ms of decode behind about 97 s of prefill, limiting the request-level benefit even with an unchanged round count.
+
+Short chat prompts containing both tail blocks made pinning redundant. Three additional prompts lacked block 1938 (open reasoning and tool instruction), or both 1937 and 1938 (raw completion). Adding the missing blocks before draft produced identical token sequences, stop conditions and every round's emission count across both runs of all three prompts. These results give no throughput or closure advantage for unconditional pinning in this sample. [Stress driver and workload](artifacts/2026-11-23-draft-active-vocab/stress/README.md) · [Stress measurements](artifacts/2026-11-23-draft-active-vocab/stress/forward.csv)
+
 ## Finding
 
 The 256-block prefix plus context blocks reduced combined C1 decode time from 9.897 s to 9.714 s for the same 2,640 output tokens (mean of the two runs per arm). The gain survived three extra rounds on Astropy and one on Django. The identifier rewrite matched the full head on one synthetic example. The earlier static shortlist used a different GPU and head format, so this experiment does not isolate the effect of adding prompt blocks to that implementation.
 
 ## Implications
 
-The C1 gain warrants testing an opt-in service path with per-sequence state and a full-head fallback. The evidence supports keeping 256 as the experimental baseline. Enabling it by default would require evidence that the throughput gain survives representative service traffic and that the mask follows the correct request through slot reuse and prefix restoration.
+The coding traces support an opt-in C1 service experiment. Greedy short requests lost throughput even when they kept fewer blocks than the coding requests, so mask density alone cannot select profitable traffic. Use full-head controls before enabling this policy for a workload. The evidence supports keeping 256 as the experimental baseline. Enabling it by default would require evidence that the throughput gain survives representative service traffic and that the mask follows the correct request through slot reuse and prefix restoration.
 
 ## Limits and unknowns
 
-All three real prompts were English Python coding tasks with 16.7K–22.4K input tokens. Two paired runs establish repeatability on those inputs, not a population variance or signal-to-noise estimate. Sampling, multilingual requests, short free generation, 128K context and C2 may change both block coverage and tokens committed per round. A shared C2 projection could use the union of both masks; falling back to full for C2 is another option.
+All three real prompts were English Python coding tasks with 16.7K–22.4K input tokens. Two paired runs establish repeatability on those inputs, not a population variance or signal-to-noise estimate. The follow-up covers a few Chinese and English prompts, three seeds on one sampled prompt and one long repository input. Service traffic, distribution-level sampling fidelity, request restoration and C2 remain unmeasured. A shared C2 projection could use the union of both masks; falling back to full for C2 is another option.
 
 The three prompt-derived masks all include blocks 1937 and 1938. Opening a block makes every token in it eligible, even if the prompt never contained that particular token. The Django context-only divergence is consistent with sensitivity to changed round boundaries. Both candidate blocks were open at the divergence; a near tie or a specific numerical cause would require target logits and state measurements at the common prefix.
 
 ## Follow-ups
 
-For a service evaluation, freeze the block policy and compare against the full head on held-out multilingual, short-generation and sampled requests. Track output and stop behavior, total decode time, emitted tokens per round and mask density. At 128K and C2, measure the full-head fallback and verify request isolation. Include reasoning and tool closures on prompts that do not already activate their blocks.
+For a service evaluation, keep the policy fixed and compare against the full head on independent requests from the deployment workload. Track output and stop behavior, total decode time, emitted tokens per round and mask density. At 128K and C2, measure the full-head fallback and verify request isolation. Include reasoning and tool closures on prompts that do not already activate their blocks.
 
 [Prototype and reproduction](artifacts/2026-11-23-draft-active-vocab/README.md) · [Per-request measurements](artifacts/2026-11-23-draft-active-vocab/forward.csv) · [Projection measurements](artifacts/2026-11-23-draft-active-vocab/head-results.txt)

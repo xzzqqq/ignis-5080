@@ -1,0 +1,90 @@
+--- a/crates/core/examples/kernel_lab.rs
++++ b/crates/core/examples/kernel_lab.rs
+@@ -47,7 +47,7 @@
+     };
+     let settings = Settings { context:integer(&config,"max_context",4096)?, chunk:integer(&config,"prefill_chunk",128)?,
+         lanes:integer(&config,"lanes",2)?, spec };
+-    if settings.context == 0 || settings.context > 131072 || settings.chunk == 0 || settings.chunk % 128 != 0 ||
++    if settings.context == 0 || settings.context > 139264 || settings.chunk == 0 || settings.chunk % 128 != 0 ||
+         settings.chunk > settings.context || !(1..=2).contains(&settings.lanes) { return Err("invalid fixed-model settings".into()); }
+     let kv = KvFormat::parse(config["kv_format"].as_str().unwrap_or("bf16"))?;
+     let began = Instant::now();
+@@ -158,6 +158,7 @@
+                     if recording {result["timing_scope"] = json!("instrumented recording; not performance");}
+                     Ok(result)
+                 },
++                "detokenize" => Ok(json!({"text":frontend.tokenizer().decode(&serde_json::from_value::<Vec<u32>>(v["tokens"].clone())?)?})),
+                 "tokenize" => Ok(json!({"tokens":frontend.tokenizer().encode(v["text"].as_str().ok_or("missing text")?)?})),
+                 _ => Err("unknown op".into()),
+             }
+--- a/crates/core/examples/kernel_lab/benchmark.rs
++++ b/crates/core/examples/kernel_lab/benchmark.rs
+@@ -19,6 +19,11 @@
+     let request_index=integer(case,"request_index",0)?;
+     ignis_core::lab_trace::context(model,request_index,0,0)?;
+     let start=Instant::now();
++    let sampling = match case["seed"].as_u64() {
++        Some(seed) => SamplingParams { temperature: 1.0, top_k: 20, top_p: 0.95, seed, ..SamplingParams::greedy() },
++        None => SamplingParams::greedy(),
++    };
++    let mask_start = Instant::now();
+     let prefix = std::env::var("IGNIS_LAB_ACTIVE_VOCAB").ok().map(|s| s.parse::<usize>()).transpose()?;
+     let mut mask = [0u32; 61];
+     let add = |mask: &mut [u32; 61], b: usize| {
+@@ -35,12 +40,19 @@
+     if let Some(n) = prefix {
+         if n > 1940 { return Err("oversized active prefix".into()); }
+         for b in 0..n { add(&mut mask, b); }
++        if case["pin_tail"].as_bool() == Some(true) {
++            for b in [1937, 1938] { add(&mut mask, b); }
++        }
+         for &t in &prompt { add(&mut mask, t as usize / 128); }
+         publish(&mask)?;
+     }
++    let setup_us = mask_start.elapsed().as_secs_f64()*1e6;
++    let initial_blocks: u32 = mask.iter().map(|x| x.count_ones()).sum();
++    let mut update_us = 0.0;
++    let mut uploads = 0;
+     let prefill_range=ignis_core::lab_trace::profile_range("ignis.profile.v1/phase=prefill")?;
+     prefill_program_draw(model,pool,&mut seq,&prompt,0,
+-        LaneDraw {sampling:SamplingParams::greedy(),permitted:&[],
++        LaneDraw {sampling,permitted:&[],
+             redirect:Redirect {stop_ids:&stops,close_id:if starts_in_reasoning && thinking.closed_at().is_none() {close_id} else {-1}}},Some(&mut logits))?;
+     drop(prefill_range);
+     let prefill_ms=start.elapsed().as_secs_f64()*1000.0;
+@@ -58,21 +70,23 @@
+         let round_range=ignis_core::lab_trace::profile_range(&format!("ignis.profile.v1/phase=decode_round/round={}/position={position}",rounds.len()))?;
+         let (emitted,extent) = if let Some(spec) = settings.spec {
+             let mut runs = decode_program_verify_runs(model,pool,&mut [&mut seq],&[VerifyLane {
+-                remaining_tokens:remaining,stop_ids:&stops,reasoning_close:if starts_in_reasoning && thinking.closed_at().is_none() {close_id} else {-1},
++                sampling, remaining_tokens:remaining,stop_ids:&stops,reasoning_close:if starts_in_reasoning && thinking.closed_at().is_none() {close_id} else {-1},
+                 ..VerifyLane::greedy(&[])
+             }],spec.draft_tokens())?;
+             let run = runs.remove(0);
+             (run.tokens,run.extent)
+         } else {
+-            let mut draw = LaneDraw::free(SamplingParams::greedy());
++            let mut draw = LaneDraw::free(sampling);
+             draw.redirect = Redirect {stop_ids:&stops,close_id:if starts_in_reasoning && thinking.closed_at().is_none() {close_id} else {-1}};
+             let result = decode_program_round(model,pool,&mut [&mut seq],&[draw],None)?;
+             (result.into_iter().map(|r|r.token).collect::<Vec<_>>(),0)
+         };
+         if prefix.is_some() {
++            let t0 = Instant::now();
+             let mut changed = false;
+             for &t in &emitted { changed |= add(&mut mask, t as usize / 128); }
+-            if changed { publish(&mask)?; }
++            if changed { publish(&mask)?; uploads+=1; }
++            update_us += t0.elapsed().as_secs_f64()*1e6;
+         }
+         drop(round_range);
+         let elapsed = start.elapsed().as_secs_f64()*1000.0;
+@@ -90,7 +104,7 @@
+     let decode_ms: f64 = rounds.iter().map(|r|r["ms"].as_f64().unwrap()).sum();
+     Ok(json!({"tier":"forward","id":case["id"],"input_tokens":prompt.len(),
+         "gqa":ignis_core::lab_trace::gqa_status(model),"segments":ignis_core::lab_trace::segment_status(model),
+-        "final_active_blocks":mask.iter().map(|x| x.count_ones()).sum::<u32>(),"prefill_ms":prefill_ms,"decode_ms":decode_ms,"rounds":rounds,
++        "setup_us":setup_us,"initial_blocks":initial_blocks,"update_us":update_us,"uploads":uploads,"final_active_blocks":mask.iter().map(|x| x.count_ones()).sum::<u32>(),"prefill_ms":prefill_ms,"decode_ms":decode_ms,"rounds":rounds,
+         "tokens":tokens,"output_tokens":tokens.len(),"finish_reason":finish,"stop_token":stop_token,
+         "thinking_open_at_end":starts_in_reasoning && thinking.closed_at().is_none(),"logits_sha256":hash(&logits.iter().flat_map(|v|v.to_le_bytes()).collect::<Vec<_>>()),
+         "timing_scope":"synchronous engine calls; capture/IO excluded; no HTTP or scheduler"}))
