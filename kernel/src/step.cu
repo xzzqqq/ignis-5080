@@ -1833,8 +1833,7 @@ struct UncommittedRingColumns {
 // the width's verify graph when one is ready and enqueued directly
 // otherwise; this function stages its inputs, reads its outputs back, and
 // does the host-side half of the commit -- the cut at the first stop id,
-// the frontier advance, the ReplaySSM fold and the accepted-hidden
-// selection.
+// the frontier advance and the ReplaySSM fold.
 //
 // Per lane i, with `p` its frontier and `a` the anchor (its pending token):
 //   extent   = min(k, draft_counts[i], remaining_tokens - 1, capacity - p - 1)
@@ -1859,7 +1858,6 @@ int32_t run_verify_round(ignis_model *model, ignis_seq_pool *pool,
   IgnisVerifyRound &verify = *model->verify;
   const std::uint32_t k = verify.window;
   const std::uint32_t lane_columns = k + 1;
-  const auto batch = static_cast<std::int32_t>(batch_size);
   const auto hidden = static_cast<std::int32_t>(model->hidden);
   // P5-05 (GitHub #155): on a load with the drafter the leaf proposes every
   // lane's drafts itself, inside the verify pass, and appends the committed
@@ -2081,7 +2079,6 @@ int32_t run_verify_round(ignis_model *model, ignis_seq_pool *pool,
     std::vector<std::int32_t> next_pending(batch_size, -1);
     std::vector<bool> redirected(batch_size, false);
     std::vector<ninfer::ops::GdnReplayFoldRow> fold_rows(batch_size);
-    std::vector<std::int32_t> selectors(batch_size, 0);
     std::vector<std::int32_t> run(lane_columns, 0);
     for (uint64_t i = 0; i < batch_size; ++i) {
       const std::int32_t n = accepted[i];
@@ -2115,7 +2112,6 @@ int32_t run_verify_round(ignis_model *model, ignis_seq_pool *pool,
       }
       fold_rows[i] = ninfer::ops::GdnReplayFoldRow{.linear_state_slot = slots[i],
                                                    .commit_columns = c};
-      selectors[i] = c - 1;
     }
 
     // GitHub #257 (spec runtime/06): the columns past each lane's commit
@@ -2155,18 +2151,6 @@ int32_t run_verify_round(ignis_model *model, ignis_seq_pool *pool,
                                  std::span<const ninfer::ops::GdnReplayFoldRow>(fold_rows.data(),
                                                                                 batch_size),
                                  model->stream));
-
-    // The accepted hidden state per lane (the run's last column's final
-    // residual), kept for the drafter's continuation input (P5-05).
-    if (!stage(*verify.selectors, selectors.data(), lane_bytes, "verify selectors")) {
-      return -1;
-    }
-    const ninfer::Tensor hidden_columns(verify.hidden->p, ninfer::DType::BF16,
-                                        {hidden, static_cast<std::int32_t>(lane_columns), batch, 1});
-    const ninfer::Tensor selector_tensor(verify.selectors->p, ninfer::DType::I32, {batch, 1, 1, 1});
-    ninfer::Tensor selected(verify.selected_hidden->p, ninfer::DType::BF16, {hidden, batch, 1, 1});
-    IGNIS_PROFILE_OP("speculative_select_accepted_hidden", ninfer::ops::speculative_select_accepted_hidden(hidden_columns, selector_tensor, selected,
-                                                    model->stream));
 
     // P5-05 (GitHub #155): the committed columns' feature taps into each
     // lane's window -- its whole committed run, or nothing for a lane at

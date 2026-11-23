@@ -111,13 +111,12 @@ pub fn sampling_bytes(config: &ModelConfig, lanes: u32) -> u64 {
 }
 
 /// The verify round's line at `lanes` lanes under `speculation`'s window `k`
-/// (`verify_round_bytes`, `kernel/src/model.cu`): its staging -- eight
+/// (`verify_round_bytes`, `kernel/src/model.cu`): its staging -- seven
 /// per-lane words, the drafts, four (five with vision's rope positions)
-/// words per column -- the logits and hidden of every column, each lane's
-/// selected hidden, the ReplaySSM records of every GDN layer and lane, and
-/// the greedy accept's workspace, never under one arena block. Its buffers
-/// are separate allocations, so only the records and the workspace are
-/// rounded.
+/// words per column -- each column's logits, the ReplaySSM records of every
+/// GDN layer and lane, and the greedy accept's workspace, never under one
+/// arena block. Its buffers are separate allocations, so only the records
+/// and the workspace are rounded.
 pub fn verify_round_bytes(config: &ModelConfig, speculation: Speculation, vision: bool, lanes: u32) -> u64 {
     let k = u64::from(speculation.draft_tokens());
     if k == 0 {
@@ -126,9 +125,8 @@ pub fn verify_round_bytes(config: &ModelConfig, speculation: Speculation, vision
     let columns = k + 1;
     let lanes = u64::from(lanes);
     let (i32, bf16, fp32) = (4, 2, 4);
-    let staging = 8 * lanes * i32 + k * lanes * i32 + if vision { 5 } else { 4 } * columns * lanes * i32;
-    let activations =
-        config.vocab * columns * lanes * bf16 + config.hidden * columns * lanes * bf16 + config.hidden * lanes * bf16;
+    let staging = 7 * lanes * i32 + k * lanes * i32 + if vision { 5 } else { 4 } * columns * lanes * i32;
+    let activations = config.vocab * columns * lanes * bf16;
     // `verify_record_spec`: one record row per GDN layer and lane, `k + 1`
     // wide, laid out by the vendored `plan_gdn_replay_records`.
     let outer = config.layer_kinds.iter().filter(|&&kind| kind == LayerKind::Gdn).count() as u64 * lanes;
@@ -199,27 +197,27 @@ mod tests {
     }
 
     /// Spec 27b-16gb/04: at eight lanes every line is main 75210360's plan to
-    /// the byte, as its leaf planned it at these options (with vision, and
-    /// the 262,144-token text load without it).
+    /// the byte after removing 92,164 bytes of unused hidden staging per lane
+    /// (with vision, and the 262,144-token text load without it).
     #[test]
-    fn eight_lanes_are_mains_plan_to_the_byte() {
+    fn eight_lanes_are_mains_plan_without_unused_hidden_staging() {
         let main = LaneLines {
             sampling: 4_623_344,
-            verify_round: 152_139_488,
+            verify_round: 151_402_176,
             drafter_round: 78_027_552,
             lane_state: 1_575_043_072,
             hq_residual_window: 356_516_480,
         };
         assert_eq!(served(8, true), main);
-        assert_eq!(served(8, false), LaneLines { verify_round: 152_139_232, ..main }, "vision's rope positions, 8 x 8 words");
+        assert_eq!(served(8, false), LaneLines { verify_round: 151_401_920, ..main }, "vision's rope positions, 8 x 8 words");
     }
 
     /// The sampling and verify lines the leaf planned at one and two lanes
     /// when the lanes became a load setting (`vram_plan_gpu`, 2026-10-23, with
-    /// vision and without), which nothing but the kernel had computed then.
+    /// vision and without), less the removed 92,164-byte hidden staging per lane.
     #[test]
     fn one_and_two_lanes_are_what_the_kernel_planned() {
-        for (lanes, sampling, with_vision, without) in [(1, 579_048, 19_017_436, 19_017_404), (2, 1_156_768, 38_034_872, 38_034_808)] {
+        for (lanes, sampling, with_vision, without) in [(1, 579_048, 18_925_272, 18_925_240), (2, 1_156_768, 37_850_544, 37_850_480)] {
             assert_eq!((served(lanes, true).sampling, served(lanes, true).verify_round), (sampling, with_vision), "{lanes} lanes");
             assert_eq!(served(lanes, false).verify_round, without, "{lanes} lanes without vision");
         }
@@ -231,7 +229,7 @@ mod tests {
     /// 151 MB, conv 3 MB, penalty 1 MB, the DFlash2 window 40 MiB, the hq
     /// window 36 MB -- and the round buffers ~35 MB a lane beside ~34 MB
     /// that does not move at DFlash2 7. Here are sampling's ~0.58 MB, the
-    /// verify round's ~19.02 MB and the drafter's ~5.56 MB a lane; the decode
+    /// verify round's ~18.93 MB and the drafter's ~5.56 MB a lane; the decode
     /// round's ~10.27 MB, the rest of the 35, is the GPU test's.
     #[test]
     fn one_and_two_lanes_cost_what_piano_vram_says_a_lane() {
@@ -253,7 +251,7 @@ mod tests {
         let rounds = |lines: LaneLines| lines.sampling + lines.verify_round + lines.drafter_round;
         let step = |line: fn(&LaneLines) -> u64| line(&two) - line(&one);
         near(step(|l| l.sampling), 0.58, "sampling a lane");
-        near(step(|l| l.verify_round), 19.02, "the verify round a lane");
+        near(step(|l| l.verify_round), 18.93, "the verify round a lane");
         near(step(|l| l.drafter_round), 5.56, "the drafter's round a lane");
         near(rounds(one) - (rounds(two) - rounds(one)), 34.0, "the round buffers that do not move");
     }

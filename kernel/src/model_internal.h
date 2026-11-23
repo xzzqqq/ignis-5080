@@ -403,12 +403,9 @@ struct IgnisVerifyRound {
   std::unique_ptr<ninfer::DeviceBuffer> positions;       // I32 [k+1, B]: base + min(j, extent)
   std::unique_ptr<ninfer::DeviceBuffer> target_tokens;   // I32 [k+1, B]: argmax per column
   std::unique_ptr<ninfer::DeviceBuffer> logits;          // BF16 [vocab, k+1, B]
-  std::unique_ptr<ninfer::DeviceBuffer> hidden;          // BF16 [hidden, k+1, B]: final residual
   std::unique_ptr<ninfer::DeviceBuffer> licensed_tokens; // I32 [k+1, B]: accept output
   std::unique_ptr<ninfer::DeviceBuffer> licensed_counts; // I32 [B]
   std::unique_ptr<ninfer::DeviceBuffer> accepted;        // I32 [B]
-  std::unique_ptr<ninfer::DeviceBuffer> selectors;       // I32 [B]: committed - 1
-  std::unique_ptr<ninfer::DeviceBuffer> selected_hidden; // BF16 [hidden, B]: for the drafter
 
   // The ReplaySSM records every GDN layer writes for every lane's `k+1`
   // columns (conv input, key, value, {g, beta}), folded into each lane's
@@ -446,8 +443,8 @@ struct IgnisVerifyRound {
     for (const auto *buffer :
          {anchors.get(), drafts.get(), base_positions.get(), extents.get(), valid_columns.get(),
           lengths.get(), rope_positions.get(), verify_ids.get(), positions.get(),
-          target_tokens.get(), logits.get(), hidden.get(), licensed_tokens.get(),
-          licensed_counts.get(), accepted.get(), selectors.get(), selected_hidden.get(),
+          target_tokens.get(), logits.get(), licensed_tokens.get(),
+          licensed_counts.get(), accepted.get(),
           records_backing.get(), features.get(), append_counts.get()}) {
       if (buffer != nullptr) {
         bytes += buffer->bytes;

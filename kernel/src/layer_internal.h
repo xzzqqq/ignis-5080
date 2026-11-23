@@ -224,10 +224,9 @@ int32_t ignis_decode_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, u
 // layer (the verify bodies above), the final norm and output head over every
 // column into `model->verify->logits`, the per-column argmax into
 // `target_tokens`, and the vendored accept kernel writing `licensed_tokens`,
-// `licensed_counts` and `accepted`. The final residual is also copied to
-// `model->verify->hidden` for the accepted-hidden selection the caller does
-// after readback. Everything it reads or writes is a stable model-owned
-// address, so the same call records a verify graph and runs a round eagerly.
+// `licensed_counts` and `accepted`. Everything it reads or writes is a stable
+// model-owned address, so the same call records a verify graph and runs a round
+// eagerly.
 // Returns 0 on success, -1 on a leaf/kernel error (see
 // `ignis_decode_graph_last_error`).
 int32_t ignis_verify_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, uint32_t width,
