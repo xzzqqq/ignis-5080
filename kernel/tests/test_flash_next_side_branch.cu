@@ -1,4 +1,4 @@
-// The Flash-Next forward's side branch (kernel/src/flash_next/side_branch.h) -- OURS, GitHub #306.
+// The Flash-Next forward's side branch (kernel/src/side_branch.h) -- OURS, GitHub #306.
 //
 //   order     work queued on the branch is done before what the layer's stream queues after
 //             join_side: a slow write on the branch, read back after the join;
@@ -9,7 +9,7 @@
 //
 // ADR 0006 / docs/agents/testing.md: no SKIP_RETURN_CODE; a missing GPU fails.
 
-#include "flash_next/side_branch.h"
+#include "side_branch.h"
 
 #include <cuda_runtime.h>
 
@@ -50,9 +50,9 @@ __global__ void copy_one(const int *src, int *dst) { *dst = *src; }
 }  // namespace
 
 int main() {
-  using ignis::flash_next::join_side;
-  using ignis::flash_next::run_beside;
-  using ignis::flash_next::SideBranch;
+  using ignis::join_side;
+  using ignis::run_beside;
+  using ignis::SideBranch;
 
   int devices = 0;
   CUDA_OK(cudaGetDeviceCount(&devices));

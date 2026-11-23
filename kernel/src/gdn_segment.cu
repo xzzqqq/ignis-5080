@@ -53,6 +53,12 @@ void segment_gdn_invoke(const ignis_model &model,uint32_t layer,const ignis_segm
   c.qkv_weight=w.trellis.in_proj_qkv;c.z_weight=w.trellis.in_proj_z;c.output_weight=w.trellis.tail.output;
   c.input_norm=w.input_norm.qdata;c.convolution=w.convolution.qdata;c.ab_projection=w.a_b_projection.qdata;
   c.a_log=w.a_log.qdata;c.dt_bias=w.dt_bias.qdata;c.gdn_norm=w.norm.qdata;
+  if (model.verify) {
+    const auto &branch = model.verify->gdn_gating;
+    c.gating_stream = branch.stream;
+    c.gating_fork = branch.fork;
+    c.gating_join = branch.join;
+  }
   if(api){
     if(!api->run_gdn || api->run_gdn(&c,workspace,bytes,stream))
       throw std::runtime_error(api->last_error?api->last_error():"candidate GDN segment failed");

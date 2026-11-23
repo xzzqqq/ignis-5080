@@ -21,6 +21,7 @@ follow the [authoring convention](../agents/findings.md).
 
 | Finding | Kind | Scope | Observed | Status | Superseded by | Summary |
 |---|---|---|---|---|---|---|
+| [GDN verify gating on a side stream](2026-11-23-gdn-gating-overlap.md) | experiment | kernel / RTX 5080 Trellis C1/T8 GDN verify | 2026-11-23 | current | none | Forking after RMSNorm improved fixed-request service decode by 1.13–1.32% with matching outputs and speculative counters. |
 | [GDN joint projection and gated rotation](2026-11-21-gdn-joint-projection-and-gated-rotation.md) | experiment | kernel / RTX 5080 Trellis C1/T8 GDN verify | 2026-11-21 | current | none | Exact GDN fusion improves fixed-service decode; a separately controlled paired-rotation/early-PDL follow-up adds small gains, with prefill variability reported. |
 | [Kernel Lab fast feedback](2026-11-14-kernel-lab-fast-feedback.md) | experiment | incremental compilation, single-request replay/forward | 2026-11-14 | current | — | After one MLP object rebuild: replay 9.68 s, quick forward 17.82 s; each measured once. |
 | [hq-e8-2b KV capacity](2026-09-11-hq-e8-2b-kv-capacity.md) | discovery | kernel / paged KV cache, scheduler capacity | 2026-09-11 | current | none | A sequence-token costs 9,216 bytes under hq-e8-2b against 65,536 under BF16 (7.11x), so 8 lanes at 40,960 context need ~3.02 GB instead of 20 GiB. |

@@ -2185,6 +2185,10 @@ extern "C" int32_t ignis_model_load(const struct ignis_bound_tensor *tensors, ui
   if (draft_tokens > 0) {
     try {
       model->verify = build_verify_round(*topology, draft_tokens, vision_max_tokens > 0, load.decode_lanes);
+      if (model->is_trellis_body && g.hidden == 5120 && draft_tokens == 7) {
+        std::string error;
+        if (!model->verify->gdn_gating.create(&error)) throw std::runtime_error(error);
+      }
     } catch (const std::exception &e) {
       set_error(std::string("ignis_model_load: verify round allocation failed: ") + e.what());
       cudaStreamDestroy(model->stream);

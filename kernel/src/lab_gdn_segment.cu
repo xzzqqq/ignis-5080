@@ -160,20 +160,51 @@ extern "C" int32_t ignis_lab_gdn_segment_run(const ignis_gdn_segment_call *c,voi
     n::Weight a{},bw{};a.qdata=c->ab_projection;a.n=48;a.k=5120;a.shape[0]=48;a.shape[1]=5120;
     bw=a;bw.qdata=static_cast<const char *>(c->ab_projection)+48*5120*2;
     const auto alog=input(c->a_log,n::DType::FP32,{48}),bias=input(c->dt_bias,n::DType::FP32,{48});
+    const auto gating = static_cast<cudaStream_t>(c->gating_stream);
+    const auto fork = static_cast<cudaEvent_t>(c->gating_fork);
+    const auto join = static_cast<cudaEvent_t>(c->gating_join);
+    if (gating && (!fork || !join || gating == stream))
+      throw std::runtime_error("invalid GDN gating branch");
     using n::ops::RmsEpilogue;
     ck(n::pdl::launch_dependent({dim3(8),dim3(512),0,stream},
         n::ops::rmsnorm_cta_bf16x2_kernel<RmsEpilogue::Offset,512,8,true>,
         static_cast<const __nv_bfloat162 *>(c->residual_in),static_cast<const __nv_bfloat162 *>(c->input_norm),
         static_cast<const __nv_bfloat162 *>(nullptr),static_cast<__nv_bfloat162 *>(b.h.data),5120,int64_t(8),c->profile.rms_eps));
-    if(ignis_gdn_joint_projection(&c->qkv_weight,&c->z_weight,b.h.data,c->conv_record,b.z.data,
-        &b.trellis,&b.second,stream))throw std::runtime_error(ignis_trellis_last_error());
-    const auto conv=input(c->conv_record,n::DType::BF16,{10240,8,1});
-    const auto conv_weight=input(c->convolution,n::DType::BF16,{10240,4});
-    const auto states=input(c->conv_states,n::DType::BF16,{10240,3,int(c->profile.slots)});
-    const auto valid=input(c->valid_columns,n::DType::I32,{1});
-    const auto slots=input(c->lane_slots,n::DType::I32,{1});
-    n::ops::detail::gdn_projected_conv_record_launch(conv,conv_weight,states,valid,slots,b.q,b.k,b.v,stream);
-    n::ops::detail::bf16_gdn_gating_proj_small_t_split10_launch(b.h,a,bw,alog,bias,b.partial,10*8*96*4,b.g,b.beta,stream);
+    auto project_and_convolve = [&] {
+      if(ignis_gdn_joint_projection(&c->qkv_weight,&c->z_weight,b.h.data,c->conv_record,b.z.data,
+          &b.trellis,&b.second,stream))throw std::runtime_error(ignis_trellis_last_error());
+      const auto conv=input(c->conv_record,n::DType::BF16,{10240,8,1});
+      const auto conv_weight=input(c->convolution,n::DType::BF16,{10240,4});
+      const auto states=input(c->conv_states,n::DType::BF16,{10240,3,int(c->profile.slots)});
+      const auto valid=input(c->valid_columns,n::DType::I32,{1});
+      const auto slots=input(c->lane_slots,n::DType::I32,{1});
+      n::ops::detail::gdn_projected_conv_record_launch(conv,conv_weight,states,valid,slots,b.q,b.k,b.v,stream);
+    };
+    auto project_gates = [&](cudaStream_t target) {
+      n::ops::detail::bf16_gdn_gating_proj_small_t_split10_launch(
+          b.h,a,bw,alog,bias,b.partial,10*8*96*4,b.g,b.beta,target);
+    };
+    if (gating) {
+      // Both paths read h. Only recurrence needs the outputs of both.
+      ck(cudaEventRecord(fork,stream));
+      ck(cudaStreamWaitEvent(gating,fork,0));
+      auto rejoin = [&] {
+        ck(cudaEventRecord(join,gating));
+        ck(cudaStreamWaitEvent(stream,join,0));
+      };
+      try {
+        project_gates(gating);
+        project_and_convolve();
+      } catch (...) {
+        // Either path may have enqueued work before a launch failed.
+        rejoin();
+        throw;
+      }
+      rejoin();
+    } else {
+      project_and_convolve();
+      project_gates(stream);
+    }
     if(c->valid_columns)recurrence<true>(*c,b,stream);else recurrence<false>(*c,b,stream);
     ignis_tl::RotateParams rotation{};
     if(ignis_gdn_rotation_params(&c->output_weight,&b.trellis,&rotation))throw std::runtime_error(ignis_trellis_last_error());

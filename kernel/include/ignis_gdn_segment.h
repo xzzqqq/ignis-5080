@@ -17,6 +17,9 @@ struct ignis_gdn_segment_call {
   const void *residual_in,*conv_states,*recurrent_states;
   const int32_t *lane_slots,*valid_columns;
   void *residual_out,*conv_record,*key_record,*value_record,*gate_record;
+  // Optional host-owned CUDA handles, stable for this model's verify graphs.
+  // A zero-initialized tail selects the serial schedule.
+  void *gating_stream,*gating_fork,*gating_join;
 };
 int32_t ignis_lab_gdn_segment_prepare(void);
 uint64_t ignis_lab_gdn_segment_workspace(const struct ignis_segment_profile *);

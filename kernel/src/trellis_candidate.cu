@@ -11,6 +11,7 @@
 #include "ignis_seq.h"
 #include "ignis_step.h"
 #include <dlfcn.h>
+#include <cstddef>
 #include <algorithm>
 #include <string>
 #include <set>
@@ -102,9 +103,12 @@ extern "C" int32_t ignis_model_reload_trellis(ignis_model *model, ignis_seq_pool
     auto entry=reinterpret_cast<const ignis_segment_candidate_api *(*)()>(dlsym(next->library,"ignis_segment_candidate_v1"));
     if(entry){
       next->segments=entry();const auto *s=next->segments;
+      // Older GDN candidates consume only the original prefix of the host-owned call.
       if(!s || s->version!=IGNIS_SEGMENT_CANDIDATE_ABI || s->size!=sizeof(*s) ||
          s->profile_size!=sizeof(ignis_segment_profile) || s->mlp_call_size!=sizeof(ignis_mlp_segment_call) ||
-         s->gqa_call_size!=sizeof(ignis_gqa_segment_call) || s->gdn_call_size!=sizeof(ignis_gdn_segment_call) ||
+         s->gqa_call_size!=sizeof(ignis_gqa_segment_call) ||
+         (s->gdn_call_size!=sizeof(ignis_gdn_segment_call) &&
+          s->gdn_call_size!=offsetof(ignis_gdn_segment_call,gating_stream)) ||
          !s->identity || !s->prepare || !s->workspace_bytes || !s->run_mlp || !s->run_gqa || !s->run_gdn || !s->last_error)
         return fail("segment candidate ABI mismatch");
       if(s->prepare())return fail(std::string("segment candidate prepare: ")+s->last_error());
