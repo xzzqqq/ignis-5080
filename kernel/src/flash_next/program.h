@@ -20,7 +20,7 @@
 
 #include "flash_next_internal.h"
 #include "mtp.h"
-#include "side_branch.h"
+#include "../side_branch.h"
 
 #include "ignis_model.h"
 #include "ignis_moe.h"

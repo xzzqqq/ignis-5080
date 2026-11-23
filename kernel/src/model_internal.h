@@ -13,6 +13,7 @@
 #include "lab_trace.h"
 
 #include "rope_scaling.h"
+#include "side_branch.h"
 
 #include "core/arena.h"
 #include "core/gdn_replay_records.h"
@@ -376,6 +377,9 @@ struct LayerWeights {
 // vendored `speculative_*` ops' `[K+1,B]` and the traversal's lane-major
 // column order (lane b's columns are `b*(k+1) .. b*(k+1)+k`).
 struct IgnisVerifyRound {
+  ignis::SideBranch gdn_gating;
+  ~IgnisVerifyRound() { gdn_gating.destroy(); }
+
   uint32_t window = 0; // k
 
   // Host-refreshed per round.

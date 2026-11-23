@@ -763,7 +763,7 @@ add_test(NAME ignis_kernel_flash_next_embed_head_test COMMAND ignis_kernel_flash
 # The QSA attention sublayer (kernel/src/flash_next/qsa.cu, qsa_dense.cu) on paged K/V of both
 # formats: the norms and rope, the dense kernel against fp64, the whole sublayer in prefill and in
 # graph-captured decode, hq-e8-2b within a bound derived from its measured codec error. GPU.
-# GitHub #306: the forward's side branch (kernel/src/flash_next/side_branch.h) orders its work
+# GitHub #306: the forward's side branch (kernel/src/side_branch.h) orders its work
 # before the join, and a failed op on it still leaves a capture that ends once joined. GPU.
 # GitHub #307 (spec flash-next/07 phase C): the verify round's GDN half -- the replay record and our fold of
 # the first c records against c one-token rounds over the same columns, bit for bit. GPU.

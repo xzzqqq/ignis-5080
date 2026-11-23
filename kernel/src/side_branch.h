@@ -1,7 +1,4 @@
-// ignis kernel leaf -- the Flash-Next forward's side branch (OURS, GitHub #306): a stream beside
-// the layer's for work that reads only the sublayer's input, forked from the layer's stream after
-// everything queued on it and joined back before what reads the branch's output. The MoE's shared
-// expert runs there. Capturable: a fork and its join are edges of the captured graph.
+// A model-owned CUDA stream and its reusable graph fork/join events.
 #pragma once
 
 #include <cuda_runtime.h>
@@ -9,7 +6,7 @@
 #include <cstdint>
 #include <string>
 
-namespace ignis::flash_next {
+namespace ignis {
 
 struct SideBranch {
   cudaStream_t stream = nullptr;
@@ -62,4 +59,4 @@ inline bool join_side(const SideBranch &side, cudaStream_t stream) {
   return cudaStreamWaitEvent(stream, side.join, 0) == cudaSuccess;
 }
 
-}  // namespace ignis::flash_next
+}  // namespace ignis

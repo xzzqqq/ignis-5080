@@ -330,7 +330,8 @@ void gdn_reuses_trellis_payload(uint32_t qkv_bits, uint32_t z_bits) {
   upload(input,activations(813,5120*8));upload(conv_w,activations(814,10240*4));
   upload(gnorm,std::vector<uint16_t>(128,f32_to_bf16(1.0f)));
   upload(conv_state,activations(815,10240*3*2));upload(state,std::vector<float>(128*128*48*2,0.01f));
-  for(auto *b:{&norm,&ab,&alog,&bias})MOE_CUDA(cudaMemset(b->p,0,b->bytes));
+  upload(ab,activations(816,96*5120));
+  for(auto *b:{&norm,&alog,&bias})MOE_CUDA(cudaMemset(b->p,0,b->bytes));
   upload(slots,std::vector<int32_t>{1});
   ignis_gdn_segment_call c{};c.profile={IGNIS_SEGMENT_GDN,8,1,5120,0,0,2,0,1e-6f};
   c.qkv_weight=qkv.w;c.z_weight=z.w;c.output_weight=out.w;
@@ -352,21 +353,40 @@ void gdn_reuses_trellis_payload(uint32_t qkv_bits, uint32_t z_bits) {
   const auto before_state=download<uint8_t>(state.p,state.bytes),before_conv=download<uint8_t>(conv_state.p,conv_state.bytes);
   const auto snapshot=[&](){std::vector<uint8_t> v;for(auto *b:{&output,&cr,&kr,&vr,&gr}){
     auto x=download<uint8_t>(b->p,b->bytes);v.insert(v.end(),x.begin(),x.end());}return v;};
+  ignis::SideBranch branch;
+  std::string branch_error;
+  check(branch.create(&branch_error),"create GDN gating branch: "+branch_error);
+  cudaStream_t stream{};
+  MOE_CUDA(cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking));
   for(int n:{8,5,0}){
     upload(valid,std::vector<int32_t>{n});
     for(auto *b:{&output,&cr,&kr,&vr,&gr})MOE_CUDA(cudaMemset(b->p,0x7F,b->bytes));
     MOE_CUDA(cudaMemset(workspace.p,0,workspace.bytes));
+    c.gating_stream=c.gating_fork=c.gating_join=nullptr;
     rc(ignis_lab_gdn_segment_run(&c,workspace.p,workspace.bytes,nullptr));MOE_CUDA(cudaDeviceSynchronize());
     const auto expected=snapshot();
+    c.gating_stream=branch.stream;c.gating_fork=branch.fork;c.gating_join=branch.join;
+    cudaGraph_t graph{};
+    cudaGraphExec_t exec{};
+    MOE_CUDA(cudaStreamBeginCapture(stream,cudaStreamCaptureModeThreadLocal));
+    rc(ignis_lab_gdn_segment_run(&c,workspace.p,workspace.bytes,stream));
+    MOE_CUDA(cudaStreamEndCapture(stream,&graph));
+    MOE_CUDA(cudaGraphInstantiate(&exec,graph,0));
     for(int poison:{0x7F,0xFF}){
       for(auto *b:{&output,&cr,&kr,&vr,&gr})MOE_CUDA(cudaMemset(b->p,0x7F,b->bytes));
       MOE_CUDA(cudaMemset(static_cast<char *>(workspace.p)+ignis_tl::kCounterBytes,poison,workspace.bytes-ignis_tl::kCounterBytes));
-      rc(ignis_lab_gdn_segment_run(&c,workspace.p,workspace.bytes,nullptr));MOE_CUDA(cudaDeviceSynchronize());
+      MOE_CUDA(cudaDeviceSynchronize());
+      MOE_CUDA(cudaGraphLaunch(exec,stream));
+      MOE_CUDA(cudaStreamSynchronize(stream));
       check(snapshot()==expected,"GDN shared payload reuse qkv="+std::to_string(qkv_bits)+" z="+std::to_string(z_bits)+" valid="+std::to_string(n)+" poison="+std::to_string(poison));
       check(download<uint8_t>(state.p,state.bytes)==before_state,"GDN recurrent state readonly");
       check(download<uint8_t>(conv_state.p,conv_state.bytes)==before_conv,"GDN conv state readonly");
     }
+    MOE_CUDA(cudaGraphExecDestroy(exec));
+    MOE_CUDA(cudaGraphDestroy(graph));
   }
+  MOE_CUDA(cudaStreamDestroy(stream));
+  branch.destroy();
 }
 
 }  // namespace
