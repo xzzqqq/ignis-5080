@@ -196,6 +196,8 @@ int32_t ignis_gdn_layer_run_body_graph(ignis_model *model, ignis_seq_pool *pool,
 // (`ignis_program_decode`, kernel/src/step.cu) rebuilds the slot from the
 // committed prefix of those records. Both read the residual as
 // `[hidden, (k+1) * width]` and require a windowed load (`model->verify`).
+void ignis_nvfp4_gqa_verify(ignis_model &model, ignis_seq_pool &pool, uint32_t layer,
+                            const ninfer::Tensor &input, ninfer::Tensor &output, void *round_metadata);
 int32_t ignis_gqa_layer_run_body_verify(ignis_model *model, ignis_seq_pool *pool, uint32_t layer,
                                         uint32_t width, const void *in_residual, void *out_residual,
                                         LinearPolicyMode mode);

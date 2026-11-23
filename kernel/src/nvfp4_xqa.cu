@@ -54,7 +54,7 @@ __device__ void plan_window(int window, int width, uint2 *range) {
   }
   if (lane < splits) range[lane] = make_uint2(1 + end - quota, 1 + end);
 }
-__global__ void metadata(IgnisNv4XqaCall call, Metadata *m, std::int32_t *table) {
+__global__ void metadata(IgnisNv4XqaCall call, Metadata *m, std::int32_t *table, std::uint32_t *sem) {
   const int valid = call.valid ? max(0, min(int(call.tokens), call.valid[0])) : int(call.tokens);
   const int row = valid ? call.table_rows[0] : 0;
   if (valid && (row < 0 || row >= call.table_count)) asm volatile("trap;");
@@ -62,6 +62,7 @@ __global__ void metadata(IgnisNv4XqaCall call, Metadata *m, std::int32_t *table)
   if (window < valid || window > call.max_keys) asm volatile("trap;");
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (call.window.k && i < 32) plan_window(window, valid, m->schedule);
+  if (i < 4) sem[i] = 0;
   if (i < 8) {
     if (i < valid && call.positions[i] != window - valid + i) asm volatile("trap;");
     m->mask[i] = (1u << (i + 1)) - 1;
@@ -85,9 +86,12 @@ std::size_t partial_bytes() {
   return std::size_t(segments.getEndOffset());
 }
 }
+std::size_t ignis_nv4_xqa_metadata_bytes(std::uint32_t max_keys) {
+  return 512 + align256(std::size_t((max_keys + 63) / 64) * sizeof(std::int32_t));
+}
 std::size_t ignis_nv4_xqa_workspace(std::uint32_t max_keys) {
   if (!max_keys || max_keys > 524288) return 0;
-  return 256 + align256(std::size_t((max_keys + 63) / 64) * 4) + 256 + (ScratchAlignment - 1) + partial_bytes();
+  return ignis_nv4_xqa_metadata_bytes(max_keys) + (ScratchAlignment - 1) + partial_bytes();
 }
 void ignis_nv4_xqa_prepare() {
   std::uint32_t size = 0;
@@ -99,7 +103,7 @@ void ignis_nv4_xqa_prepare() {
   multiprocessors = std::uint32_t(sms);
 }
 void ignis_nv4_xqa_run(const IgnisNv4XqaCall &c, void *workspace, std::size_t bytes,
-                       cudaStream_t stream) {
+                       cudaStream_t stream, void *round_metadata, bool prepare_metadata) {
   const auto need = ignis_nv4_xqa_workspace(c.max_keys);
   if (!need || !workspace || bytes < need ||
       reinterpret_cast<std::uintptr_t>(workspace) % alignof(Metadata) ||
@@ -107,19 +111,21 @@ void ignis_nv4_xqa_run(const IgnisNv4XqaCall &c, void *workspace, std::size_t by
       !c.tables || !c.table_rows || !c.positions || !c.tokens || c.tokens>8 || c.table_stride < (c.max_keys + 63) / 64 ||
       !c.k_codes || !c.v_codes || !c.k_scales || !c.v_scales || !c.table_count || !c.physical_pages)
     throw std::invalid_argument("nvfp4 XQA: invalid graph invocation/workspace");
-  auto *base = static_cast<char *>(workspace);
+  auto *base = static_cast<char *>(round_metadata ? round_metadata : workspace);
   auto *m = reinterpret_cast<Metadata *>(base);
   auto *table = reinterpret_cast<std::int32_t *>(base + 256);
-  auto *sem = reinterpret_cast<std::uint32_t *>(base + 256 +
-      align256(std::size_t((c.max_keys + 63) / 64) * 4));
-  const auto raw_scratch = reinterpret_cast<std::uintptr_t>(sem) + 256;
+  auto *sem = reinterpret_cast<std::uint32_t *>(base + ignis_nv4_xqa_metadata_bytes(c.max_keys) - 256);
+  const auto raw_scratch = reinterpret_cast<std::uintptr_t>(workspace) + ignis_nv4_xqa_metadata_bytes(c.max_keys);
   // MemSegmenter also declares sizeof(T) base alignment. This is not a
   // power-of-two for M48, so align by division, not a bit mask.
   void *scratch = reinterpret_cast<void *>(
       ((raw_scratch + ScratchAlignment - 1) / ScratchAlignment) * ScratchAlignment);
-  metadata<<<(((c.max_keys + 63) / 64) + 255) / 256, 256, 0, stream>>>(c, m, table);
-  CUDA_CHECK(cudaGetLastError());
-  CUDA_CHECK(cudaMemsetAsync(sem, 0, 4 * sizeof(std::uint32_t), stream));
+  // Each head's last CTA wraps its semaphore to zero. Round metadata lives
+  // outside layer scratch, so subsequent layers can reuse all four counters.
+  if (!round_metadata || prepare_metadata) {
+    metadata<<<(((c.max_keys + 63) / 64) + 255) / 256, 256, 0, stream>>>(c, m, table, sem);
+    CUDA_CHECK(cudaGetLastError());
+  }
   // C1/T8 physical grid is21x4, graph-stable. Device seq_len chooses
   // activeS=min(21,ceil(actual_window/256)); inactive CTAs leave before barriers.
   launchMHAFlashInfer(multiprocessors, 4, 0, c.scale * 16.0f, nullptr,

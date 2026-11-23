@@ -13,6 +13,7 @@ struct IgnisNv4XqaCall {
   ignis::nv4::Window window{};
 };
 std::size_t ignis_nv4_xqa_workspace(std::uint32_t max_keys);
+std::size_t ignis_nv4_xqa_metadata_bytes(std::uint32_t max_keys);
 void ignis_nv4_xqa_prepare();
 void ignis_nv4_xqa_run(const IgnisNv4XqaCall &, void *workspace, std::size_t bytes,
-                       cudaStream_t stream);
+                       cudaStream_t stream, void *round_metadata = nullptr, bool prepare_metadata = true);

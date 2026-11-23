@@ -47,6 +47,7 @@
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ignis_gqa_workspace.h"
 #include "ignis_nvfp4_kv.h"
+#include "nvfp4_xqa.h"
 extern "C" uint64_t ignis_gqa_native_q_fixed_workspace();
 extern "C" uint64_t ignis_gqa_native_kv_pair_workspace();
 #include "ninfer/ops/gqa_attention.h"
@@ -1743,6 +1744,10 @@ LoadSizes plan_load_sizes(const ignis_model &model, const ignis_topology &topolo
       model, topology, /*chunk=*/round_columns, max_context_tokens, options.cache_dtype,
       /*batch=*/static_cast<std::int32_t>(lanes), /*head_every_column=*/windowed);
 
+  if (round_columns == 8 && model.is_trellis_body && g.hidden == 5120 &&
+      model.kv_format == IGNIS_KV_FORMAT_NVFP4) {
+    sizes.decode_graph_scratch += ignis_nv4_xqa_metadata_bytes(max_context_tokens);
+  }
   if (windowed) {
     sizes.verify_round =
         verify_round_bytes(topology, options.draft_tokens, options.vision_max_tokens > 0, lanes);

@@ -42,9 +42,10 @@ __device__ void bump(std::uint64_t *stats, int i, unsigned n) {
   if (stats && n) atomicAdd(reinterpret_cast<unsigned long long *>(stats + i),
                            static_cast<unsigned long long>(n));
 }
+template<bool StoreWindow>
 __global__ void append(Cache c, const __nv_bfloat16 *k, const __nv_bfloat16 *v,
                         const std::int32_t *positions, const std::int32_t *valid,
-                        const std::int32_t *rows, int tokens, std::uint64_t *stats) {
+                        const std::int32_t *rows, int tokens, std::uint64_t *stats, nv4::Window side, bool publish) {
   const int token = blockIdx.x % tokens, lane = blockIdx.x / tokens;
   if (token >= count(valid, lane, tokens)) return;
   const int head = blockIdx.y, pair = threadIdx.x;
@@ -81,6 +82,16 @@ __global__ void append(Cache c, const __nv_bfloat16 *k, const __nv_bfloat16 *v,
   if ((pair & 7) == 0) {
     (value ? c.vs : c.ks)[dst * 16 + pair / 8] = sf;
     bump(stats, 3, sf == 0);
+  }
+  if constexpr (StoreWindow) {
+    const auto dst_row = (std::int64_t(row) * nv4::Rows + nv4::Window::side_row(pos)) * Heads + head;
+    auto *plane = value ? side.v : side.k;
+    reinterpret_cast<__nv_bfloat162 *>(plane + dst_row * D)[pair] =
+        reinterpret_cast<const __nv_bfloat162 *>((value ? v : k) + i)[0];
+    if (publish && !value && head == 0 && pair == 0 && pos >= nv4::Sink) {
+      const int bit = pos % nv4::Recent;
+      atomicOr(side.valid + row * (nv4::Recent / 32) + bit / 32, 1u << (bit % 32));
+    }
   }
   bump(stats, 2, unsigned(fabsf(nx) > 6.0f) + unsigned(fabsf(ny) > 6.0f));
 }
@@ -157,6 +168,24 @@ __global__ void gate_output(__nv_bfloat16 *out, const __nv_bfloat16 *gate,
   }
 }
 std::size_t aligned(std::size_t n) { return (n + 255) & ~std::size_t(255); }
+IgnisNv4XqaCall xqa_call(const ninfer::Tensor &q, const ninfer::Tensor &k, const ninfer::Tensor &v,
+                         const ninfer::Tensor &positions, const ninfer::Tensor &valid, const ninfer::Tensor &rows,
+                         float scale, const ninfer::PagedKVBatchLayerView &cache, std::uint32_t max_keys,
+                         const ninfer::Tensor &out, int lane) {
+  const int tokens = int(q.ne[2]);
+  const auto q_offset=std::int64_t(lane)*tokens*QHeads*D;
+  return {
+        static_cast<const __nv_bfloat16 *>(q.data)+q_offset,
+        static_cast<__nv_bfloat16 *>(out.data)+q_offset,
+        cache.k_pages.data,cache.v_pages.data,cache.k_scale_pages.data,cache.v_scale_pages.data,
+        static_cast<const std::int32_t *>(cache.block_tables.data),
+        static_cast<const std::int32_t *>(rows.data)+lane,
+        static_cast<const std::int32_t *>(positions.data)+lane*tokens,
+        valid.data ? static_cast<const std::int32_t *>(valid.data)+lane : nullptr,
+        std::uint32_t(cache.block_tables.ne[0]),std::uint32_t(cache.block_tables.ne[1]),
+        std::uint32_t(cache.k_pages.ne[3]),max_keys,std::uint32_t(tokens),scale,window(cache,k,v,lane)};
+}
+
 }
 bool nvfp4_cache(const ninfer::PagedKVBatchLayerView &c) {
   return c.dtype == ninfer::DType::U8 && c.quant_group == 16 && c.head_dim == D && c.num_kv_heads == Heads;
@@ -174,10 +203,10 @@ void nvfp4_append(const ninfer::Tensor &k, const ninfer::Tensor &v,
       (valid.data && (valid.dtype!=ninfer::DType::I32 || !valid.is_contiguous() || valid.ne[0]!=batch)) ||
       k.ne[0] != D || k.ne[1] != Heads || v.ne[0] != k.ne[0] || v.ne[1] != k.ne[1] || v.ne[2] != k.ne[2] || v.ne[3] != k.ne[3])
     throw std::invalid_argument("nvfp4 append: invalid tensor geometry");
-  append<<<dim3(tokens * batch, Heads, 2), 128, 0, stream>>>(device_cache(cache),
+  append<false><<<dim3(tokens * batch, Heads, 2), 128, 0, stream>>>(device_cache(cache),
       static_cast<const __nv_bfloat16 *>(k.data), static_cast<const __nv_bfloat16 *>(v.data),
       static_cast<const std::int32_t *>(positions.data), static_cast<const std::int32_t *>(valid.data),
-      static_cast<const std::int32_t *>(rows.data), tokens, stats);
+      static_cast<const std::int32_t *>(rows.data), tokens, stats, {}, false);
   CUDA_CHECK(cudaGetLastError());
 }
 void nvfp4_decode_band(ninfer::PagedKVBatchLayerView cache,
@@ -214,6 +243,20 @@ void nvfp4_store_window(const ninfer::Tensor &k, const ninfer::Tensor &v,
       static_cast<const int *>(rows.data), int(k.ne[2]), publish);
   CUDA_CHECK(cudaGetLastError());
 }
+// C1/T8 with a BF16 window: every fresh operand comes from k/v in XQA.
+void nvfp4_verify_attention(const ninfer::Tensor &q, const ninfer::Tensor &k, const ninfer::Tensor &v,
+                            const ninfer::Tensor &positions, const ninfer::Tensor &valid,
+                            const ninfer::Tensor &rows, const ninfer::PagedKVBatchLayerView &cache,
+                            std::uint32_t max_keys, const ninfer::Tensor &out, ninfer::DeviceSpan workspace,
+                            void *round_metadata, bool first, bool last, cudaStream_t stream) {
+  const auto call = xqa_call(q, k, v, positions, valid, rows, 0.0625f, cache, max_keys, out, 0);
+  ignis_nv4_xqa_run(call, workspace.data, workspace.bytes, stream, round_metadata, first);
+  // A wrapped slot still holds history used by this attention. Commit both
+  // representations after XQA and publish validity only after the last layer.
+  append<true><<<dim3(8, Heads, 2), 128, 0, stream>>>(device_cache(cache), call.window.fresh_k,
+      call.window.fresh_v, call.positions, call.valid, call.table_rows, 8, nullptr, call.window, last);
+  CUDA_CHECK(cudaGetLastError());
+}
 void nvfp4_prepare() { ignis_nv4_xqa_prepare(); ignis_nv4_prefill_prepare(); }
 void nvfp4_attention(const ninfer::Tensor &q, const ninfer::Tensor &k,
                      const ninfer::Tensor &v, const ninfer::Tensor &positions,
@@ -243,17 +286,8 @@ void nvfp4_attention(const ninfer::Tensor &q, const ninfer::Tensor &k,
     // Rectangular lanes are replayed serially with one shared workspace.
     // Nominal M48/T8 shape stays fixed; qCuSeqLens carries actual T/valid.
     for(int lane=0;lane<batch;++lane){
-      const auto q_offset=std::int64_t(lane)*tokens*QHeads*D;
-      const IgnisNv4XqaCall call{
-        static_cast<const __nv_bfloat16 *>(q.data)+q_offset,
-        static_cast<__nv_bfloat16 *>(out.data)+q_offset,
-        cache.k_pages.data,cache.v_pages.data,cache.k_scale_pages.data,cache.v_scale_pages.data,
-        static_cast<const std::int32_t *>(cache.block_tables.data),
-        static_cast<const std::int32_t *>(rows.data)+lane,
-        static_cast<const std::int32_t *>(positions.data)+lane*tokens,
-        valid.data ? static_cast<const std::int32_t *>(valid.data)+lane : nullptr,
-        std::uint32_t(cache.block_tables.ne[0]),std::uint32_t(cache.block_tables.ne[1]),
-        std::uint32_t(cache.k_pages.ne[3]),envelope.max_visible_keys,std::uint32_t(tokens),scale,window(cache,k,v,lane)};
+      const auto call = xqa_call(q, k, v, positions, valid, rows, scale, cache,
+                                 envelope.max_visible_keys, out, lane);
       ignis_nv4_xqa_run(call,ws.data,ws.bytes,stream);
     }
   } else {
