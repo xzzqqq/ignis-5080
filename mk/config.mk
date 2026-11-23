@@ -6,7 +6,8 @@ UI ?= 1
 METRICS ?= 1
 METRICS_BIND ?=
 MODEL ?= qwen3.8-27b-16g
-ARTIFACT ?= ./models/qwen3_8_27b_trellis_sc30-v2.ninfer
+# Prefer the production DFlash2 layout when installed; the catalog ships the source artifact.
+ARTIFACT ?= $(or $(wildcard ./models/qwen3_8_27b_trellis_sc30-dflash-projections.ninfer),./models/qwen3_8_27b_trellis_sc30-v2.ninfer)
 LANES ?=
 BIND ?= 127.0.0.1:8000
 LOG_LEVEL ?=

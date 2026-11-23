@@ -12,6 +12,27 @@ sidecar in `models/`. The pinned catalog also supports `ignis-server model
 download qwen3.8-27b-16g` on the Linux host. Download configuration and
 integrity checks are listed in [the reference](reference/cli.md).
 
+For the production DFlash2 layout on the RTX 5080, run the following
+from the Laptop after syncing the checkout. The conversion needs space
+for another 13.4 GB file on the Linux host.
+This packs all 31 drafter projections and writes the companion sidecar.
+
+```sh
+python3 scripts/remote.py exec -- python3 scripts/repack_dflash2_gate_up.py \
+  models/qwen3_8_27b_trellis_sc30-v2.ninfer \
+  models/qwen3_8_27b_trellis_sc30-dflash-projections.ninfer \
+  --projection mlp/gate_up --projection mlp/down --projection attention/output \
+  --projection attention/query_key_value --projection feature_projection \
+  --projection attention/conv_proj --projection mlp/conv_proj
+```
+
+Make selects the packed artifact when installed and otherwise uses the
+catalog artifact. On hosts that pin an older path in `local.mk`, set
+`ARTIFACT := models/qwen3_8_27b_trellis_sc30-dflash-projections.ninfer`.
+To roll back, point `ARTIFACT` to the previous artifact and run
+`make restart` on the host. The [measurement report](../findings/2026-11-22-dflash2-remaining-nvfp4-mma16.md)
+covers the layout, validation and performance.
+
 From the Laptop:
 
 ```sh
