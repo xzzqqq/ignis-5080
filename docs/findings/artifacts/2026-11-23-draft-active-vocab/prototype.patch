@@ -1,0 +1,184 @@
+diff --git a/crates/core/examples/kernel_lab.rs b/crates/core/examples/kernel_lab.rs
+index 6acb94e1..eb0060b0 100644
+--- a/crates/core/examples/kernel_lab.rs
++++ b/crates/core/examples/kernel_lab.rs
+@@ -72,6 +72,10 @@ fn main() -> Result<()> {
+     }, spec.map(|s|s.backend()))?;
+     let pool_s = phase.elapsed().as_secs_f64();
+     let phase = Instant::now();
++    if std::env::var_os("IGNIS_LAB_ACTIVE_VOCAB").is_some() {
++        unsafe extern "C" { fn ignis_lab_enable_active_vocab(); }
++        unsafe { ignis_lab_enable_active_vocab(); }
++    }
+     let capture = capture_decode_graphs(&model, &pool)?;
+     if capture.ready_mask != (1 << settings.lanes) - 1 { return Err("initial graph capture incomplete".into()); }
+     let capture_s = phase.elapsed().as_secs_f64();
+diff --git a/crates/core/examples/kernel_lab/benchmark.rs b/crates/core/examples/kernel_lab/benchmark.rs
+index c78fa857..6ed1858c 100644
+--- a/crates/core/examples/kernel_lab/benchmark.rs
++++ b/crates/core/examples/kernel_lab/benchmark.rs
+@@ -19,6 +19,25 @@ pub fn run(model: &Model, pool: &SeqPool, settings: &Settings, case: &Value,
+     let request_index=integer(case,"request_index",0)?;
+     ignis_core::lab_trace::context(model,request_index,0,0)?;
+     let start=Instant::now();
++    let prefix = std::env::var("IGNIS_LAB_ACTIVE_VOCAB").ok().map(|s| s.parse::<usize>()).transpose()?;
++    let mut mask = [0u32; 61];
++    let add = |mask: &mut [u32; 61], b: usize| {
++        let before = mask[b/32];
++        mask[b/32] |= 1u32 << (b%32);
++        mask[b/32] != before
++    };
++    let publish = |mask: &[u32; 61]| -> Result<()> {
++        unsafe extern "C" { fn ignis_lab_set_vocab_bits(bits: *const u32) -> i32; }
++        let err = unsafe { ignis_lab_set_vocab_bits(mask.as_ptr()) };
++        if err != 0 { return Err(format!("active mask CUDA error {err}").into()); }
++        Ok(())
++    };
++    if let Some(n) = prefix {
++        if n > 1940 { return Err("oversized active prefix".into()); }
++        for b in 0..n { add(&mut mask, b); }
++        for &t in &prompt { add(&mut mask, t as usize / 128); }
++        publish(&mask)?;
++    }
+     let prefill_range=ignis_core::lab_trace::profile_range("ignis.profile.v1/phase=prefill")?;
+     prefill_program_draw(model,pool,&mut seq,&prompt,0,
+         LaneDraw {sampling:SamplingParams::greedy(),permitted:&[],
+@@ -50,6 +69,11 @@ pub fn run(model: &Model, pool: &SeqPool, settings: &Settings, case: &Value,
+             let result = decode_program_round(model,pool,&mut [&mut seq],&[draw],None)?;
+             (result.into_iter().map(|r|r.token).collect::<Vec<_>>(),0)
+         };
++        if prefix.is_some() {
++            let mut changed = false;
++            for &t in &emitted { changed |= add(&mut mask, t as usize / 128); }
++            if changed { publish(&mask)?; }
++        }
+         drop(round_range);
+         let elapsed = start.elapsed().as_secs_f64()*1000.0;
+         after_step(model,if settings.spec.is_some() {"verify"} else {"decode"},position as u64)?;
+@@ -66,7 +90,7 @@ pub fn run(model: &Model, pool: &SeqPool, settings: &Settings, case: &Value,
+     let decode_ms: f64 = rounds.iter().map(|r|r["ms"].as_f64().unwrap()).sum();
+     Ok(json!({"tier":"forward","id":case["id"],"input_tokens":prompt.len(),
+         "gqa":ignis_core::lab_trace::gqa_status(model),"segments":ignis_core::lab_trace::segment_status(model),
+-        "prefill_ms":prefill_ms,"decode_ms":decode_ms,"rounds":rounds,
++        "final_active_blocks":mask.iter().map(|x| x.count_ones()).sum::<u32>(),"prefill_ms":prefill_ms,"decode_ms":decode_ms,"rounds":rounds,
+         "tokens":tokens,"output_tokens":tokens.len(),"finish_reason":finish,"stop_token":stop_token,
+         "thinking_open_at_end":starts_in_reasoning && thinking.closed_at().is_none(),"logits_sha256":hash(&logits.iter().flat_map(|v|v.to_le_bytes()).collect::<Vec<_>>()),
+         "timing_scope":"synchronous engine calls; capture/IO excluded; no HTTP or scheduler"}))
+diff --git a/kernel/src/dflash2_drafter.cu b/kernel/src/dflash2_drafter.cu
+index 1cbcd322..3a20629d 100644
+--- a/kernel/src/dflash2_drafter.cu
++++ b/kernel/src/dflash2_drafter.cu
+@@ -35,6 +35,11 @@
+ #include <stdexcept>
+ #include <string>
+
++int ignis_lab_active_draft(const ignis_trellis_weight &, const void *, void *,
++                           const ignis_trellis_workspace &, cudaStream_t);
++static thread_local bool lab_active_vocab = false;
++extern "C" void ignis_lab_enable_active_vocab() { lab_active_vocab = true; }
++
+ namespace {
+
+ void draft_linear(const ninfer::Tensor &x, const ninfer::Weight &w, ninfer::Tensor &out, cudaStream_t stream,
+@@ -305,6 +310,10 @@ void ignis_dflash2_propose(ignis_model *model, ignis_seq_pool *pool, std::uint32
+   ninfer::Tensor logits = arena.alloc(ninfer::DType::BF16, {head_rows, draft_columns, 1, 1});
+   if (shortlist) {
+     IGNIS_PROFILE_OP("linear.proposal_head", ninfer::ops::linear(proposal_hidden, model->proposal_head, logits, stream));
++  } else if (lab_active_vocab && batch == 1 && draft_columns == 7 && model->is_trellis_body) {
++    if (ignis_lab_active_draft(model->trellis_head, proposal_hidden.data, logits.data,
++                               model->trellis_workspace, stream))
++      throw std::runtime_error(ignis_trellis_last_error());
+   } else {
+     ignis::trellis_body::output_head(*model, proposal_hidden, logits, stream);
+   }
+diff --git a/kernel/src/trellis_linear.cu b/kernel/src/trellis_linear.cu
+index dd7243be..c8d46881 100644
+--- a/kernel/src/trellis_linear.cu
++++ b/kernel/src/trellis_linear.cu
+@@ -24,6 +24,7 @@
+ #include <vector>
+
+ namespace ignis_tl {
++int launch_active_draft(const DecodeParams &, cudaStream_t);
+
+ namespace {
+ thread_local std::string g_last_error = "no error";
+@@ -271,7 +272,7 @@ int32_t rotate(const char *op, const void *x, const ignis_trellis_weight *const
+
+ int32_t run(const char *op, const DeviceState &st, const ignis_trellis_weight *gate, const ignis_trellis_weight *up,
+             const void *x, uint32_t tokens, void *y, uint32_t ldy, int epilogue, const ignis_trellis_workspace *ws,
+-            void *stream_ptr, int fixed_splits = 0, bool prepared=false, const void *residual_in=nullptr) {
++            void *stream_ptr, int fixed_splits = 0, bool prepared=false, const void *residual_in=nullptr, bool active_draft=false) {
+   const cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+   const int weights = up == nullptr ? 1 : 2;
+   const uint32_t in = gate->in, out = gate->out;
+@@ -313,7 +314,7 @@ int32_t run(const char *op, const DeviceState &st, const ignis_trellis_weight *g
+     p.ldy = static_cast<int>(ldy);
+     p.capped = st.cap != 0;
+     for (int i = 0; i < kMaxSmIds / 32; ++i) p.admit[i] = st.admit[i];
+-    if (launch_decode(st, p, stream) != 0) return -1;
++    if ((active_draft ? launch_active_draft(p, stream) : launch_decode(st, p, stream)) != 0) return -1;
+     return check_launch(op);
+   }
+   // Prefill: one weight at a time through the same rotated-activation region. The SwiGLU's gate
+@@ -430,6 +431,14 @@ extern "C" int32_t ignis_trellis_linear(const ignis_trellis_weight *w, const voi
+   return run(op, st, w, nullptr, x, tokens, y, ldy, epilogue == IGNIS_TRELLIS_ADD ? kAdd : kStore, workspace, stream);
+ }
+
++int ignis_lab_active_draft(const ignis_trellis_weight &w, const void *x, void *y,
++                           const ignis_trellis_workspace &ws, cudaStream_t stream) {
++  DeviceState st;
++  if (require_prepared("active_draft", &st)) return -1;
++  return run("active_draft", st, &w, nullptr, x, 7, y, w.out, kStore, &ws, stream,
++             0, false, nullptr, true);
++}
++
+ extern "C" int32_t ignis_trellis_linear_swiglu(const ignis_trellis_weight *gate, const ignis_trellis_weight *up,
+                                                const void *x, uint32_t tokens, void *h, uint32_t ldh,
+                                                const ignis_trellis_workspace *workspace, void *stream) {
+diff --git a/kernel/src/trellis_linear_decode.cu b/kernel/src/trellis_linear_decode.cu
+index 2e4d910b..39f8c820 100644
+--- a/kernel/src/trellis_linear_decode.cu
++++ b/kernel/src/trellis_linear_decode.cu
+@@ -1,7 +1,23 @@
+ #include "trellis_decode_helpers.cuh"
++#include <math_constants.h>
+
+ namespace ignis_tl {
+ namespace {
++// C1 Kernel Lab experiment: a stable graph reads the current request's bitmap.
++__constant__ uint32_t active_vocab_bits[61];
++__global__ void __launch_bounds__(kThreads, 2) active_draft_kernel(const __grid_constant__ DecodeParams p) {
++  const int cb = blockIdx.x;
++  if (!(active_vocab_bits[cb / 32] & (1u << (cb % 32)))) {
++    // Keep the existing top-k input layout and original token-ID tie break.
++    for (int i = threadIdx.x; i < 7 * 128; i += blockDim.x)
++      p.y[(i / 128) * p.ldy + cb * 128 + i % 128] = __float2bfloat16(-CUDART_INF_F);
++    return;
++  }
++  extern __shared__ __align__(16) unsigned char storage[];
++  __shared__ int last;
++  unit<8, 1>(p, carve(storage, 7), 0, cb, 0, &last);
++}
++
+ template <int NG, bool kWide>
+ __device__ __forceinline__ void decode_unit(const DecodeParams &p, const Smem &s, int ticket, int *last) {
+   const int split = ticket % p.splits;
+@@ -97,6 +113,17 @@ template <bool kWide> cudaError_t launch_one(cudaLaunchConfig_t &cfg, int cls, c
+
+ }  // namespace
+
++extern "C" int ignis_lab_set_vocab_bits(const uint32_t *bits) {
++  return static_cast<int>(cudaMemcpyToSymbol(active_vocab_bits, bits, sizeof(active_vocab_bits)));
++}
++
++int launch_active_draft(const DecodeParams &p, cudaStream_t stream) {
++  if (p.capped || p.splits != 1 || p.tokens != 7 || p.in != 5120 || p.out != 248320 || p.w[0].k2 != 8)
++    return fail("unsupported active draft geometry");
++  active_draft_kernel<<<p.units, kThreads, decode_smem(7), stream>>>(p);
++  return check_launch("active_draft");
++}
++
+ int32_t prepare_joint_decode(){
+     const auto bytes=decode_smem(8);
+     auto err=cudaFuncSetAttribute(joint_decode_kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,static_cast<int>(bytes));
