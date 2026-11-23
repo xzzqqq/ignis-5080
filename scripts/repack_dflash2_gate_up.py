@@ -1,4 +1,4 @@
-"""Losslessly tile the five 27B DFlash2 NVFP4 gate/up tensors for warp loads."""
+"""Losslessly tile selected 27B DFlash2 NVFP4 projections for warp loads."""
 import argparse
 import json
 import os
@@ -31,7 +31,25 @@ def permute(data, rows, cols, inverse=False):
     return result
 
 
-def convert(source, dest):
+SHAPES = {
+    "mlp/gate_up": (34816, 5120),
+    "mlp/down": (5120, 17408),
+    "feature_projection": (5120, 25600),
+    "attention/conv_proj": (1280, 5120),
+    "mlp/conv_proj": (1280, 5120),
+    "attention/query_key_value": (6144, 5120),
+    "attention/output": (5120, 4096),
+}
+
+
+def convert(source, dest, projections=("mlp/gate_up",)):
+    targets = {}
+    for slot in projections:
+        if slot == "feature_projection":
+            targets["dflash2/feature_projection"] = SHAPES[slot]
+        else:
+            for layer in range(5):
+                targets[f"dflash2/layers/{layer}/{slot}"] = SHAPES[slot]
     source_meta = Path(str(source) + '.conversion.json')
     dest_meta = Path(str(dest) + '.conversion.json')
     metadata = json.loads(source_meta.read_text())
@@ -42,7 +60,7 @@ def convert(source, dest):
     metadata.update(recipe_id=dest.stem, layout_conversion={
         'source_artifact': str(source),
         'source_recipe_id': metadata['recipe_id'],
-        'tensors': [f'dflash2/layers/{i}/mlp/gate_up' for i in range(5)],
+        'tensors': sorted(targets),
         'layout': 'nvfp4-mma16-v1',
         'verification': 'per-tensor inverse permutation byte comparison',
     })
@@ -52,15 +70,15 @@ def convert(source, dest):
             raise ValueError('expected NINFER v2')
         size, = struct.unpack('<Q', prefix[8:])
         header = json.loads(src.read(size))
-        targets = {f'dflash2/layers/{i}/mlp/gate_up' for i in range(5)}
         out.write(prefix)
         out.seek(16 + size)
         shutil.copyfileobj(src, out, length=8 << 20)
         for obj in header['objects']:
             if obj['name'] not in targets:
                 continue
+            rows, cols = targets[obj['name']]
             if (obj['format'], obj['layout'], obj['shape'], obj['bytes']) != (
-                'NVFP4', 'blockscale-k16-m128x4-v1', [34816, 5120], 100270084
+                'NVFP4', 'blockscale-k16-m128x4-v1', [rows, cols], rows * cols * 9 // 16 + 4
             ):
                 raise ValueError(obj)
             offset = 16 + size + obj['offset']
@@ -72,7 +90,7 @@ def convert(source, dest):
             out.seek(offset)
             out.write(packed)
             obj['layout'] = 'nvfp4-mma16-v1'
-            targets.remove(obj['name'])
+            del targets[obj['name']]
         if targets:
             raise ValueError(f'missing layers: {targets}')
         encoded = json.dumps(header, separators=(',', ':'), ensure_ascii=False).encode()
@@ -98,5 +116,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)
     parser.add_argument('dest', type=Path)
+    parser.add_argument('--projection', action='append', choices=SHAPES,
+                        help='Projection to convert (repeatable, default: mlp/gate_up; feature_projection is shared across layers)')
     args = parser.parse_args()
-    convert(args.source, args.dest)
+    convert(args.source, args.dest, args.projection or ('mlp/gate_up',))
