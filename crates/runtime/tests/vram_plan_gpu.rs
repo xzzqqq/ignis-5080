@@ -323,7 +323,8 @@ fn the_vision_encoder_workspace_is_the_prefill_scratch_not_beside_it() {
 
 /// GitHub #336 (spec 27b-16gb/04 acceptance 1): every line that scales with
 /// the round follows the load's decode lanes, and at eight lanes the plan is
-/// main 75210360's to the byte. Two shapes: the `rtx5090` profile's 27B
+/// main 4b45c5e6's less the unused hidden staging, to the byte. Two shapes:
+/// the `rtx5090` profile's 27B
 /// (917,504 tokens of hq-e8-2b, DFlash2 at 7, vision with the processor's
 /// 16,384-token item bound, 2,048-token chunks) and a 262,144-token text
 /// load at 1,024; two device and sixteen host retained slots on both, so
@@ -333,7 +334,8 @@ fn the_vision_encoder_workspace_is_the_prefill_scratch_not_beside_it() {
 /// At 1, 2 and 8 lanes the leaf plans, to the byte, what
 /// `ignis_core::lane_lines` computes on the CPU -- sampling, the verify and
 /// the drafter's rounds, the lanes' state and the hq residual window -- which
-/// `cargo test` holds to main's eight-lane bytes and PIANO-VRAM's per-lane
+/// `cargo test` holds to the eight-lane bytes after hidden cleanup and
+/// PIANO-VRAM's per-lane
 /// costs. The decode round is the kernel's alone (that module's doc says
 /// why): pinned here at one and two lanes, and exactly affine in them --
 /// ~10.27 MB a lane beside 1,024 bytes, and vision's rope positions -- so the
@@ -343,8 +345,9 @@ fn the_vision_encoder_workspace_is_the_prefill_scratch_not_beside_it() {
 #[test]
 #[ignore = "GPU profile only: scripts/gpu-profile.ps1"]
 fn the_round_lines_follow_the_loads_lanes() {
-    let path = Path::new(ARTIFACT);
-    if !path.exists() && gpu_profile::skip_or_fail(&format!("artifact absent: {ARTIFACT}")) {
+    let artifact_path = std::env::var("IGNIS_REFERENCE_ARTIFACT").unwrap_or_else(|_| ARTIFACT.into());
+    let path = Path::new(&artifact_path);
+    if !path.exists() && gpu_profile::skip_or_fail(&format!("artifact absent: {artifact_path}")) {
         return;
     }
     let reader = Reader::open(path).unwrap_or_else(|e| panic!("open artifact: {e}"));
@@ -356,7 +359,8 @@ fn the_round_lines_follow_the_loads_lanes() {
         .with_residency(VisionResidency::Device);
     let topology = ignis_core::ModelConfig::qwen38_27b();
 
-    // What main planned at eight lanes, and the decode round at one and two.
+    // The main plan, less 8 × 92,164 bytes of unused hidden staging, and
+    // the unchanged decode round at one and two lanes.
     struct Shape {
         label: &'static str,
         max_context_tokens: u32,
@@ -385,7 +389,7 @@ fn the_round_lines_follow_the_loads_lanes() {
             max_context_tokens: 917_504,
             prefill_chunk_tokens: 2048,
             vision: Some(vision),
-            main: main(908_592_896, 335_544_320, 82_125_920, 152_139_488),
+            main: main(908_592_896, 335_544_320, 82_125_920, 151_402_176),
             decode_graph: [10_266_636, 20_532_248],
         },
         Shape {
@@ -393,7 +397,7 @@ fn the_round_lines_follow_the_loads_lanes() {
             max_context_tokens: 262_144,
             prefill_chunk_tokens: 1024,
             vision: None,
-            main: main(487_837_184, 0, 82_125_888, 152_139_232),
+            main: main(475_254_272, 0, 82_125_888, 151_401_920),
             decode_graph: [10_266_632, 20_532_240],
         },
     ];
@@ -415,7 +419,7 @@ fn the_round_lines_follow_the_loads_lanes() {
             config.plan_reservations(&reader, &plan, &handles).unwrap_or_else(|e| panic!("plan at {lanes} lanes: {e}"))
         };
         let eight = planned_at(N_DECODE_LANES as u32);
-        assert_eq!(eight.reserved, shape.main, "{}: eight lanes are main's plan to the byte", shape.label);
+        assert_eq!(eight.reserved, shape.main, "{}: eight lanes are main's plan less unused hidden staging", shape.label);
         assert_eq!(eight.retained_host_bytes, 16 * HOST_IMAGE_BYTES, "{}", shape.label);
 
         let [decode_one, decode_two] = shape.decode_graph;

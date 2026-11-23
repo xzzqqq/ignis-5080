@@ -775,21 +775,18 @@ std::size_t verify_round_bytes(const ignis_topology &topology, uint32_t window, 
   const auto k = static_cast<std::size_t>(window);
   const std::size_t columns = k + 1;
   const std::size_t lanes = decode_lanes;
-  const auto hidden = static_cast<std::size_t>(topology.hidden);
   const auto vocab = static_cast<std::size_t>(topology.vocab);
   const std::size_t i32 = sizeof(int32_t);
   const std::size_t bf16 = sizeof(std::uint16_t);
 
   std::size_t bytes = 0;
   // anchors, base_positions, extents, valid_columns, lengths,
-  // licensed_counts, accepted, selectors
-  bytes += 8 * lanes * i32;
+  // licensed_counts, accepted
+  bytes += 7 * lanes * i32;
   bytes += k * lanes * i32;                          // drafts
   bytes += (vision ? 5 : 4) * columns * lanes * i32; // verify_ids, positions, target_tokens,
                                                      // licensed_tokens, rope_positions
   bytes += vocab * columns * lanes * bf16;           // logits
-  bytes += hidden * columns * lanes * bf16;          // hidden
-  bytes += hidden * lanes * bf16;                    // selected_hidden
   ninfer::LayoutBuilder builder;
   (void)ninfer::plan_gdn_replay_records(builder, verify_record_spec(topology, window, decode_lanes));
   bytes += builder.finish(kArenaAlign, "GDN replay records");
@@ -821,7 +818,6 @@ std::unique_ptr<IgnisVerifyRound> build_verify_round(const ignis_topology &topol
   const auto k = static_cast<std::int32_t>(window);
   const std::int32_t columns = k + 1;
   const auto lanes = static_cast<std::int32_t>(decode_lanes);
-  const auto hidden = static_cast<std::size_t>(topology.hidden);
   const auto vocab = static_cast<std::int32_t>(topology.vocab);
 
   const auto i32 = [](std::int64_t n) {
@@ -840,12 +836,9 @@ std::unique_ptr<IgnisVerifyRound> build_verify_round(const ignis_topology &topol
   verify->positions = i32(static_cast<std::int64_t>(columns) * lanes);
   verify->target_tokens = i32(static_cast<std::int64_t>(columns) * lanes);
   verify->logits = bf16(static_cast<std::size_t>(vocab) * columns * lanes);
-  verify->hidden = bf16(hidden * columns * lanes);
   verify->licensed_tokens = i32(static_cast<std::int64_t>(columns) * lanes);
   verify->licensed_counts = i32(lanes);
   verify->accepted = i32(lanes);
-  verify->selectors = i32(lanes);
-  verify->selected_hidden = bf16(hidden * lanes);
   if (vision) {
     verify->rope_positions = i32(static_cast<std::int64_t>(columns) * lanes);
   }

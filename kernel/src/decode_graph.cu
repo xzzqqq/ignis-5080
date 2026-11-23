@@ -225,17 +225,6 @@ int32_t ignis_verify_graph_run_batch(ignis_model *model, ignis_seq_pool *pool, u
       }
     }
 
-    // The final residual of every column, kept past the round for the
-    // accepted-hidden selection (the drafter's continuation input, P5-05).
-    cudaError_t err = cudaMemcpyAsync(verify.hidden->p, left.data,
-                                      static_cast<std::size_t>(hidden) * columns * sizeof(uint16_t),
-                                      cudaMemcpyDeviceToDevice, model->stream);
-    if (err != cudaSuccess) {
-      set_error(std::string("ignis_verify_graph: cudaMemcpyAsync(hidden) failed: ") +
-                cudaGetErrorString(err));
-      return -1;
-    }
-
     const ninfer::Tensor norm_weight(const_cast<void *>(model->final_norm.qdata), ninfer::DType::BF16,
                                      {hidden, 1, 1, 1});
     ninfer::Tensor normalized =
