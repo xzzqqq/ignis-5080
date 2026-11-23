@@ -1,40 +1,47 @@
-# RTX 5080 上按块跳读 DFlash2 draft head
+# Skip inactive Trellis blocks in the DFlash2 draft head
 
 - Kind: experiment
 - Status: current
 - Observed: 2026-11-23
 - Last verified: 2026-11-23
-- Scope: RTX 5080、Qwen3.8-27B、Kernel Lab C1 DFlash2 draft head
-- Related: [静态 shortlist A/B](2026-09-24-upstream-quick-wins-ab.md)
+- Scope: RTX 5080, Qwen3.8-27B, single-request DFlash2 decode in Kernel Lab
+- Related: [Static shortlist A/B](2026-09-24-upstream-quick-wins-ab.md), [fork baseline](2026-11-03-coding-agent-5080-baseline.md)
 - Superseded by: none
 
-C1、greedy、NVFP4 KV、每轮最多 7 个草案 token。对同一个 Kernel Lab release 二进制做 full / active / active / full 四次运行。每次新建引擎后先预热，三个固定 coding-agent 请求运行到自然停止；另测一条新编写的标识符改写请求。每轮耗时包括草案、验证、提交和动态掩码维护，吞吐按实际生成 tokens / decode 时间计算。未锁频。
+The full draft and verify heads each read roughly 636 MB of Trellis weights per round. This Kernel Lab prototype reduces the draft read by selecting output blocks from the existing head. It enables the first 256 blocks plus every 128-row block represented in the prompt or committed output. Verify still scans all 1,940 blocks.
 
-| 请求 | Active 最终块数 / 1940 | 输出 tokens | 轮数 full → active | 每轮节省 ms，两对 A/B | decode tok/s 提升，两对 A/B |
-|---|---:|---:|---:|---:|---:|
-| Astropy | 422 | 1108 | 212 → 215 | 0.494 / 0.537 | 1.19% / 1.41% |
-| Django | 544 | 873 | 172 → 173 | 0.471 / 0.489 | 1.88% / 1.97% |
-| SymPy | 432 | 659 | 126 → 126 | 0.526 / 0.537 | 2.80% / 2.86% |
-| 合成标识符改写 | 271 | 304 | 39 → 39 | 0.579 / 0.596 | 3.15% / 3.24% |
+Each CUDA thread block handles one output block. An inactive block writes negative infinity to its logit positions and exits before loading its weights. Active blocks use the original rotation and token IDs. The existing top-16 selector reads the dense output. The prototype uses a single device-wide 244-byte bitmap, which the host uploads when a newly committed token opens a block. It requires one active request and a single copy of the head weights.
 
-Active 启用 ID 最小的 256 个块，加上当前 prompt 和本轮之前所有已提交输出涉及的原始块，保留一份 Trellis 权重。每个输出块仍对应一个 CUDA CTA；未激活的 CTA 将原位置 logits 写为负无穷后退出，沿用完整词表的 top-16。每次发现新块，Lab 在本轮计时内上传 244 字节位图。该原型只接入单活跃请求的 Lab 实验；位图是整个设备上共享的实验状态。
+## Decode results
 
-四个请求，两对 A/B 的 prefill logits 哈希、完整输出 token 序列、停止原因和停止 token 各自相同。三条真实请求每组共产出 2,640 个 token。full 两次 decode 合计用时分别为 9.890 / 9.905 秒，active 为 9.714 / 9.715 秒。两组取均值后按总 token 数和总时间折算，吞吐提升 1.89%。此次复测观察范围不是置信区间。
+The same release binary ran full / active / active / full. Each engine received a warmup. The three fixed coding requests ran to their natural stop under greedy decoding with NVFP4 KV and seven draft tokens. Clocks were unlocked. Kernel Lab decode time includes draft, verify, commit and bitmap updates. Rates below pool output tokens and decode time over the two runs in each arm.
 
-## 数值与块数
+| Request | Final active blocks | Output tokens | Rounds, full → active | ms/round, full → active | Decode tok/s, full → active | Throughput gain, paired runs |
+|---|---:|---:|---:|---:|---:|---:|
+| Astropy | 422 | 1,108 | 212 → 215 | 19.377 → 18.861 | 269.73 → 273.24 | +1.19% / +1.41% |
+| Django | 544 | 873 | 172 → 173 | 19.519 → 19.039 | 260.03 → 265.04 | +1.88% / +1.97% |
+| SymPy | 432 | 659 | 126 → 126 | 19.304 → 18.772 | 270.94 → 278.61 | +2.80% / +2.86% |
 
-真实 K4 权重，七列确定性合成 BF16 输入。对七张掩码逐元素核对每张掩码的 1,738,240 个输出：保留行与完整路径的 BF16 位模式一致，屏蔽行均为负无穷。独立 head 投影测试（含输入旋转）中，full 为 0.706–0.708 ms；421、541、431 块对应 0.174、0.225、0.175 ms。1,850 块为 0.681 ms，全开 1,940 块为 0.709 ms，对应 full 为 0.707 ms。该单点小差距不构成精确的切换阈值。另用全开模式跑 Astropy 128 个输出 token，与 full 的对应前缀、前 28 轮提交数均一致。
+The three requests produced 2,640 tokens per run. Full-head decode took 9.890 and 9.905 s, compared with 9.714 and 9.715 s for the active head, a **1.89% combined throughput gain**. Astropy required three additional rounds and Django one. A separate synthetic identifier-rewrite request produced 304 tokens in 39 rounds in both arms, with 271 active blocks and throughput gains of 3.15% and 3.24%. Both pairs matched the full-head prefill logits hash, output token sequence, finish reason and stop token on all four requests.
 
-## 取消常开块
+### Comparison with the fork baseline
 
-只用 prompt 块与已提交输出块时，Astropy、SymPy 与合成改写请求仍生成相同 token。Django 从第 380 个输出 token 开始分叉，full 在 873 tokens 正常停止，新轨迹在 8,192 tokens 达到长度上限。独立重启并复跑该消融，8,192 个输出 token 及全部 1,277 轮提交长度逐项一致。两条轨迹在第一轮的提交长度就已不同。分叉 token 在 full 轨迹中位于从输出下标 373 开始的这一轮末尾，在只用上下文块的轨迹中位于从下标 379 开始的新轮首位。两个被选中的 token ID（81、25543）对应的块当时都已开启。未测分叉位置完整 target logits 及状态差值，原因尚未定位。该配置的 tok/s 不代表同一输出的加速。
+| Request | Nov 3 service decode tok/s | Active-head Lab decode tok/s | Change since baseline |
+|---|---:|---:|---:|
+| Astropy | 207.658 | 273.24 | +31.58% |
+| Django | 184.816 | 265.04 | +43.41% |
+| SymPy | 189.942 | 278.61 | +46.68% |
 
-## 192 与 256 个常开块
+The November 3 service measured the same request fixtures with HQ KV and produced 876, 954 and 1,268 tokens respectively. The current measurements use NVFP4 KV and Kernel Lab engine timing. These historical ratios include intervening optimizations, configuration changes and different output trajectories. The full/active pairs above isolate the draft-head change. [Archived service measurements](2026-11-03-coding-agent-5080-baseline.md#decode-results)
 
-用同一二进制、相同请求和预热，按 192 / 256 / 256 / 192 的顺序各启动一次引擎。四项请求在两个配置下逐 token 输出、停止原因、停止 token、prefill logits 哈希和逐轮提交数一致。三条真实请求的 192 配置最终激活 405、534、412 块；256 配置分别为 422、544、432 块。三项合计每次输出 2,640 tokens，192 相对 256 的吞吐变化为 +0.141% / +0.002%，两对合计 +0.072%。保持 256 作为后续实验的基线。
+## Projection timing and numerical checks
 
-若继续选择常开块，可在独立任务集上统计每轮开始前上下文尚未覆盖、随后出现在接受前缀中的块，按请求汇总。冻结名单后，再用留出的仓库和会话比较相同输出的总 decode 耗时与每轮提交数。
+The isolated projection test used real K4 weights and seven columns of deterministic synthetic BF16 activations. For each of seven masks it checked all 1,738,240 output words. Every retained logit matched the full-head BF16 bits and every masked logit was negative infinity. The full projection took about 0.707 ms. The three initial request masks with 421, 541 and 431 active blocks took 0.174, 0.225 and 0.175 ms respectively. At 1,850 blocks it took 0.681 ms. With all blocks enabled it took 0.709 ms against 0.707 ms for full. A separate all-blocks run reproduced the first 128 Astropy output tokens and the first 28 rounds' emission counts.
 
-## 范围
+## Controls and scope
 
-这个实验测量单活跃 lane 的引擎前向；未覆盖 128K、双活跃 lane、采样、请求恢复、服务端到端或发布验收。[实验代码和复现步骤](artifacts/2026-11-23-draft-active-vocab/README.md) · [逐请求结果](artifacts/2026-11-23-draft-active-vocab/forward.csv) · [独立 head 测量](artifacts/2026-11-23-draft-active-vocab/head-results.txt)
+With 192 always-active blocks, the three requests ended at 405, 534 and 412 active blocks. In a 192 / 256 / 256 / 192 comparison, all four requests matched in output tokens, per-round emission counts, prefill logits hash, finish reason and stop token. The three coding requests combined gained 0.141% and 0.002% in the two pairs relative to 256, or 0.072% pooled.
+
+With only prompt and committed-output blocks, Django diverged at output token 380. The full head stopped at 873 tokens, while the context-only run reached its 8,192-token cap. An independent process reproduced all 8,192 tokens and all 1,277 per-round emission counts. The runs already differed in emission count on round one. Token 380 fell at the end of a full-head round and at the start of a context-only round. Both selected IDs (81 and 25,543) belonged to active blocks at the divergence. The target logits and state difference at that position were not measured. The other three requests reproduced their full-head tokens.
+
+Coverage is limited to C1 greedy Kernel Lab execution. Service deployment, two active lanes, sampling, request restoration and 128K context remain untested. [Prototype and reproduction](artifacts/2026-11-23-draft-active-vocab/README.md) · [Per-request measurements](artifacts/2026-11-23-draft-active-vocab/forward.csv) · [Projection measurements](artifacts/2026-11-23-draft-active-vocab/head-results.txt)
