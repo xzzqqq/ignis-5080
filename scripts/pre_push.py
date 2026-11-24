@@ -163,7 +163,15 @@ def check(root, location, lines):
     binary = scanner(root)
     with tempfile.TemporaryDirectory(prefix="ignis-pre-push-") as temporary:
         directory = Path(temporary)
-        (directory / "rules.toml").write_text("[extend]\nuseDefault = true\n")
+        (directory / "rules.toml").write_text(
+            '[extend]\nuseDefault = true\n\n'
+            '[[allowlists]]\n'
+            'description = "Frozen coding_agent_48 manifest tokenizer SHA-256 digest"\n'
+            'condition = "AND"\n'
+            'paths = [\'^crates/bench/fixtures/coding_agent_48/manifest\\.json$\']\n'
+            'regexTarget = "line"\n'
+            'regexes = [\'"tokenizer_sha256": "[0-9a-f]{64}"\']\n'
+        )
         (directory / "empty.ignore").write_text("")
         if commits:
             scan(root, binary, directory, "git",

@@ -162,6 +162,17 @@ class PrePushTest(unittest.TestCase):
                                 cwd=self.root, input=entry, capture_output=True, text=True)
         self.assert_blocked(result, "fetch destination history")
 
+    def test_coding_agent_48_manifest_tokenizer_sha256_is_allowed_but_secrets_stay_blocked(self):
+        manifest = "crates/bench/fixtures/coding_agent_48/manifest.json"
+        digest = hashlib.sha256(b"tokenizer fixture").hexdigest()
+        head = self.commit(manifest, '{\n  "tokenizer_sha256": "' + digest + '"\n}\n')
+        result = self.git("push", "origin", "main")
+        self.assertEqual(self.remote_head(), head)
+        self.assertIn("passed", result.stderr)
+        self.base = head
+        self.commit(manifest, '{\n  "tokenizer_sha256": "' + digest + '",\n  "api_key": "' + FAKE_TOKEN + '"\n}\n')
+        self.assert_blocked(self.git("push", "origin", "main", check=False), "github-pat")
+
 
 if __name__ == "__main__":
     unittest.main()
