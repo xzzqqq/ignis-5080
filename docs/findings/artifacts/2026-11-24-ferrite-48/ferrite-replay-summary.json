@@ -1,0 +1,83 @@
+{
+  "service_commit": "8495f3a04943236e48e66516873aa2c12643bdea",
+  "client_commit": "e7aefef8b0a6ad59730f3ee1e08b1e3d7322b801",
+  "reference": "https://github.com/BHCC2025/ferrite/blob/e7aefef8b0a6ad59730f3ee1e08b1e3d7322b801/docs/rtx-5080.md#results",
+  "method": "Three sequential C1 samples, greedy, thinking off. Ferrite client using Ignis model ID, pinned CPython 3.12.3 sources and serial edit dispatch. Rates exclude time to first content; Ferrite results are from their report.",
+  "results": {
+    "LRU": {
+      "rates": [
+        319.8,
+        323.1,
+        326.9
+      ],
+      "output_tokens": [
+        500,
+        500,
+        500
+      ],
+      "median": 323.1,
+      "ferrite": 298,
+      "delta_percent": 8.422818791946307
+    },
+    "rename 500": {
+      "rates": [
+        283.1,
+        283.0,
+        283.0
+      ],
+      "output_tokens": [
+        500,
+        500,
+        500
+      ],
+      "median": 283.0,
+      "ferrite": 692,
+      "delta_percent": -59.104046242774565
+    },
+    "type hints 500": {
+      "rates": [
+        403.5,
+        403.5,
+        403.4
+      ],
+      "output_tokens": [
+        500,
+        500,
+        500
+      ],
+      "median": 403.5,
+      "ferrite": 411,
+      "delta_percent": -1.8248175182481785
+    },
+    "rename 1500": {
+      "rates": [
+        291.0,
+        290.9,
+        290.9
+      ],
+      "output_tokens": [
+        1500,
+        1500,
+        1500
+      ],
+      "median": 290.9,
+      "ferrite": 784,
+      "delta_percent": -62.89540816326531
+    },
+    "type hints 1500": {
+      "rates": [
+        418.0,
+        418.0,
+        418.0
+      ],
+      "output_tokens": [
+        1500,
+        1500,
+        1500
+      ],
+      "median": 418.0,
+      "ferrite": 395,
+      "delta_percent": 5.822784810126591
+    }
+  }
+}

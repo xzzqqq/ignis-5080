@@ -1,0 +1,987 @@
+{
+  "schema": "ignis-coding-agent-decode-manifest/1",
+  "baseline_commit": "e25780e21b240bca965b17bc6dbd600f170744e3",
+  "submission": "20250522_sweagent_claude-4-sonnet-20250514",
+  "experiments_revision": "40f164d5b8f1d249bf95a6df8b74b577fd8e519d",
+  "seed": "ignis-5080-coding-agent-48-v1",
+  "agent_version": "1.1.0",
+  "reconstruction_revision": "0f3acafacabc0def8cc76b4e48acb4b6cf302cb9",
+  "historical_tasks_excluded": [
+    "astropy__astropy-12907",
+    "django__django-10097",
+    "sympy__sympy-11618"
+  ],
+  "pool": {
+    "archived_tasks": 500,
+    "remaining_tasks": 497,
+    "tasks_with_eligible_queries": 497,
+    "eligible_queries": 16451,
+    "candidate_range": [
+      1864,
+      140640
+    ],
+    "candidate_quartile_upper_bounds": [
+      13344,
+      21961,
+      32475
+    ],
+    "eligible_task_counts_by_cell": {
+      "Q1/explore": 497,
+      "Q1/edit": 103,
+      "Q1/debug": 279,
+      "Q2/explore": 421,
+      "Q2/edit": 249,
+      "Q2/debug": 429,
+      "Q3/explore": 326,
+      "Q3/edit": 230,
+      "Q3/debug": 463,
+      "Q4/explore": 204,
+      "Q4/edit": 191,
+      "Q4/debug": 407
+    }
+  },
+  "tokenizer_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+  "chat_template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+  "hash_convention": "sha256 over encoded({messages, tools}) as written by scripts/extract_coding_agent.py, before coding-agent protocol overrides",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/sweagent/agent/models.py",
+      "local_file": "sweagent_agent_models.py",
+      "sha256": "ffce8e513d2ce9967a95acfb6c67c7654a05bbd0c9942ace8e779b9084d47596"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/sweagent/tools/tools.py",
+      "local_file": "sweagent_tools_tools.py",
+      "sha256": "970b3ca5e01abe2e9cdae42f72465aad81dfbac317b85c233f22c22dfb8ab00b"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/sweagent/tools/commands.py",
+      "local_file": "sweagent_tools_commands.py",
+      "sha256": "c8896228d54eb9d466d3fe5042e557dd93f7d7117419a299c0b406c8bcc60dff"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/tools/edit_anthropic/config.yaml",
+      "local_file": "tools_edit_anthropic_config.yaml",
+      "sha256": "f01b59da4df1c25ab2ee3b1284efe4025c0a999e2f6a3a9ab2930a499e04ea09"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/SWE-agent/SWE-agent/0f3acafacabc0def8cc76b4e48acb4b6cf302cb9/tools/review_on_submit_m/config.yaml",
+      "local_file": "tools_review_on_submit_m_config.yaml",
+      "sha256": "d2fbb69ebfa3b33bdff43dd6b78df1d29c6a2e562eefe0a32ce35058f2a14031"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/mwaskom__seaborn-3187/mwaskom__seaborn-3187.traj",
+      "local_file": "mwaskom__seaborn-3187.traj",
+      "sha256": "eb2264116a3a50e7ee7d1052fe4b77e36d3f9c5fe85f2fc70ce80ece75fb35d1"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/mwaskom__seaborn-3069/mwaskom__seaborn-3069.traj",
+      "local_file": "mwaskom__seaborn-3069.traj",
+      "sha256": "7af49b5fc95ad2968916f0f916c341e68e411ed67fb8bb91180543526cf482c3"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/scikit-learn__scikit-learn-14087/scikit-learn__scikit-learn-14087.traj",
+      "local_file": "scikit-learn__scikit-learn-14087.traj",
+      "sha256": "41a61134787bf7b2ac7bf906c09564c8bf9ea9b1af4a15177ec1b83f152ed505"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/django__django-16950/django__django-16950.traj",
+      "local_file": "django__django-16950.traj",
+      "sha256": "5223df46e718c05dbd8dfef664c558d6751db2807c2a52517f23ae55afd4bc57"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/django__django-11099/django__django-11099.traj",
+      "local_file": "django__django-11099.traj",
+      "sha256": "5e727fff25fe823d515637c839ff94a4ca7965e7dc96c40819e8c6650ffe5719"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/astropy__astropy-7606/astropy__astropy-7606.traj",
+      "local_file": "astropy__astropy-7606.traj",
+      "sha256": "e2e2eef99a129cf6e77da75bfb3c9dab0cc4217ae93faab246c7d5c7cf5867a3"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/matplotlib__matplotlib-24970/matplotlib__matplotlib-24970.traj",
+      "local_file": "matplotlib__matplotlib-24970.traj",
+      "sha256": "c61237932f35c14f43763892e7b15b899e5f1654d17976a62891458ecf8207a1"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pytest-dev__pytest-6202/pytest-dev__pytest-6202.traj",
+      "local_file": "pytest-dev__pytest-6202.traj",
+      "sha256": "1694f2750161a422f181e1dd7099fbfb57c587024417bafebea2279d0c9316fa"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/astropy__astropy-8872/astropy__astropy-8872.traj",
+      "local_file": "astropy__astropy-8872.traj",
+      "sha256": "fd75bcd0328b364928e28f707a89f1c9c9cc9c1cd7b0725cc0317ed0e412369f"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/scikit-learn__scikit-learn-25973/scikit-learn__scikit-learn-25973.traj",
+      "local_file": "scikit-learn__scikit-learn-25973.traj",
+      "sha256": "26217de831b1c82f6f575fae4e7e9499eed9c331404a96e2e2bb9725aba79119"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pytest-dev__pytest-10051/pytest-dev__pytest-10051.traj",
+      "local_file": "pytest-dev__pytest-10051.traj",
+      "sha256": "0fb15ed989a96ae2a5eed8050dd3946e82833343ac90619b9ed566e7dad613b4"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pylint-dev__pylint-7277/pylint-dev__pylint-7277.traj",
+      "local_file": "pylint-dev__pylint-7277.traj",
+      "sha256": "d4855455f869a0f4bd06e72876c4a0ea37f1c41e4dbb0f713298bf4a84669cff"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pydata__xarray-4687/pydata__xarray-4687.traj",
+      "local_file": "pydata__xarray-4687.traj",
+      "sha256": "66ea462f5c4b1f1d5f913b643179d11566c84d9b515cfb09d49451c912daae36"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pytest-dev__pytest-10081/pytest-dev__pytest-10081.traj",
+      "local_file": "pytest-dev__pytest-10081.traj",
+      "sha256": "753c8a81b0bfcd77f9bbd0b238924a4b89936896fa615bcdf22a22a81b068f97"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/psf__requests-1921/psf__requests-1921.traj",
+      "local_file": "psf__requests-1921.traj",
+      "sha256": "d5faffeb480f4d5f12ac78d1439bec892578037c1075c08c811475d650124f2a"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sympy__sympy-14248/sympy__sympy-14248.traj",
+      "local_file": "sympy__sympy-14248.traj",
+      "sha256": "1c509bc6030942422b8788761df8e20b25881e60030383cfbd36dc551bb7e277"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pytest-dev__pytest-7324/pytest-dev__pytest-7324.traj",
+      "local_file": "pytest-dev__pytest-7324.traj",
+      "sha256": "bdf39394be8231c2d0d017b7f90b70d26a82eca9dbaa4a70fe99140513b2f4cb"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/matplotlib__matplotlib-25332/matplotlib__matplotlib-25332.traj",
+      "local_file": "matplotlib__matplotlib-25332.traj",
+      "sha256": "f6a1582215d8e268148e45d39bc9d396d22a049e96df7e8e0c51ec4f16d130f7"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pydata__xarray-7233/pydata__xarray-7233.traj",
+      "local_file": "pydata__xarray-7233.traj",
+      "sha256": "45ecf3f7e623f62ca8ee9e8e85d7ae0108c299235ea93f2960e10662de5e3628"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sphinx-doc__sphinx-9320/sphinx-doc__sphinx-9320.traj",
+      "local_file": "sphinx-doc__sphinx-9320.traj",
+      "sha256": "73ef64a033feb3cd0364642ac6e69606ccdae831c6456471ade50ae8963b7d9e"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/matplotlib__matplotlib-24627/matplotlib__matplotlib-24627.traj",
+      "local_file": "matplotlib__matplotlib-24627.traj",
+      "sha256": "51ba523309a60273be2552639d1abd67ff6f331ba7f87ecd96f34300d153d2d9"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/psf__requests-6028/psf__requests-6028.traj",
+      "local_file": "psf__requests-6028.traj",
+      "sha256": "7f5160b675a61c3b12440e8a56a74519396251656904ff33c3ff90693dc48f6f"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/django__django-14017/django__django-14017.traj",
+      "local_file": "django__django-14017.traj",
+      "sha256": "9d69749f1b8d7106677eae06f21f7d206f9d3434de8125e4996826c300081958"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pydata__xarray-6992/pydata__xarray-6992.traj",
+      "local_file": "pydata__xarray-6992.traj",
+      "sha256": "e70372e4543fb84b33babf9ccb4d4239023ddb72991de29ea986384cde1077b9"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pylint-dev__pylint-6528/pylint-dev__pylint-6528.traj",
+      "local_file": "pylint-dev__pylint-6528.traj",
+      "sha256": "91536a4a0734ab801cf6f6c89c444bf2fc156461db6a45e7ee41e8239515d505"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pydata__xarray-3677/pydata__xarray-3677.traj",
+      "local_file": "pydata__xarray-3677.traj",
+      "sha256": "b21c87f179026344a239d27735d46c90cca679ae20ca9ec520230c201be53047"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/scikit-learn__scikit-learn-14629/scikit-learn__scikit-learn-14629.traj",
+      "local_file": "scikit-learn__scikit-learn-14629.traj",
+      "sha256": "aafe99f255a553d6111c60ec2163e4519fc2ca8448bc973ff01343f6598ad605"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/psf__requests-1724/psf__requests-1724.traj",
+      "local_file": "psf__requests-1724.traj",
+      "sha256": "646dcd6492adebb0a0d086c038f1f5eda1283427ec0685e75a0430dc688ec685"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/scikit-learn__scikit-learn-25102/scikit-learn__scikit-learn-25102.traj",
+      "local_file": "scikit-learn__scikit-learn-25102.traj",
+      "sha256": "f00a79eba73bfa54248c3d1349c211921c9c397764d86130293bd7576342775f"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sympy__sympy-12096/sympy__sympy-12096.traj",
+      "local_file": "sympy__sympy-12096.traj",
+      "sha256": "72bafd58a1bb37ecc6be5052c92971593f9fb430b50b7fcba5217c7188209ae1"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sphinx-doc__sphinx-8593/sphinx-doc__sphinx-8593.traj",
+      "local_file": "sphinx-doc__sphinx-8593.traj",
+      "sha256": "a425e3b4979b6ea5d6913a97a293b088737fcae66afc2fe739a31c3ccc267d6f"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pydata__xarray-7393/pydata__xarray-7393.traj",
+      "local_file": "pydata__xarray-7393.traj",
+      "sha256": "7187223dcd3f315b9b80fcabb815a0dafd7933707813f2e0c00862547408613e"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pallets__flask-5014/pallets__flask-5014.traj",
+      "local_file": "pallets__flask-5014.traj",
+      "sha256": "cee3b2328a782dbde424f2564c15e5daaedf5475b9ecbfc3093099c49c8af267"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/django__django-14311/django__django-14311.traj",
+      "local_file": "django__django-14311.traj",
+      "sha256": "91ab5080a9b03af6dc2480a9fc515dc29a8fdf14d48896d0eebd9fd716d3c7b1"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sympy__sympy-15875/sympy__sympy-15875.traj",
+      "local_file": "sympy__sympy-15875.traj",
+      "sha256": "74934cb64613a7dea35f6a4738a538169b8b864f1935921ef7d4574075da5523"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/astropy__astropy-7166/astropy__astropy-7166.traj",
+      "local_file": "astropy__astropy-7166.traj",
+      "sha256": "14cc118e35d92c6627558ea66eab6b2a7a5270b1641c82a77f37a34612074cbe"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sympy__sympy-13091/sympy__sympy-13091.traj",
+      "local_file": "sympy__sympy-13091.traj",
+      "sha256": "b372fe49f52847818b193887bef9f81c112d0b743a568d758b2dfda6e7a0d70b"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sphinx-doc__sphinx-11445/sphinx-doc__sphinx-11445.traj",
+      "local_file": "sphinx-doc__sphinx-11445.traj",
+      "sha256": "7220d1d9e1b8f384d3db05298898166d5c8efe731fa652b89a4dd0dd7e6fb69b"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pylint-dev__pylint-4551/pylint-dev__pylint-4551.traj",
+      "local_file": "pylint-dev__pylint-4551.traj",
+      "sha256": "5515e52fe050992108f1b8d4e2bcc4fb3f124e5b74b2d6cc9cad9cc4cbdab489"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/astropy__astropy-13977/astropy__astropy-13977.traj",
+      "local_file": "astropy__astropy-13977.traj",
+      "sha256": "2315fb5adfba3899b323f18142eac7ebeed7950f2e76383d6d00dbcf1a94aa44"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sphinx-doc__sphinx-7590/sphinx-doc__sphinx-7590.traj",
+      "local_file": "sphinx-doc__sphinx-7590.traj",
+      "sha256": "a3206260bc68623cdf1a62f0f4fc6e596cc06dc79c8030b285d2dbc9b5d50bb0"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/django__django-11138/django__django-11138.traj",
+      "local_file": "django__django-11138.traj",
+      "sha256": "9e225f6847a1dada040b588f872cb9d6847f4af05d838b5b9639f2ba632f89a8"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sympy__sympy-13551/sympy__sympy-13551.traj",
+      "local_file": "sympy__sympy-13551.traj",
+      "sha256": "61432d3fa9e249509ae190e04dd0bc7c8e50043c789cfd8f537dd6c80feaca91"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/matplotlib__matplotlib-23299/matplotlib__matplotlib-23299.traj",
+      "local_file": "matplotlib__matplotlib-23299.traj",
+      "sha256": "87285cf161a5f4cf2fa913086ab52752fa1180d1e0031d9b10cf7d768a8b5bf0"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/psf__requests-1142/psf__requests-1142.traj",
+      "local_file": "psf__requests-1142.traj",
+      "sha256": "73b8d178f66b3d1520fe3c869205849f1dbd38a718296c93c09ea66ce24c7f28"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/pylint-dev__pylint-4970/pylint-dev__pylint-4970.traj",
+      "local_file": "pylint-dev__pylint-4970.traj",
+      "sha256": "1dc412c13c4f86f13bcf1cbf1b374d7ae0e0011c11b26275b9841ae17e630f22"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/astropy__astropy-14096/astropy__astropy-14096.traj",
+      "local_file": "astropy__astropy-14096.traj",
+      "sha256": "c8eac25b3848096264bd5f14898870292a3df8c40c024516bf7b9345e1ad0964"
+    },
+    {
+      "url": "https://swe-bench-submissions.s3.amazonaws.com/verified/20250522_sweagent_claude-4-sonnet-20250514/trajs/sphinx-doc__sphinx-7748/sphinx-doc__sphinx-7748.traj",
+      "local_file": "sphinx-doc__sphinx-7748.traj",
+      "sha256": "ab2abaeba06a4207ab121fa3c8f65ceea1cebfce588930e45ed52541059db0d2"
+    }
+  ],
+  "fixtures": [
+    {
+      "task_id": "mwaskom__seaborn-3187",
+      "repository": "mwaskom/seaborn",
+      "task_revision": "22cdfb0c93f8ec78492d87edb810f10cb7f57a31",
+      "query_index": 1,
+      "quartile": 1,
+      "stage": "explore",
+      "selection_reason": "Viewed /testbed; the tool returned a directory listing.",
+      "input_tokens": 2978,
+      "pilot": true,
+      "message_count": 4,
+      "file": "mwaskom__seaborn-3187.json",
+      "sha256": "d545c365014525e6e4bdabcfd1a8f928845fef8409dced834e7fe3bb10889d8c"
+    },
+    {
+      "task_id": "mwaskom__seaborn-3069",
+      "repository": "mwaskom/seaborn",
+      "task_revision": "54cab15bdacfaa05a88fbc5502a5b322d99f148e",
+      "query_index": 2,
+      "quartile": 1,
+      "stage": "explore",
+      "selection_reason": "Viewed seaborn/_core; the tool returned a directory listing.",
+      "input_tokens": 3042,
+      "pilot": false,
+      "message_count": 6,
+      "file": "mwaskom__seaborn-3069.json",
+      "sha256": "9a21005f605e8269a723c242d4bd20e5642ba94918514f9f747d713a1e6c1f46"
+    },
+    {
+      "task_id": "scikit-learn__scikit-learn-14087",
+      "repository": "scikit-learn/scikit-learn",
+      "task_revision": "a5743ed36fbd3fbc8e351bdab16561fbfca7dfa1",
+      "query_index": 2,
+      "quartile": 1,
+      "stage": "explore",
+      "selection_reason": "Viewed sklearn/linear_model; the tool returned a directory listing.",
+      "input_tokens": 4724,
+      "pilot": false,
+      "message_count": 6,
+      "file": "scikit-learn__scikit-learn-14087.json",
+      "sha256": "a52b2d680ef9dc4fa745f3e9ca15c89752e759e39d8fa551cfad4a9936249408"
+    },
+    {
+      "task_id": "django__django-16950",
+      "repository": "django/django",
+      "task_revision": "f64fd47a7627ed6ffe2df2a32ded6ee528a784eb",
+      "query_index": 8,
+      "quartile": 1,
+      "stage": "explore",
+      "selection_reason": "Viewed django/contrib/admin/options.py; the tool returned file contents.",
+      "input_tokens": 10180,
+      "pilot": false,
+      "message_count": 18,
+      "file": "django__django-16950.json",
+      "sha256": "a64cd3abf2b6d51c20ed4303f46fbf3675fe2c8db0c535e65bf1fb02f4241e1e"
+    },
+    {
+      "task_id": "django__django-11099",
+      "repository": "django/django",
+      "task_revision": "d26b2424437dabeeca94d7900b37d2df4410da0c",
+      "query_index": 7,
+      "quartile": 1,
+      "stage": "edit",
+      "selection_reason": "str_replace on django/contrib/auth/validators.py; the editor confirmed the change.",
+      "input_tokens": 8489,
+      "pilot": true,
+      "message_count": 16,
+      "file": "django__django-11099.json",
+      "sha256": "35f8758debcb8578601ab0293445937e0a365702ca1d8f67cf89ccfbec922fb3"
+    },
+    {
+      "task_id": "astropy__astropy-7606",
+      "repository": "astropy/astropy",
+      "task_revision": "3cedd79e6c121910220f8e6df77c54a0b344ea94",
+      "query_index": 17,
+      "quartile": 1,
+      "stage": "edit",
+      "selection_reason": "str_replace on astropy/units/core.py; the editor confirmed the change.",
+      "input_tokens": 9790,
+      "pilot": false,
+      "message_count": 36,
+      "file": "astropy__astropy-7606.json",
+      "sha256": "0fc45a52a967c120ef4ae135b108c7a581d17a04c45c27bc8d3e9a241aa01a99"
+    },
+    {
+      "task_id": "matplotlib__matplotlib-24970",
+      "repository": "matplotlib/matplotlib",
+      "task_revision": "a3011dfd1aaa2487cce8aa7369475533133ef777",
+      "query_index": 8,
+      "quartile": 1,
+      "stage": "edit",
+      "selection_reason": "str_replace on lib/matplotlib/colors.py; the editor confirmed the change.",
+      "input_tokens": 7456,
+      "pilot": false,
+      "message_count": 18,
+      "file": "matplotlib__matplotlib-24970.json",
+      "sha256": "4ab085055c1e28c95c56ad45c46b026e139d8e9ca7108e50c5bc6a68e104181f"
+    },
+    {
+      "task_id": "pytest-dev__pytest-6202",
+      "repository": "pytest-dev/pytest",
+      "task_revision": "3a668ea6ff24b0c8f00498c3144c63bac561d925",
+      "query_index": 20,
+      "quartile": 1,
+      "stage": "edit",
+      "selection_reason": "str_replace on src/_pytest/python.py; the editor confirmed the change.",
+      "input_tokens": 11404,
+      "pilot": false,
+      "message_count": 42,
+      "file": "pytest-dev__pytest-6202.json",
+      "sha256": "475fde58d9793df89e7f399d26a6a126195e62ba3f8be262422ec440a135a27c"
+    },
+    {
+      "task_id": "astropy__astropy-8872",
+      "repository": "astropy/astropy",
+      "task_revision": "b750a0e6ee76fb6b8a099a4d16ec51977be46bf6",
+      "query_index": 12,
+      "quartile": 1,
+      "stage": "debug",
+      "selection_reason": "Ran python debug_can_cast.py; prior tool output begins 'Testing np.can_cast behavior:'.",
+      "input_tokens": 11201,
+      "pilot": true,
+      "message_count": 26,
+      "file": "astropy__astropy-8872.json",
+      "sha256": "044706d2c7a44318e961395c47a9d74ab7d8a7340a5e89d23d63411fa9c40c06"
+    },
+    {
+      "task_id": "scikit-learn__scikit-learn-25973",
+      "repository": "scikit-learn/scikit-learn",
+      "task_revision": "10dbc142bd17ccf7bd38eec2ac04b52ce0d1009e",
+      "query_index": 8,
+      "quartile": 1,
+      "stage": "debug",
+      "selection_reason": "Ran python reproduce_error.py; prior tool output begins 'Creating SequentialFeatureSelector...'.",
+      "input_tokens": 10939,
+      "pilot": false,
+      "message_count": 18,
+      "file": "scikit-learn__scikit-learn-25973.json",
+      "sha256": "3964bd2a7d1ab30e9466330d3fbf1d73a22b58d64bbe9e308749a892bd3f5ffb"
+    },
+    {
+      "task_id": "pytest-dev__pytest-10051",
+      "repository": "pytest-dev/pytest",
+      "task_revision": "aa55975c7d3f6c9f6d7f68accc41bb7cadf0eb9a",
+      "query_index": 16,
+      "quartile": 1,
+      "stage": "debug",
+      "selection_reason": "Ran python reproduce_issue.py; prior tool output begins '============================= test session starts =============================='.",
+      "input_tokens": 13318,
+      "pilot": false,
+      "message_count": 34,
+      "file": "pytest-dev__pytest-10051.json",
+      "sha256": "2e54931be52b868ff656c0978f792cf7311e7a79372eb14117879a92e6961999"
+    },
+    {
+      "task_id": "pylint-dev__pylint-7277",
+      "repository": "pylint-dev/pylint",
+      "task_revision": "684a1d6aa0a6791e20078bc524f97c8906332390",
+      "query_index": 5,
+      "quartile": 1,
+      "stage": "debug",
+      "selection_reason": "Ran python reproduce_issue.py; prior tool output begins 'Original sys.path:'.",
+      "input_tokens": 12667,
+      "pilot": false,
+      "message_count": 12,
+      "file": "pylint-dev__pylint-7277.json",
+      "sha256": "20bb6d00e242928862116510cb00f705f435b8abac86698875d7e9d9e14d55a3"
+    },
+    {
+      "task_id": "pydata__xarray-4687",
+      "repository": "pydata/xarray",
+      "task_revision": "d3b6aa6d8b997df115a53c001d00222a0f92f63a",
+      "query_index": 7,
+      "quartile": 2,
+      "stage": "explore",
+      "selection_reason": "Viewed xarray/core/computation.py; the tool returned file contents.",
+      "input_tokens": 15059,
+      "pilot": true,
+      "message_count": 16,
+      "file": "pydata__xarray-4687.json",
+      "sha256": "f682cb271c1e94f8e6ffef496725101ad81c7c971d6b3d030b882e057ba62241"
+    },
+    {
+      "task_id": "pytest-dev__pytest-10081",
+      "repository": "pytest-dev/pytest",
+      "task_revision": "da9a2b584eb7a6c7e924b2621ed0ddaeca0a7bea",
+      "query_index": 7,
+      "quartile": 2,
+      "stage": "explore",
+      "selection_reason": "Viewed src/_pytest/debugging.py; the tool returned file contents.",
+      "input_tokens": 15524,
+      "pilot": false,
+      "message_count": 16,
+      "file": "pytest-dev__pytest-10081.json",
+      "sha256": "48dc1a254b0b256a9073a1079aa94cd066904a124d876d26708e0864291c6a66"
+    },
+    {
+      "task_id": "psf__requests-1921",
+      "repository": "psf/requests",
+      "task_revision": "3c88e520da24ae6f736929a750876e7654accc3d",
+      "query_index": 27,
+      "quartile": 2,
+      "stage": "explore",
+      "selection_reason": "Viewed requests/structures.py; the tool returned file contents.",
+      "input_tokens": 21275,
+      "pilot": false,
+      "message_count": 56,
+      "file": "psf__requests-1921.json",
+      "sha256": "92d764b474792211d7a920bae41859c448b3e352eba45e182cd11b9120a44241"
+    },
+    {
+      "task_id": "sympy__sympy-14248",
+      "repository": "sympy/sympy",
+      "task_revision": "9986b38181cdd556a3f3411e553864f11912244e",
+      "query_index": 10,
+      "quartile": 2,
+      "stage": "explore",
+      "selection_reason": "Viewed sympy/printing/str.py; the tool returned file contents.",
+      "input_tokens": 21818,
+      "pilot": false,
+      "message_count": 22,
+      "file": "sympy__sympy-14248.json",
+      "sha256": "d3edfccd2dad2867cbe891304eff5608d9d68b2431a9fe7cfb12cd86a7bf07eb"
+    },
+    {
+      "task_id": "pytest-dev__pytest-7324",
+      "repository": "pytest-dev/pytest",
+      "task_revision": "19ad5889353c7f5f2b65cc2acd346b7a9e95dfcd",
+      "query_index": 20,
+      "quartile": 2,
+      "stage": "edit",
+      "selection_reason": "str_replace on src/_pytest/mark/expression.py; the editor confirmed the change.",
+      "input_tokens": 15534,
+      "pilot": true,
+      "message_count": 42,
+      "file": "pytest-dev__pytest-7324.json",
+      "sha256": "7a0b5bb1efdd65c10fbb6a65df73587fe0a391320948a9e206d18fab60bcbf92"
+    },
+    {
+      "task_id": "matplotlib__matplotlib-25332",
+      "repository": "matplotlib/matplotlib",
+      "task_revision": "66ba515e671638971bd11a34cff12c107a437e0b",
+      "query_index": 17,
+      "quartile": 2,
+      "stage": "edit",
+      "selection_reason": "str_replace on lib/matplotlib/cbook.py; the editor confirmed the change.",
+      "input_tokens": 16263,
+      "pilot": false,
+      "message_count": 36,
+      "file": "matplotlib__matplotlib-25332.json",
+      "sha256": "98c9f1117adec26c98c26ebe2dd155ecdcdf38945219ab3d076c14ba3df46647"
+    },
+    {
+      "task_id": "pydata__xarray-7233",
+      "repository": "pydata/xarray",
+      "task_revision": "51d37d1be95547059251076b3fadaa317750aab3",
+      "query_index": 15,
+      "quartile": 2,
+      "stage": "edit",
+      "selection_reason": "str_replace on xarray/core/rolling.py; the editor confirmed the change.",
+      "input_tokens": 17120,
+      "pilot": false,
+      "message_count": 32,
+      "file": "pydata__xarray-7233.json",
+      "sha256": "8f9af9eb44f424eef7799a076cdb760977bef0bed0feea66e9655618de81a931"
+    },
+    {
+      "task_id": "sphinx-doc__sphinx-9320",
+      "repository": "sphinx-doc/sphinx",
+      "task_revision": "e05cef574b8f23ab1b57f57e7da6dee509a4e230",
+      "query_index": 12,
+      "quartile": 2,
+      "stage": "edit",
+      "selection_reason": "str_replace on sphinx/cmd/quickstart.py; the editor confirmed the change.",
+      "input_tokens": 13661,
+      "pilot": false,
+      "message_count": 26,
+      "file": "sphinx-doc__sphinx-9320.json",
+      "sha256": "cfed0f5bb8dd7b1a6b3d22b8b1bddcf56bd91f960aa8bf4160aec71e6d62c71d"
+    },
+    {
+      "task_id": "matplotlib__matplotlib-24627",
+      "repository": "matplotlib/matplotlib",
+      "task_revision": "9d22ab09d52d279b125d8770967569de070913b2",
+      "query_index": 33,
+      "quartile": 2,
+      "stage": "debug",
+      "selection_reason": "Ran python reproduce_issue.py; prior tool output begins 'Testing the issue with cla() and clf() not unsetting .axes and .figure attributes'.",
+      "input_tokens": 19417,
+      "pilot": true,
+      "message_count": 68,
+      "file": "matplotlib__matplotlib-24627.json",
+      "sha256": "6daf5d0a7fd1144aac700423520f167affb9f3c94c910bd0c8dface5bbfba6fb"
+    },
+    {
+      "task_id": "psf__requests-6028",
+      "repository": "psf/requests",
+      "task_revision": "0192aac24123735b3eaf9b08df46429bb770c283",
+      "query_index": 16,
+      "quartile": 2,
+      "stage": "debug",
+      "selection_reason": "Ran python test_proxy_detailed.py; prior tool output begins 'Python version: 3.9.20 (main, Oct  3 2024, 07:27:41) '.",
+      "input_tokens": 20776,
+      "pilot": false,
+      "message_count": 34,
+      "file": "psf__requests-6028.json",
+      "sha256": "b8953f3e0ea4dd7b06a901ec876aafa9ea5d65e9173569d3a12047e3b3fcbd64"
+    },
+    {
+      "task_id": "django__django-14017",
+      "repository": "django/django",
+      "task_revision": "466920f6d726eee90d5566e0a9948e92b33a122e",
+      "query_index": 18,
+      "quartile": 2,
+      "stage": "debug",
+      "selection_reason": "Ran python reproduce_issue.py; prior tool output begins 'Testing Exists(...) & Q():'.",
+      "input_tokens": 21521,
+      "pilot": false,
+      "message_count": 38,
+      "file": "django__django-14017.json",
+      "sha256": "a11debd76f333bacde19e025d053d606b0c9fc3ffb46e0d8d0ae0bf23633e1a5"
+    },
+    {
+      "task_id": "pydata__xarray-6992",
+      "repository": "pydata/xarray",
+      "task_revision": "45c0a114e2b7b27b83c9618bc05b36afac82183c",
+      "query_index": 22,
+      "quartile": 2,
+      "stage": "debug",
+      "selection_reason": "Ran python -m pytest xarray/tests/test_dataset.py::TestDataset::test_data_vars_properties -xvs; prior tool output begins '============================= test session starts =============================='.",
+      "input_tokens": 15156,
+      "pilot": false,
+      "message_count": 46,
+      "file": "pydata__xarray-6992.json",
+      "sha256": "78e2b30a55b6aba464bea06d8ec8a82211437d48940a68c060e6db39cac081c4"
+    },
+    {
+      "task_id": "pylint-dev__pylint-6528",
+      "repository": "pylint-dev/pylint",
+      "task_revision": "273a8b25620467c1e5686aa8d2a1dbb8c02c78d0",
+      "query_index": 31,
+      "quartile": 3,
+      "stage": "explore",
+      "selection_reason": "Viewed pylint/lint/pylinter.py; the tool returned file contents.",
+      "input_tokens": 25243,
+      "pilot": true,
+      "message_count": 64,
+      "file": "pylint-dev__pylint-6528.json",
+      "sha256": "3e2bd01235d6ed46756bf0c2a803ee970762d38a897bbe0c16a00234740cc5e5"
+    },
+    {
+      "task_id": "pydata__xarray-3677",
+      "repository": "pydata/xarray",
+      "task_revision": "ef6e6a7b86f8479b9a1fecf15ad5b88a2326b31e",
+      "query_index": 51,
+      "quartile": 3,
+      "stage": "explore",
+      "selection_reason": "Viewed xarray/tests/test_merge.py; the tool returned file contents.",
+      "input_tokens": 30726,
+      "pilot": false,
+      "message_count": 104,
+      "file": "pydata__xarray-3677.json",
+      "sha256": "a9b3c40dc989f90a6d7c04a3c23a2518d865ca2d67bed85b262d20f470d6ceb4"
+    },
+    {
+      "task_id": "scikit-learn__scikit-learn-14629",
+      "repository": "scikit-learn/scikit-learn",
+      "task_revision": "4aded39b5663d943f6a4809abacfa9cae3d7fb6a",
+      "query_index": 37,
+      "quartile": 3,
+      "stage": "explore",
+      "selection_reason": "Viewed sklearn/multioutput.py; the tool returned file contents.",
+      "input_tokens": 22766,
+      "pilot": false,
+      "message_count": 76,
+      "file": "scikit-learn__scikit-learn-14629.json",
+      "sha256": "b3a43c3c9e58ba1d55eb2eb455df90c2190a8cb48e81093fd69b391e8ab17949"
+    },
+    {
+      "task_id": "psf__requests-1724",
+      "repository": "psf/requests",
+      "task_revision": "1ba83c47ce7b177efe90d5f51f7760680f72eda0",
+      "query_index": 21,
+      "quartile": 3,
+      "stage": "explore",
+      "selection_reason": "Viewed requests/sessions.py; the tool returned file contents.",
+      "input_tokens": 22120,
+      "pilot": false,
+      "message_count": 44,
+      "file": "psf__requests-1724.json",
+      "sha256": "a7d6a579f4a6caebedbb71c5566f6ee8afcee27cf8d2cfb0bbc263fb2b85e4c3"
+    },
+    {
+      "task_id": "scikit-learn__scikit-learn-25102",
+      "repository": "scikit-learn/scikit-learn",
+      "task_revision": "f9a1cf072da9d7375d6c2163f68a6038b13b310f",
+      "query_index": 25,
+      "quartile": 3,
+      "stage": "edit",
+      "selection_reason": "str_replace on sklearn/utils/_set_output.py; the editor confirmed the change.",
+      "input_tokens": 26320,
+      "pilot": true,
+      "message_count": 52,
+      "file": "scikit-learn__scikit-learn-25102.json",
+      "sha256": "4f82ac6072b516505df96d80285ef6adc9876f37c69494011630126989628fcf"
+    },
+    {
+      "task_id": "sympy__sympy-12096",
+      "repository": "sympy/sympy",
+      "task_revision": "d7c3045115693e887bcd03599b7ca4650ac5f2cb",
+      "query_index": 28,
+      "quartile": 3,
+      "stage": "edit",
+      "selection_reason": "str_replace on sympy/core/function.py; the editor confirmed the change.",
+      "input_tokens": 24000,
+      "pilot": false,
+      "message_count": 58,
+      "file": "sympy__sympy-12096.json",
+      "sha256": "a01937dfb290cbfeae3764f0fe1b7bf615fe43f657a8e7bf26334c92175259e6"
+    },
+    {
+      "task_id": "sphinx-doc__sphinx-8593",
+      "repository": "sphinx-doc/sphinx",
+      "task_revision": "07983a5a8704ad91ae855218ecbda1c8598200ca",
+      "query_index": 32,
+      "quartile": 3,
+      "stage": "edit",
+      "selection_reason": "str_replace on sphinx/ext/autodoc/__init__.py; the editor confirmed the change.",
+      "input_tokens": 28878,
+      "pilot": false,
+      "message_count": 66,
+      "file": "sphinx-doc__sphinx-8593.json",
+      "sha256": "b13b96817dbad393eb6b1dedd55702ec49fd1a1efcbe142826393ca782bf4a41"
+    },
+    {
+      "task_id": "pydata__xarray-7393",
+      "repository": "pydata/xarray",
+      "task_revision": "41fef6f1352be994cd90056d47440fe9aa4c068f",
+      "query_index": 51,
+      "quartile": 3,
+      "stage": "edit",
+      "selection_reason": "str_replace on xarray/core/indexing.py; the editor confirmed the change.",
+      "input_tokens": 25993,
+      "pilot": false,
+      "message_count": 104,
+      "file": "pydata__xarray-7393.json",
+      "sha256": "4c24ea327d4d0f2ab3de688db32f79919e343e57c1ed8af846820e2da7dc0311"
+    },
+    {
+      "task_id": "pallets__flask-5014",
+      "repository": "pallets/flask",
+      "task_revision": "7ee9ceb71e868944a46e1ff00b506772a53a4f1d",
+      "query_index": 29,
+      "quartile": 3,
+      "stage": "debug",
+      "selection_reason": "Ran python test_none_name.py; prior tool output begins \"✓ None name correctly rejected with TypeError: argument of type 'NoneType' is not iterable\".",
+      "input_tokens": 22444,
+      "pilot": true,
+      "message_count": 60,
+      "file": "pallets__flask-5014.json",
+      "sha256": "565b2972383baa9794ee3a34b3f80290bc62c0c9d1d488a6eb1157a3272e0d87"
+    },
+    {
+      "task_id": "django__django-14311",
+      "repository": "django/django",
+      "task_revision": "5a8e8f80bb82a867eab7e4d9d099f21d0a976d22",
+      "query_index": 25,
+      "quartile": 3,
+      "stage": "debug",
+      "selection_reason": "Ran python tests/runtests.py utils_tests.test_autoreload -v 2; prior tool output begins \"Testing against Django installed in '/testbed/django' with up to 8 processes\".",
+      "input_tokens": 22846,
+      "pilot": false,
+      "message_count": 52,
+      "file": "django__django-14311.json",
+      "sha256": "11f78d3f12b70b4c50f82b31e12e6480905c02b86de5d444188ea555aa3fb45d"
+    },
+    {
+      "task_id": "sympy__sympy-15875",
+      "repository": "sympy/sympy",
+      "task_revision": "b506169ad727ee39cb3d60c8b3ff5e315d443d8e",
+      "query_index": 52,
+      "quartile": 3,
+      "stage": "debug",
+      "selection_reason": "Ran python reproduce_issue.py; prior tool output begins 'Expression: -2*I + (1 + I)**2'.",
+      "input_tokens": 31323,
+      "pilot": false,
+      "message_count": 106,
+      "file": "sympy__sympy-15875.json",
+      "sha256": "07e5eba07e0b2be9fff3ae62a12a8a2d54ef6c605dbffbfade614276b796ac4f"
+    },
+    {
+      "task_id": "astropy__astropy-7166",
+      "repository": "astropy/astropy",
+      "task_revision": "26d147868f8a891a6009a25cd6a8576d2e1bd747",
+      "query_index": 29,
+      "quartile": 3,
+      "stage": "debug",
+      "selection_reason": "Ran python test_edge_cases.py; prior tool output begins '/testbed/astropy/config/configuration.py:536: ConfigurationMissingWarning: Configuration defaults will be used'.",
+      "input_tokens": 22607,
+      "pilot": false,
+      "message_count": 60,
+      "file": "astropy__astropy-7166.json",
+      "sha256": "8442e130b79351547f11ee535411c6e814ffa0fb0526830a906a1345e2cb8a09"
+    },
+    {
+      "task_id": "sympy__sympy-13091",
+      "repository": "sympy/sympy",
+      "task_revision": "d1320814eda6549996190618a21eaf212cfd4d1e",
+      "query_index": 77,
+      "quartile": 4,
+      "stage": "explore",
+      "selection_reason": "Viewed sympy/core/numbers.py; the tool returned file contents.",
+      "input_tokens": 38575,
+      "pilot": true,
+      "message_count": 156,
+      "file": "sympy__sympy-13091.json",
+      "sha256": "c693c5c7f80e9184e12f14b6e8961a5316b0e3b7cdf86bc3d38f9247bca15411"
+    },
+    {
+      "task_id": "sphinx-doc__sphinx-11445",
+      "repository": "sphinx-doc/sphinx",
+      "task_revision": "71db08c05197545944949d5aa76cd340e7143627",
+      "query_index": 38,
+      "quartile": 4,
+      "stage": "explore",
+      "selection_reason": "Viewed tests/test_util_rst.py; the tool returned file contents.",
+      "input_tokens": 34038,
+      "pilot": false,
+      "message_count": 78,
+      "file": "sphinx-doc__sphinx-11445.json",
+      "sha256": "4f4a816fc1324d81b35dd017045d9571a0cdaf10d79b9246dfac3faabdef51fd"
+    },
+    {
+      "task_id": "pylint-dev__pylint-4551",
+      "repository": "pylint-dev/pylint",
+      "task_revision": "99589b08de8c5a2c6cc61e13a37420a868c80599",
+      "query_index": 46,
+      "quartile": 4,
+      "stage": "explore",
+      "selection_reason": "Viewed classes.dot; the tool returned file contents.",
+      "input_tokens": 32495,
+      "pilot": false,
+      "message_count": 94,
+      "file": "pylint-dev__pylint-4551.json",
+      "sha256": "4cf358e4d977db67b08f543e2c7b29782f1cdf405e4e9d47c1f767dfc523ee38"
+    },
+    {
+      "task_id": "astropy__astropy-13977",
+      "repository": "astropy/astropy",
+      "task_revision": "5250b2442501e6c671c6b380536f1edb352602d1",
+      "query_index": 51,
+      "quartile": 4,
+      "stage": "explore",
+      "selection_reason": "Viewed astropy/units/quantity_helper/converters.py; the tool returned file contents.",
+      "input_tokens": 61256,
+      "pilot": false,
+      "message_count": 104,
+      "file": "astropy__astropy-13977.json",
+      "sha256": "902da8bb6e1637ed8da9524b0fed506fd89dd8c83ebd803b614e031e18fefc91"
+    },
+    {
+      "task_id": "sphinx-doc__sphinx-7590",
+      "repository": "sphinx-doc/sphinx",
+      "task_revision": "2e506c5ab457cba743bb47eb5b8c8eb9dd51d23d",
+      "query_index": 50,
+      "quartile": 4,
+      "stage": "edit",
+      "selection_reason": "str_replace on sphinx/domains/cpp.py; the editor confirmed the change.",
+      "input_tokens": 63564,
+      "pilot": true,
+      "message_count": 102,
+      "file": "sphinx-doc__sphinx-7590.json",
+      "sha256": "16c2cb542d5ca4df3471afdbbf8a97aab63098a747d449b69cb461961462004f"
+    },
+    {
+      "task_id": "django__django-11138",
+      "repository": "django/django",
+      "task_revision": "c84b91b7603e488f7171fdff8f08368ef3d6b856",
+      "query_index": 33,
+      "quartile": 4,
+      "stage": "edit",
+      "selection_reason": "str_replace on django/db/backends/oracle/operations.py; the editor confirmed the change.",
+      "input_tokens": 33979,
+      "pilot": false,
+      "message_count": 68,
+      "file": "django__django-11138.json",
+      "sha256": "7e155e11a3e6f54bbb6b7624e130409a1f784baad8e8bfa08f83175e81aa305a"
+    },
+    {
+      "task_id": "sympy__sympy-13551",
+      "repository": "sympy/sympy",
+      "task_revision": "9476425b9e34363c2d9ac38e9f04aa75ae54a775",
+      "query_index": 38,
+      "quartile": 4,
+      "stage": "edit",
+      "selection_reason": "str_replace on sympy/concrete/products.py; the editor confirmed the change.",
+      "input_tokens": 37820,
+      "pilot": false,
+      "message_count": 78,
+      "file": "sympy__sympy-13551.json",
+      "sha256": "39a46f758fe8da2c079000f158bc74f2e257f874721ee8acdd65bb889a8361eb"
+    },
+    {
+      "task_id": "matplotlib__matplotlib-23299",
+      "repository": "matplotlib/matplotlib",
+      "task_revision": "3eadeacc06c9f2ddcdac6ae39819faa9fbee9e39",
+      "query_index": 54,
+      "quartile": 4,
+      "stage": "edit",
+      "selection_reason": "str_replace on lib/matplotlib/__init__.py; the editor confirmed the change.",
+      "input_tokens": 35330,
+      "pilot": false,
+      "message_count": 110,
+      "file": "matplotlib__matplotlib-23299.json",
+      "sha256": "c65711a069f16488c85903033886364c5e217bd67c72686e85491a471feadddd"
+    },
+    {
+      "task_id": "psf__requests-1142",
+      "repository": "psf/requests",
+      "task_revision": "22623bd8c265b78b161542663ee980738441c307",
+      "query_index": 39,
+      "quartile": 4,
+      "stage": "debug",
+      "selection_reason": "Ran python debug_stream_detection.py; prior tool output begins 'data=None                 | iter=False | !str=True | !dict=True | stream=False | len=None'.",
+      "input_tokens": 47081,
+      "pilot": true,
+      "message_count": 80,
+      "file": "psf__requests-1142.json",
+      "sha256": "e65d796d9166fd316b4f47133aeb0088ae0e0f5852ae8f71fecc529a7e8f6695"
+    },
+    {
+      "task_id": "pylint-dev__pylint-4970",
+      "repository": "pylint-dev/pylint",
+      "task_revision": "40cc2ffd7887959157aaf469e09585ec2be7f528",
+      "query_index": 31,
+      "quartile": 4,
+      "stage": "debug",
+      "selection_reason": "Ran python test_similar_checker.py; prior tool output begins '=== Testing SimilarChecker with min-similarity-lines=0 ==='.",
+      "input_tokens": 40819,
+      "pilot": false,
+      "message_count": 64,
+      "file": "pylint-dev__pylint-4970.json",
+      "sha256": "ae709780e80085a4ad68243d5f4248306b7b0658ac552faf361b1f3aefdda8a8"
+    },
+    {
+      "task_id": "astropy__astropy-14096",
+      "repository": "astropy/astropy",
+      "task_revision": "1a4462d72eb03f30dc83a879b1dd57aac8b2c18b",
+      "query_index": 31,
+      "quartile": 4,
+      "stage": "debug",
+      "selection_reason": "Ran python -m pytest astropy/coordinates/tests/test_sky_coord.py::test_frame_attr_getattr -v; prior tool output begins '<frozen importlib._bootstrap>:228: RuntimeWarning: numpy.ndarray size changed, may indicate binary incompatibi'.",
+      "input_tokens": 39629,
+      "pilot": false,
+      "message_count": 64,
+      "file": "astropy__astropy-14096.json",
+      "sha256": "a6072b2af41cf25707e907561aa142273685bce44ae49417fab49dafef12a588"
+    },
+    {
+      "task_id": "sphinx-doc__sphinx-7748",
+      "repository": "sphinx-doc/sphinx",
+      "task_revision": "9988d5ce267bf0df4791770b469431b1fb00dcdd",
+      "query_index": 57,
+      "quartile": 4,
+      "stage": "debug",
+      "selection_reason": "Ran python -m pytest tests/test_ext_autodoc_configs.py -xvs -k \"docstring_signature\"; prior tool output begins '============================= test session starts =============================='.",
+      "input_tokens": 51177,
+      "pilot": false,
+      "message_count": 116,
+      "file": "sphinx-doc__sphinx-7748.json",
+      "sha256": "d394a84b0184976cadf9b5aa66094086342620ff18212864fc3a9493e17e7c9e"
+    }
+  ]
+}

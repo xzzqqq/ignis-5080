@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 390" width="840" height="390" role="img" aria-labelledby="chart-title chart-desc">
+  <title id="chart-title">Ignis-5080 vs Upstream Ignis Decode Throughput on RTX 5080</title>
+  <desc id="chart-desc">Grouped bar chart comparing per-task median decode throughput (tokens/s) of Upstream Ignis (e25780e2) and Ignis-5080 (8495f3a0) across four input-length quartiles and all 48 turns of a SWE-bench Verified subset on one RTX 5080 16 GB.</desc>
+  <style>
+    text {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    }
+    .title { font-size: 16px; font-weight: 700; fill: #0f172a; }
+    .subtitle { font-size: 11.5px; fill: #475569; }
+    .legend { font-size: 11.5px; fill: #334155; font-weight: 500; }
+    .axis-label { font-size: 11px; fill: #64748b; }
+    .axis-title { font-size: 11px; fill: #475569; font-weight: 600; }
+    .cat-main { font-size: 12px; font-weight: 700; fill: #0f172a; }
+    .cat-sub { font-size: 10.5px; fill: #64748b; }
+    .val-a { font-size: 11px; font-weight: 600; fill: #475569; }
+    .val-b { font-size: 11.5px; font-weight: 700; fill: #15803d; }
+    .pill-text { font-size: 10.5px; font-weight: 700; fill: #166534; }
+    .pill-all-text { font-size: 11px; font-weight: 700; fill: #ffffff; }
+    .footnote { font-size: 10.5px; fill: #64748b; }
+  </style>
+
+  <!-- Card background -->
+  <rect x="0.5" y="0.5" width="839" height="389" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1"/>
+
+  <!-- Header -->
+  <text x="28" y="34" class="title">Qwen3.8-27B Decode Throughput on RTX 5080 (16 GB)</text>
+  <text x="28" y="53" class="subtitle">48-turn SWE-bench Verified subset (C1, greedy, xhigh reasoning, DFlash2) · per-task median tok/s</text>
+
+  <!-- Legend -->
+  <rect x="502" y="23" width="12" height="12" rx="2.5" fill="#94a3b8"/>
+  <text x="520" y="33" class="legend">Upstream base (e25780e2)</text>
+  <rect x="708" y="23" width="12" height="12" rx="2.5" fill="#16a34a"/>
+  <text x="726" y="33" class="legend">Ignis-5080</text>
+
+  <!-- Subtle highlight band for "All 48" -->
+  <rect x="656" y="68" width="146" height="238" rx="6" fill="#f8fafc"/>
+  <line x1="646" y1="68" x2="646" y2="312" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+  <!-- Plot area: x=68..808, y=106..306 (height=200px, max=320 tok/s -> 0.625 px per tok/s) -->
+  <g stroke="#e2e8f0" stroke-width="1">
+    <line x1="68" y1="306" x2="808" y2="306" stroke="#cbd5e1"/>
+    <line x1="68" y1="256" x2="808" y2="256" stroke-dasharray="3,3"/>
+    <line x1="68" y1="206" x2="808" y2="206" stroke-dasharray="3,3"/>
+    <line x1="68" y1="156" x2="808" y2="156" stroke-dasharray="3,3"/>
+    <line x1="68" y1="106" x2="808" y2="106" stroke-dasharray="3,3"/>
+  </g>
+  <g text-anchor="end" class="axis-label">
+    <text x="58" y="310">0</text>
+    <text x="58" y="260">80</text>
+    <text x="58" y="210">160</text>
+    <text x="58" y="160">240</text>
+    <text x="58" y="110">320</text>
+  </g>
+  <text x="20" y="206" transform="rotate(-90 20 206)" text-anchor="middle" class="axis-title">Decode (tok/s)</text>
+
+  <!-- Group 1: Q1 (3.0K-13.3K) center=140 | A=210.76 (h=131.7, y=174.3), B=283.89 (h=177.4, y=128.6) -->
+  <g>
+    <rect x="115" y="75" width="50" height="20" rx="10" fill="#dcfce7"/>
+    <text x="140" y="88.5" text-anchor="middle" class="pill-text">1.30×</text>
+    <rect x="96" y="174.3" width="40" height="131.7" rx="3" fill="#94a3b8"/>
+    <text x="116" y="167.5" text-anchor="middle" class="val-a">210.8</text>
+    <rect x="144" y="128.6" width="40" height="177.4" rx="3" fill="#16a34a"/>
+    <text x="164" y="121.8" text-anchor="middle" class="val-b">283.9</text>
+    <text x="140" y="326" text-anchor="middle" class="cat-main">Q1</text>
+    <text x="140" y="341" text-anchor="middle" class="cat-sub">3.0K–13.3K</text>
+  </g>
+
+  <!-- Group 2: Q2 (13.7K-21.8K) center=282 | A=205.25 (h=128.3, y=177.7), B=270.30 (h=168.9, y=137.1) -->
+  <g>
+    <rect x="257" y="75" width="50" height="20" rx="10" fill="#dcfce7"/>
+    <text x="282" y="88.5" text-anchor="middle" class="pill-text">1.29×</text>
+    <rect x="238" y="177.7" width="40" height="128.3" rx="3" fill="#94a3b8"/>
+    <text x="258" y="170.9" text-anchor="middle" class="val-a">205.2</text>
+    <rect x="286" y="137.1" width="40" height="168.9" rx="3" fill="#16a34a"/>
+    <text x="306" y="130.3" text-anchor="middle" class="val-b">270.3</text>
+    <text x="282" y="326" text-anchor="middle" class="cat-main">Q2</text>
+    <text x="282" y="341" text-anchor="middle" class="cat-sub">13.7K–21.8K</text>
+  </g>
+
+  <!-- Group 3: Q3 (22.1K-31.3K) center=424 | A=173.73 (h=108.6, y=197.4), B=231.59 (h=144.7, y=161.3) -->
+  <g>
+    <rect x="399" y="75" width="50" height="20" rx="10" fill="#dcfce7"/>
+    <text x="424" y="88.5" text-anchor="middle" class="pill-text">1.36×</text>
+    <rect x="380" y="197.4" width="40" height="108.6" rx="3" fill="#94a3b8"/>
+    <text x="400" y="190.6" text-anchor="middle" class="val-a">173.7</text>
+    <rect x="428" y="161.3" width="40" height="144.7" rx="3" fill="#16a34a"/>
+    <text x="448" y="154.5" text-anchor="middle" class="val-b">231.6</text>
+    <text x="424" y="326" text-anchor="middle" class="cat-main">Q3</text>
+    <text x="424" y="341" text-anchor="middle" class="cat-sub">22.1K–31.3K</text>
+  </g>
+
+  <!-- Group 4: Q4 (32.5K-63.6K) center=566 | A=158.63 (h=99.1, y=206.9), B=255.50 (h=159.7, y=146.3) -->
+  <g>
+    <rect x="541" y="75" width="50" height="20" rx="10" fill="#dcfce7"/>
+    <text x="566" y="88.5" text-anchor="middle" class="pill-text">1.47×</text>
+    <rect x="522" y="206.9" width="40" height="99.1" rx="3" fill="#94a3b8"/>
+    <text x="542" y="200.1" text-anchor="middle" class="val-a">158.6</text>
+    <rect x="570" y="146.3" width="40" height="159.7" rx="3" fill="#16a34a"/>
+    <text x="590" y="139.5" text-anchor="middle" class="val-b">255.5</text>
+    <text x="566" y="326" text-anchor="middle" class="cat-main">Q4</text>
+    <text x="566" y="341" text-anchor="middle" class="cat-sub">32.5K–63.6K</text>
+  </g>
+
+  <!-- Group 5: All 48 center=729 | A=191.34 (h=119.6, y=186.4), B=261.71 (h=163.6, y=142.4) -->
+  <g>
+    <rect x="699" y="74.5" width="60" height="21" rx="10.5" fill="#15803d"/>
+    <text x="729" y="88.5" text-anchor="middle" class="pill-all-text">1.350×</text>
+    <rect x="685" y="186.4" width="40" height="119.6" rx="3" fill="#94a3b8"/>
+    <text x="705" y="179.6" text-anchor="middle" class="val-a">191.3</text>
+    <rect x="733" y="142.4" width="40" height="163.6" rx="3" fill="#16a34a"/>
+    <text x="753" y="135.6" text-anchor="middle" class="val-b">261.7</text>
+    <text x="729" y="326" text-anchor="middle" class="cat-main">All 48</text>
+    <text x="729" y="341" text-anchor="middle" class="cat-sub">3.0K–63.6K</text>
+  </g>
+
+  <!-- Footnote -->
+  <text x="28" y="371" class="footnote">Bars show group medians; badges show paired geometric-mean speedup (95% CI: 1.301–1.399×). Round latency: 25.98 → 19.24 ms.</text>
+</svg>

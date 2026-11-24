@@ -1,0 +1,236 @@
+{
+  "schema": "ignis-small-card/1",
+  "bench_version": "0.9.5",
+  "started_at": "2026-11-23T15:25:05Z",
+  "finished_at": "2026-11-23T15:25:10Z",
+  "endpoint": "http://127.0.0.1:8000",
+  "card": {
+    "name": "NVIDIA GeForce RTX 5080",
+    "vram_total_mib": 16303,
+    "pcie_gen_current": 5,
+    "pcie_width_current": 16,
+    "pcie_gen_max": 5,
+    "pcie_width_max": 16
+  },
+  "server": {
+    "version": "0.9.5",
+    "model_id": "qwen3.8-27b-16g",
+    "family": "qwen38",
+    "profile": "rtx50-16gb",
+    "status": "serving",
+    "max_model_len": 139264
+  },
+  "plan": {
+    "budget_bytes": 15340535808,
+    "reserved_bytes_by_line": {
+      "cuda_context": 452595712,
+      "decode_graph": 70964760,
+      "drafter_round": 44673544,
+      "hq_residual_window": 71303296,
+      "lane_state": 393760768,
+      "media_embedding": 0,
+      "residual": 124474800,
+      "retained_slots": 0,
+      "sampling": 1156768,
+      "trellis_workspace": 36225280,
+      "verify_round": 37850544,
+      "weights": 10907958020,
+      "workspace": 333136640
+    },
+    "kv_pool_pages": 2429,
+    "kv_page_bytes": 1179648
+  },
+  "config": {
+    "model.adapt_context_step": {
+      "value": 65536,
+      "source": "default",
+      "spelling": null
+    },
+    "model.enable_thinking": {
+      "value": true,
+      "source": "default",
+      "spelling": null
+    },
+    "model.exception_weights": {
+      "value": "bf16",
+      "source": "default",
+      "spelling": null
+    },
+    "model.host_margin_bytes": {
+      "value": "4G",
+      "source": "default",
+      "spelling": null
+    },
+    "model.kv_format": {
+      "value": "nvfp4",
+      "source": "profile",
+      "spelling": "rtx50-16gb"
+    },
+    "model.loop_guard": {
+      "value": "rewind",
+      "source": "default",
+      "spelling": null
+    },
+    "model.max_context": {
+      "value": 139264,
+      "source": "profile",
+      "spelling": "rtx50-16gb"
+    },
+    "model.prefill_attention": {
+      "value": "fp8",
+      "source": "default",
+      "spelling": null
+    },
+    "model.prefill_chunk": {
+      "value": 1024,
+      "source": "default",
+      "spelling": null
+    },
+    "model.rope_scaling": {
+      "value": "auto",
+      "source": "default",
+      "spelling": null
+    },
+    "reuse.kv_host_pool_bytes": {
+      "value": "8G",
+      "source": "flag",
+      "spelling": "--reuse-kv-host-pool-bytes"
+    },
+    "spec.backend": {
+      "value": "dflash2",
+      "source": "flag",
+      "spelling": "--spec-backend"
+    },
+    "spec.decode_lanes": {
+      "value": 2,
+      "source": "profile",
+      "spelling": "rtx50-16gb"
+    },
+    "spec.draft_head": {
+      "value": "auto",
+      "source": "profile",
+      "spelling": "rtx50-16gb"
+    },
+    "spec.draft_tokens": {
+      "value": 7,
+      "source": "flag",
+      "spelling": "--spec-draft-tokens"
+    },
+    "vram.adapt_spare_tokens": {
+      "value": 8192,
+      "source": "profile",
+      "spelling": "rtx50-16gb"
+    },
+    "vram.allow_oversubscription": {
+      "value": false,
+      "source": "default",
+      "spelling": null
+    },
+    "vram.budget_bytes": {
+      "value": null,
+      "source": "default",
+      "spelling": null
+    },
+    "vram.headroom_bytes": {
+      "value": "1200M",
+      "source": "profile",
+      "spelling": "rtx50-16gb"
+    },
+    "vram.kv_pool_bytes": {
+      "value": null,
+      "source": "default",
+      "spelling": null
+    }
+  },
+  "adaptation": {
+    "configured_max_context": 139264,
+    "running_max_model_len": 139264,
+    "configured_decode_lanes": 2,
+    "running_decode_lanes": 2,
+    "adapted": "",
+    "lowered": false
+  },
+  "decode": {
+    "coding": {
+      "max_tokens": 256,
+      "samples": [
+        {
+          "prompt": "rust-hello",
+          "prompt_tokens": 31,
+          "completion_tokens": 19,
+          "ttft_ms": 49.87216,
+          "decode_ms": 53.366468000000005,
+          "tokens_per_s": 337.2904498757534
+        },
+        {
+          "prompt": "rust-sort",
+          "prompt_tokens": 40,
+          "completion_tokens": 122,
+          "ttft_ms": 62.97800000000001,
+          "decode_ms": 430.949744,
+          "tokens_per_s": 280.7751986969506
+        },
+        {
+          "prompt": "math-greedy",
+          "prompt_tokens": 36,
+          "completion_tokens": 99,
+          "ttft_ms": 63.895378,
+          "decode_ms": 251.163235,
+          "tokens_per_s": 390.18449495603926
+        },
+        {
+          "prompt": "explain-reverse",
+          "prompt_tokens": 35,
+          "completion_tokens": 17,
+          "ttft_ms": 62.170017,
+          "decode_ms": 35.604467,
+          "tokens_per_s": 449.38181492788533
+        }
+      ],
+      "errors": [],
+      "median_tokens_per_s": 363.7374724158963,
+      "pooled_tokens_per_s": 328.1095551423992
+    },
+    "agent": {
+      "max_tokens": 256,
+      "samples": [
+        {
+          "prompt": "agent-fix-test",
+          "prompt_tokens": 1160,
+          "completion_tokens": 256,
+          "ttft_ms": 654.2368680000001,
+          "decode_ms": 781.392356,
+          "tokens_per_s": 326.3405356373873
+        },
+        {
+          "prompt": "agent-refactor",
+          "prompt_tokens": 1138,
+          "completion_tokens": 256,
+          "ttft_ms": 350.99949200000003,
+          "decode_ms": 944.18042,
+          "tokens_per_s": 270.0755010361261
+        },
+        {
+          "prompt": "agent-add-feature",
+          "prompt_tokens": 1096,
+          "completion_tokens": 74,
+          "ttft_ms": 323.05134499999997,
+          "decode_ms": 200.48017500000003,
+          "tokens_per_s": 364.125779519097
+        }
+      ],
+      "errors": [],
+      "median_tokens_per_s": 326.3405356373873,
+      "pooled_tokens_per_s": 302.69157433979603
+    },
+    "speculative": {
+      "rounds": 159,
+      "drafted_tokens": 1097,
+      "accepted_tokens": 705,
+      "acceptance": 0.6426618049225159,
+      "accepted_per_round": 4.433962264150943
+    }
+  },
+  "ttft": [],
+  "notes": []
+}
